@@ -8,6 +8,7 @@ restart never treats the mere presence of a partial output as success.
 from __future__ import annotations
 
 import contextlib
+import errno
 import functools
 import hashlib
 import json
@@ -49,6 +50,7 @@ from .crf_search import (
     CrfSearchError,
     CrfSearchOutcome,
     STATUS_MIN_CRF,
+    STATUS_UNREACHABLE,
     SampleWindow,
     SizeSearch,
     plan_sample_windows,
@@ -443,6 +445,10 @@ COMPARISON_FRAME_PROBE_TIMEOUT_SECONDS = 300
 COMPARISON_DEADLINE_SECONDS = 1800
 _REFERENCE_PIXELS = 1920 * 1080
 MAX_COMPARISON_BUDGET_SCALE = 4
+# A comparison that runs out of time is retried with these multiples of its
+# budgets before the job asks for review: a slow disk or a busy host is far
+# more common than a hung decoder, and finished pairs are kept between runs.
+COMPARISON_RETRY_TIME_SCALES: tuple[int, ...] = (1, 2, 4)
 
 
 def comparison_budget_scale(width: int | None, height: int | None) -> int:
@@ -2641,6 +2647,24 @@ def _sampled_video_metric_errors(
 UPLOAD_RETRY_DELAYS: tuple[float, ...] = (30, 60, 120, 300, 600, 900)
 
 
+# Waits before a stage is run again after a passing storage or network error
+# (a NAS or SMB share that drops for a moment); finished checkpoints are kept.
+IO_RETRY_DELAYS: tuple[float, ...] = (60, 300, 900)
+_TRANSIENT_ERRNOS = frozenset(
+    getattr(errno, name)
+    for name in (
+        "EIO", "ESTALE", "ETIMEDOUT", "EAGAIN", "EBUSY", "EINTR", "ENOTCONN",
+        "ECONNRESET", "ECONNABORTED", "EHOSTDOWN", "EHOSTUNREACH", "ENETDOWN",
+        "ENETUNREACH", "ENETRESET", "EREMOTEIO",
+    )
+    if hasattr(errno, name)
+)
+
+
+def _transient_os_error(exc: OSError) -> bool:
+    return exc.errno in _TRANSIENT_ERRNOS
+
+
 def _transient_upload_error(exc: ImageUploadError) -> bool:
     """Whether the same upload may succeed a little later.
 
@@ -2697,6 +2721,8 @@ class PipelineWorker:
         self.stop_requested = stop_requested or (lambda: False)
         # Mutable for tests, like ``upload_client_factory``.
         self.upload_retry_delays: tuple[float, ...] = UPLOAD_RETRY_DELAYS
+        self._comparison_time_scale = 1
+        self.io_retry_delays: tuple[float, ...] = IO_RETRY_DELAYS
         self._sleep: Callable[[float], None] = time.sleep
         self._runners: dict[str, Runner] = {}
         self._lives: dict[str, LiveProgress] = {}
@@ -2879,11 +2905,90 @@ class PipelineWorker:
                 self._qc(job, paths)
         elif job.state is JobState.COMPARISON:
             with self._step(paths, "comparison", ("Összehasonlítás", "Comparison")):
-                self._comparison(job, paths)
+                self._comparison_with_retries(job, paths)
         elif job.state is JobState.UPLOADING:
             with self._step(paths, "upload", ("Képfeltöltés és lezárás", "Image upload and finalization")):
                 self._upload_with_retries(job, paths)
         return self.database.get_job(job.id)
+
+    def _process_stage_with_io_retries(self, job: Job) -> Job:
+        """One stage; a passing storage or network error runs it again.
+
+        Stages resume from their checkpoints, so a retry repeats only the
+        unfinished part.  Other errors, and the last failed attempt, reach the
+        usual failure handling.
+        """
+
+        delays = tuple(self.io_retry_delays)
+        for attempt in range(1, len(delays) + 2):
+            try:
+                return self.process_one_stage(job)
+            except OSError as exc:
+                if attempt > len(delays) or not _transient_os_error(exc):
+                    raise
+                delay = delays[attempt - 1]
+                detail = sanitize_text(str(exc)).strip()[:400] or type(exc).__name__
+                LOG.warning(
+                    "job %s stage %s hit a passing I/O error (%s); retrying in %g s",
+                    job.id,
+                    job.state.value,
+                    detail,
+                    delay,
+                )
+                self.database.add_event(
+                    EventCreate(
+                        job_id=job.id,
+                        kind="worker.io-retry",
+                        message=(
+                            f"a storage or network error interrupted the {job.state.value} "
+                            f"stage; retrying automatically in {delay:g} s"
+                        ),
+                        payload={"attempt": attempt, "delay_seconds": delay, "detail": detail},
+                    )
+                )
+                self._wait_before_upload_retry(job.id, delay)
+                job = self.database.get_job(job.id)
+        raise AssertionError("unreachable")
+
+    def _comparison_with_retries(self, job: Job, paths: JobPaths) -> None:
+        """Run the comparison; a timeout is retried with longer budgets."""
+
+        scales = tuple(COMPARISON_RETRY_TIME_SCALES) or (1,)
+        try:
+            for attempt, scale in enumerate(scales, start=1):
+                self._comparison_time_scale = scale
+                try:
+                    self._comparison(job, paths)
+                    return
+                except subprocess.TimeoutExpired as exc:
+                    if attempt == len(scales):
+                        raise
+                    self._stop_at_operator_boundary(job.id)
+                    if self.stop_requested():
+                        raise ProcessInterrupted("worker shutdown before a comparison retry") from exc
+                    LOG.warning(
+                        "job %s comparison ran out of time (%s); retrying with %dx budgets",
+                        job.id,
+                        exc.timeout,
+                        scales[attempt],
+                    )
+                    self.database.add_event(
+                        EventCreate(
+                            job_id=job.id,
+                            kind="worker.comparison-retry",
+                            message=(
+                                "comparison ran out of time; retrying automatically "
+                                f"with {scales[attempt]}x time budgets"
+                            ),
+                            payload={
+                                "attempt": attempt,
+                                "time_scale": scales[attempt],
+                                "timeout_seconds": exc.timeout,
+                            },
+                        )
+                    )
+        finally:
+            self._comparison_time_scale = 1
 
     def _upload_with_retries(self, job: Job, paths: JobPaths) -> None:
         """Upload and finalise; a passing host error is retried automatically.
@@ -2967,7 +3072,7 @@ class PipelineWorker:
                 return job
             try:
                 before = job.state
-                job = self.process_one_stage(job)
+                job = self._process_stage_with_io_retries(job)
                 if job.control_state is JobControlState.PAUSED:
                     return job
                 if job.state is before:
@@ -5165,6 +5270,18 @@ class PipelineWorker:
             )
 
         outcome = search.outcome()
+        if not outcome.usable and outcome.probes:
+            # The target is out of reach within the allowed range: encode at
+            # the end of the range nearest to it (the best measured quality,
+            # or the smallest measured size) instead of stopping the queue.
+            nearest = (
+                max(outcome.probes, key=lambda item: item.crf)
+                if size_mode
+                else max(outcome.probes, key=lambda item: (item.score, -item.crf))
+            )
+            outcome = replace(
+                outcome, chosen_crf=nearest.crf, chosen_score=nearest.score
+            )
         atomic_write_json(
             report,
             {
@@ -5220,6 +5337,14 @@ class PipelineWorker:
                 message += (
                     "; the search ended before a CRF closer to the target was found"
                 )
+        if outcome.status == STATUS_UNREACHABLE:
+            message += (
+                f"; the {'size' if size_mode else 'VMAF'} target is out of reach within "
+                f"CRF {config.min_crf:g}-{config.max_crf:g}, so the nearest measured "
+                "CRF is used"
+            )
+        elif size_mode:
+            pass
         elif outcome.status == STATUS_MAX_CRF:
             message += (
                 f"; the VMAF target {config.target_vmaf:g} is met even at the "
@@ -7702,17 +7827,20 @@ class PipelineWorker:
             comparison_base.width if comparison_base else None,
             comparison_base.height if comparison_base else None,
         )
-        comparison_deadline = time.monotonic() + COMPARISON_DEADLINE_SECONDS * budget_scale
+        time_scale = self._comparison_time_scale
+        deadline_seconds = COMPARISON_DEADLINE_SECONDS * budget_scale * time_scale
+        comparison_deadline = time.monotonic() + deadline_seconds
         probe_limit = COMPARISON_FRAME_PROBE_TIMEOUT_SECONDS * budget_scale
 
         def remaining_timeout(per_command_limit: float) -> float:
             remaining = comparison_deadline - time.monotonic()
             if remaining <= 1:
-                raise ReviewRequired(
-                    "comparison exceeded its time budget "
-                    f"({COMPARISON_DEADLINE_SECONDS * budget_scale // 60} minutes)"
+                # The same path as a command timeout: retried with a longer
+                # budget, then a resumable review.
+                raise subprocess.TimeoutExpired(
+                    ["comparison"], deadline_seconds
                 )
-            return max(1.0, min(per_command_limit, remaining))
+            return max(1.0, min(per_command_limit * time_scale, remaining))
 
         script_sha256 = sha256_file(paths.script)
         reference_sha256 = _recorded_output_sha256(

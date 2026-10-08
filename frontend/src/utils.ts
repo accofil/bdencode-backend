@@ -213,6 +213,8 @@ export function formatStatusMessage(message: string | null, fallback: string): s
   }
   const probe = /^CRF (\S+) scored VMAF (\S+)$/.exec(message);
   if (probe) return t(`CRF ${probe[1]} próba: VMAF ${probe[2]}`, `CRF ${probe[1]} probe: VMAF ${probe[2]}`);
+  const clamped = /^automatic CRF search selected CRF (\S+); the (size|VMAF) target is out of reach within CRF (\S+), so the nearest measured CRF is used$/.exec(message);
+  if (clamped) return t(`Az automatikus CRF-keresés a CRF ${clamped[1]} értéket választotta: a ${clamped[2] === "size" ? "méretcél" : "VMAF-cél"} a CRF ${clamped[3]} tartományban nem érhető el, ezért a hozzá legközelebbi mért értékkel kódol`, `The automatic CRF search chose CRF ${clamped[1]}: the ${clamped[2]} target is out of reach within CRF ${clamped[3]}, so the nearest measured CRF is used`);
   const chosen = /^automatic CRF search selected CRF (\S+)$/.exec(message);
   if (chosen) return t(`Az automatikus CRF-keresés a CRF ${chosen[1]} értéket választotta`, `The automatic CRF search chose CRF ${chosen[1]}`);
   const verified = /^(hdr10plus|dolby_vision) metadata verified for (\d+) frames$/.exec(message);
@@ -235,6 +237,10 @@ export function formatStatusMessage(message: string | null, fallback: string): s
   }
   const reducedI = /^comparison uses (\d+) I pairs: too few source and encode I-frames coincide in the sample windows$/.exec(message);
   if (reducedI) return t(`Az összehasonlítás ${reducedI[1]} I-képpárt használ: a mintaablakokban kevés helyen esik egybe a forrás és a kódolás I-képkockája (a hiányzó helyekre P- és B-párok kerültek).`, `The comparison uses ${reducedI[1]} I pairs: few source and encode I-frames coincide in the sample windows (P and B pairs fill the rest).`);
+  const ioRetry = /^a storage or network error interrupted the ([A-Z_]+) stage; retrying automatically in ([\d.]+) s$/.exec(message);
+  if (ioRetry) return t(`Tárhely- vagy hálózati hiba szakította meg a(z) ${stateLabel(ioRetry[1] as JobState)} szakaszt; automatikus újrapróbálás ${ioRetry[2]} mp múlva`, `A storage or network error interrupted the ${stateLabel(ioRetry[1] as JobState)} stage; retrying automatically in ${ioRetry[2]} s`);
+  const comparisonRetry = /^comparison ran out of time; retrying automatically with (\d+)x time budgets$/.exec(message);
+  if (comparisonRetry) return t(`Az összehasonlítás kifutott az időből; automatikus újrapróbálás ${comparisonRetry[1]}× hosszabb időkerettel (az elkészült képpárok megmaradnak)`, `The comparison ran out of time; retrying automatically with ${comparisonRetry[1]}x time budgets (finished pairs are kept)`);
   const uploadRetry = /^image upload attempt (\d+) failed; retrying automatically in ([\d.]+) s$/.exec(message);
   if (uploadRetry) return t(`A képfeltöltés ${uploadRetry[1]}. kísérlete nem sikerült (a tárhely nem elérhető); automatikus újrapróbálás ${uploadRetry[2]} mp múlva`, `Image upload attempt ${uploadRetry[1]} failed (the host is unavailable); retrying automatically in ${uploadRetry[2]} s`);
   const metric = videoMetricFinding(message);

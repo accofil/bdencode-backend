@@ -2991,7 +2991,40 @@ def test_fast_comparison_timeout_requests_review_without_losing_resume_stage(con
     assert result.resume_state is JobState.COMPARISON
     assert "bounded" in (result.status_message or "")
     event = database.list_events(job_id=job.id, limit=1000)[-1]
-    assert event.payload["timeout_seconds"] == 300
+    # Retried with 2x and 4x budgets before the review.
+    assert event.payload["timeout_seconds"] == 1200
+    retries = [item for item in database.list_events(job_id=job.id, limit=1000) if item.kind == "worker.comparison-retry"]
+    assert [item.payload["time_scale"] for item in retries] == [2, 4]
+
+
+def test_a_comparison_timeout_is_retried_with_a_longer_budget(context):
+    database, _settings, scan, _scanner, runner, worker = context
+    real_run = runner.run
+    timeouts: list[float] = []
+
+    def slow_once(argv, **kwargs):
+        command = tuple(os.fspath(item) for item in argv)
+        if (
+            command[0] == "ffprobe"
+            and kwargs.get("stdout_path") is not None
+            and kwargs["stdout_path"].name == "sampled-encoded-frames.json"
+        ):
+            timeouts.append(kwargs.get("timeout", 0))
+            if len(timeouts) == 1:
+                raise subprocess.TimeoutExpired(command, kwargs.get("timeout", 1))
+        return real_run(argv, **kwargs)
+
+    runner.run = slow_once
+    job = _enqueue(database, scan.source)
+    claimed = JobQueue(database).claim_next()
+    assert claimed is not None
+    worker.process_one_stage(claimed)
+    ready = database.set_selection(job.id, _selection())
+
+    result = worker.process_job(ready)
+
+    assert result.state is JobState.COMPLETED
+    assert timeouts[:2] == [300, 600]
 
 
 def test_upload_fails_closed_for_legacy_unannotated_comparison(context):
@@ -4995,3 +5028,45 @@ def test_a_worker_shutdown_ends_the_upload_retry_wait(context):
     # The durable state stays UPLOADING; the next worker run tries again.
     assert result.state is JobState.UPLOADING
     assert len(host.calls) == 1
+
+
+def test_a_passing_io_error_reruns_the_stage(context):
+    import errno as errno_module
+
+    database, _settings, scan, _scanner, _runner, worker = context
+    real_stage = worker.process_one_stage
+    failures: list[str] = []
+
+    def flaky_share(job):
+        if not failures:
+            failures.append("EIO")
+            raise OSError(errno_module.EIO, "Input/output error")
+        return real_stage(job)
+
+    worker.io_retry_delays = (3,)
+    worker._sleep = lambda _seconds: None
+    worker.process_one_stage = flaky_share
+    job = _enqueue(database, scan.source)
+    claimed = JobQueue(database).claim_next()
+    assert claimed is not None
+
+    result = worker.process_job(claimed)
+
+    assert result.state is JobState.AWAITING_SELECTION
+    retries = [item for item in database.list_events(job_id=job.id, limit=1000) if item.kind == "worker.io-retry"]
+    assert len(retries) == 1 and retries[0].payload["delay_seconds"] == 3
+
+
+def test_a_missing_file_is_not_retried(context):
+    database, _settings, scan, _scanner, _runner, worker = context
+
+    def missing(_job):
+        raise FileNotFoundError("gone")
+
+    worker.io_retry_delays = (3,)
+    worker._sleep = lambda _seconds: pytest.fail("a missing file must not wait")
+    worker.process_one_stage = missing
+    _enqueue(database, scan.source)
+    claimed = JobQueue(database).claim_next()
+
+    assert worker.process_job(claimed).state is JobState.FAILED
