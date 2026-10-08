@@ -571,7 +571,7 @@ Wait for a running encode to finish before updating.
 | The laptop went to sleep and encoding stopped | After waking up the job continues. Set the laptop not to sleep while plugged in. |
 | Out of space | Remove old finished jobs' temporary files (**Clean up**) or unneeded jobs (**Delete job**). One job needs the space given in [section 2](#2-what-you-need). |
 | **Needs review** | Open the job: the card says what to do ([section 11](#11-everyday-use)). |
-| **Upload failed** | On the job page: retry, another host, or finish without images. Check the image host keys ([section 8](#8-image-uploads-optional)). |
+| **Upload failed** | The program first retries on its own for about 33 minutes. If that does not help, on the job page: retry, another host, or finish without images. Check the image host keys ([section 8](#8-image-uploads-optional)). |
 | **Failed** | Read the error on the job page. **Continue from the error** continues where it stopped. |
 | Encoding is very slow | Check the CPU share on **System** ([7.3](#73-set-the-cpu-share)). Slower settings (for example the `slower` preset) take much longer. |
 

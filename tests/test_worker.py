@@ -4901,3 +4901,88 @@ def test_a_broken_encode_still_stops_for_review(
     samples: list[dict[str, object]], message: str
 ) -> None:
     assert any(message in error for error in worker_module._sampled_video_metric_blockers(samples))
+
+
+class _UnreachableUploadClient(_FakeUploadClient):
+    """A host that cannot be reached for its first ``down_for`` calls."""
+
+    def __init__(self, provider_name: str, *, down_for: int) -> None:
+        super().__init__(provider_name)
+        self.down_for = down_for
+
+    def upload_png(self, path: Path) -> UploadedImage:
+        if len(self.calls) < self.down_for:
+            self.calls.append(path.name)
+            raise ImageUploadError(
+                f"{self.provider_name} could not be reached before upload",
+                provider=self.provider_name,
+                allow_fallback=True,
+            )
+        return super().upload_png(path)
+
+
+def _upload_retry_events(database, job_id: str) -> list:
+    return [
+        event
+        for event in database.list_events(job_id=job_id, limit=1000)
+        if event.kind == "worker.image-upload-retry"
+    ]
+
+
+def test_an_unreachable_image_host_is_retried_automatically(context):
+    host = _UnreachableUploadClient("imgbb", down_for=2)
+    worker, uploading, paths = _advance_to_uploading(context, (lambda: host,))
+    worker.upload_retry_delays = (5, 7, 11)
+    slept: list[float] = []
+    worker._sleep = slept.append
+
+    result = worker.process_job(uploading)
+
+    assert result.state is JobState.COMPLETED
+    retries = _upload_retry_events(context[0], uploading.id)
+    assert [event.payload["attempt"] for event in retries] == [1, 2]
+    assert [event.payload["delay_seconds"] for event in retries] == [5, 7]
+    assert sum(slept) == 12
+    assert _read_upload_checkpoint(paths)["provider"] == "imgbb"
+
+
+def test_a_host_down_for_every_attempt_stops_in_upload_failed(context):
+    host = _UnreachableUploadClient("imgbb", down_for=1000)
+    worker, uploading, _paths = _advance_to_uploading(context, (lambda: host,))
+    worker.upload_retry_delays = (1, 2)
+    worker._sleep = lambda _seconds: None
+
+    result = worker.process_job(uploading)
+
+    assert result.state is JobState.UPLOAD_FAILED
+    assert len(_upload_retry_events(context[0], uploading.id)) == 2
+    assert len(host.calls) == 3
+
+
+def test_a_permanent_rejection_is_not_retried(context):
+    host = _FakeUploadClient("imgbb", fail_on_call=1, permanent=True)
+    worker, uploading, _paths = _advance_to_uploading(
+        context, (lambda: host,), image_upload_provider="imgbb"
+    )
+    worker.upload_retry_delays = (1, 2)
+    worker._sleep = lambda _seconds: pytest.fail("a permanent rejection must not wait")
+
+    result = worker.process_job(uploading)
+
+    assert result.state is JobState.NEEDS_REVIEW
+    assert _upload_retry_events(context[0], uploading.id) == []
+
+
+def test_a_worker_shutdown_ends_the_upload_retry_wait(context):
+    host = _UnreachableUploadClient("imgbb", down_for=1000)
+    worker, uploading, _paths = _advance_to_uploading(context, (lambda: host,))
+    worker.upload_retry_delays = (600,)
+    stopping: list[bool] = []
+    worker.stop_requested = lambda: bool(stopping)
+    worker._sleep = lambda _seconds: stopping.append(True)
+
+    result = worker.process_job(uploading)
+
+    # The durable state stays UPLOADING; the next worker run tries again.
+    assert result.state is JobState.UPLOADING
+    assert len(host.calls) == 1

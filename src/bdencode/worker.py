@@ -2610,6 +2610,27 @@ def _sampled_video_metric_errors(
     return tuple(errors)
 
 
+# Waits between automatic upload attempts while an image host is unreachable
+# or answers with a passing error: about 33 minutes in all, then the job
+# stops in UPLOAD_FAILED for the operator.
+UPLOAD_RETRY_DELAYS: tuple[float, ...] = (30, 60, 120, 300, 600, 900)
+
+
+def _transient_upload_error(exc: ImageUploadError) -> bool:
+    """Whether the same upload may succeed a little later.
+
+    Errors raised by a host client name their provider; a permanent rejection
+    (file too big, invalid key) and local set-up errors (no provider, a failed
+    client initialisation) are not retried.
+    """
+
+    if exc.permanent:
+        return False
+    return exc.provider is not None or str(exc).startswith(
+        "all image upload providers are temporarily unavailable"
+    )
+
+
 class PipelineWorker:
     """One durable worker.  Running a second instance remains database-safe."""
 
@@ -2649,6 +2670,9 @@ class PipelineWorker:
             settings.data_root
         )
         self.stop_requested = stop_requested or (lambda: False)
+        # Mutable for tests, like ``upload_client_factory``.
+        self.upload_retry_delays: tuple[float, ...] = UPLOAD_RETRY_DELAYS
+        self._sleep: Callable[[float], None] = time.sleep
         self._runners: dict[str, Runner] = {}
         self._lives: dict[str, LiveProgress] = {}
 
@@ -2833,8 +2857,69 @@ class PipelineWorker:
                 self._comparison(job, paths)
         elif job.state is JobState.UPLOADING:
             with self._step(paths, "upload", ("Képfeltöltés és lezárás", "Image upload and finalization")):
-                self._upload_and_finalize(job, paths)
+                self._upload_with_retries(job, paths)
         return self.database.get_job(job.id)
+
+    def _upload_with_retries(self, job: Job, paths: JobPaths) -> None:
+        """Upload and finalise; a passing host error is retried automatically.
+
+        Each attempt resumes from the upload checkpoint, so images already on
+        the host are not sent again and a provider lock is kept.  The waits
+        stop at an operator pause or cancel and at a worker shutdown.
+        """
+
+        delays = tuple(self.upload_retry_delays)
+        for attempt in range(1, len(delays) + 2):
+            try:
+                self._upload_and_finalize(job, paths)
+                return
+            except ImageUploadError as exc:
+                if attempt > len(delays) or not _transient_upload_error(exc):
+                    raise
+                delay = delays[attempt - 1]
+                detail = sanitize_text(str(exc)).strip()[:400] or type(exc).__name__
+                LOG.warning(
+                    "job %s image upload attempt %d failed (%s); retrying in %g s",
+                    job.id,
+                    attempt,
+                    detail,
+                    delay,
+                )
+                self.database.add_event(
+                    EventCreate(
+                        job_id=job.id,
+                        kind="worker.image-upload-retry",
+                        message=(
+                            f"image upload attempt {attempt} failed; "
+                            f"retrying automatically in {delay:g} s"
+                        ),
+                        payload={
+                            "attempt": attempt,
+                            "delay_seconds": delay,
+                            "provider": exc.provider,
+                            "detail": detail,
+                        },
+                    )
+                )
+                self._live(paths).update(
+                    0.0,
+                    detail=(
+                        f"A képtárhely nem elérhető; újrapróbálás {delay:g} mp múlva ({attempt}. kísérlet után)",
+                        f"The image host is unavailable; retrying in {delay:g} s (after attempt {attempt})",
+                    ),
+                )
+                self._wait_before_upload_retry(job.id, delay)
+
+    def _wait_before_upload_retry(self, job_id: str, seconds: float) -> None:
+        waited = 0.0
+        while waited < seconds:
+            self._stop_at_operator_boundary(job_id)
+            if self.stop_requested():
+                raise ProcessInterrupted("worker shutdown during an upload retry wait")
+            step = min(1.0, seconds - waited)
+            self._sleep(step)
+            waited += step
+        self._stop_at_operator_boundary(job_id)
 
     def process_job(self, job: Job) -> Job:
         """Continue one job until completion or an operator-controlled pause."""
