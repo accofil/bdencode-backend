@@ -346,6 +346,50 @@ describe("SelectionWizard", () => {
     expect(screen.getByPlaceholderText("forrás: eng")).toBeInTheDocument();
   });
 
+  it("shows the track analysis and accepts all suggestions in one click", async () => {
+    const scan = makeScan();
+    const playlist = scan.playlists[0];
+    const audio = playlist.streams.find((stream) => stream.kind === "audio")!;
+    const subtitle = (id: string, pid: number) => ({
+      ...audio,
+      id,
+      pid,
+      kind: "subtitle" as const,
+      codec: "hdmv_pgs_subtitle",
+      title: null,
+      channels: null,
+      channel_layout: null,
+      sample_rate: null,
+      default: true,
+    });
+    playlist.streams = [...playlist.streams, subtitle("subtitle:4608", 4608), subtitle("subtitle:4609", 4609)];
+    playlist.track_analysis = {
+      schema_version: 1,
+      windows: Array.from({ length: 6 }, (_, index) => ({ start_seconds: 600 + index * 900, duration_seconds: 30 })),
+      audio: { [audio.id]: { status: "detected", iso639_2t: "hun", confidence: 0.94, agreement: 1, usable_samples: 6, needs_review: false, reason: "consensus" } },
+      subtitles: {
+        "subtitle:4608": { events: 31, sampled_seconds: 180, events_per_minute: 10.33, suggested_kind: "full", confidence: "high" },
+        "subtitle:4609": { events: 1, sampled_seconds: 180, events_per_minute: 0.33, suggested_kind: "forced", confidence: "high" },
+      },
+    };
+    const user = userEvent.setup();
+    const view = renderApp(<SelectionWizard job={makeJob({ state: "AWAITING_SELECTION" })} scan={scan} onComplete={vi.fn()} />);
+
+    await user.click(view.getByRole("button", { name: "Tovább" }));
+    expect(view.getByText("Sávelemzés a lemezből")).toBeInTheDocument();
+    expect(view.getByText(/A lemez szerint eng, a hang alapján/)).toBeInTheDocument();
+    expect(view.getByText(/Javaslat: Teljes felirat \(31 esemény 3 perc mintában/)).toBeInTheDocument();
+    expect(view.getByText(/Javaslat: Forced \/ signs/)).toBeInTheDocument();
+    const kinds = view.getAllByRole("combobox", { name: /felirattípusa/ });
+    expect(kinds.map((select) => (select as HTMLSelectElement).value)).toEqual(["unknown", "unknown"]);
+
+    await user.click(view.getByRole("button", { name: "Minden javaslat elfogadása (3)" }));
+
+    expect(kinds.map((select) => (select as HTMLSelectElement).value)).toEqual(["full", "forced"]);
+    expect(view.getByRole("textbox", { name: "English 5.1 nyelve" })).toHaveValue("hun");
+    expect(view.queryByRole("button", { name: /Minden javaslat elfogadása/ })).not.toBeInTheDocument();
+  });
+
   it("requests a scan-aware AI profile and applies only editable fields", async () => {
     const user = userEvent.setup();
     const view = renderApp(

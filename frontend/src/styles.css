@@ -359,3 +359,9 @@ input:checked + .toggle::after { left: 19px; background: white; }
 .language-switch__option { flex: 1; min-height: 30px; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); background: transparent; font: inherit; font-size: 12px; font-weight: 700; letter-spacing: .04em; cursor: pointer; }
 .language-switch__option:hover { color: var(--text); }
 .language-switch__option--active { color: var(--text); border-color: rgba(101, 214, 179, .45); background: rgba(101, 214, 179, .1); }
+
+/* Selection-time track analysis hints in the tracks step (3.7). */
+.track-analysis { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; grid-column: 1 / -1; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.track-analysis--ok { color: #8fe0c2; }
+.track-analysis--differs { color: #f2c46d; }
+.track-analysis .button { min-height: 28px; padding: 2px 10px; font-size: 12px; }

@@ -471,6 +471,11 @@ When the scan is done, the job page shows the **Your turn** card. Open the **Set
 - At the top you can choose a **tracker profile** (Aither or nCore). The **Arrange tracks** button then orders the tracks by the tracker's rules, and the **What changed** list shows what it changed.
 - For each audio track choose what happens to it: **Copy** (kept unchanged), **FLAC**, **AC-3**, **E-AC-3**, **DTS** or **Omit**. If unsure, keep the suggested value.
 - For each kept subtitle you must choose **Teljes felirat** (Full subtitle) or **Forced / signs**.
+- **Track analysis from the disc:** at the end of the scan the program takes a few short windows of the film (6 × 30 seconds), detects the audio languages by speech recognition and counts the subtitle events. In the rows you see:
+  - for audio "From the audio: English, 95%"; if that differs from the disc's label, a yellow warning and an **Accept** button;
+  - for subtitles "Suggestion: Full subtitle (31 events in 3 min sampled…)" or "Suggestion: Forced / signs", with an **Accept suggestion** button. A full subtitle has several events a minute, a forced one only a few in the whole film.
+
+  **Accept all suggestions** takes them all at once. They are suggestions: if in doubt, check the finished file, or leave the track out.
 - If a track's language is missing or uncertain, the program tells you; choose it by hand.
 
 **3. Video** – the encoding settings.

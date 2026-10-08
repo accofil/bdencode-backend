@@ -117,6 +117,11 @@ from .media.language import (
     LanguageStatus,
 )
 from .media.language_runtime import AudioLanguageRuntime, LanguageInferenceUnavailable
+from .media.track_analysis import (
+    ANALYSIS_SCHEMA_VERSION as TRACK_ANALYSIS_SCHEMA_VERSION,
+    analyse_playlist,
+    playlists_to_analyse,
+)
 from .media.planner import (
     Crop as PlannerCrop,
     EncodePlanner,
@@ -2984,6 +2989,7 @@ class PipelineWorker:
             atomic_write_json(paths.scan_json, result.to_dict())
             _write_stage(marker, inputs, [paths.scan_json])
         result_json = json.loads(paths.scan_json.read_text(encoding="utf-8"))
+        result_json = self._attach_track_analysis(job, paths, result_json)
         self._register_artifact(
             job.id,
             paths.scan_json,
@@ -3000,6 +3006,76 @@ class PipelineWorker:
                 message="scan complete; playlist, processing and tracks require confirmation",
             ),
         )
+
+    def _attach_track_analysis(
+        self, job: Job, paths: JobPaths, result_json: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Add the selection-time track analysis to the recommended playlists.
+
+        Advisory only: any failure leaves the scan as it was.  The result is
+        kept under ``analysis/track-analysis.json``, keyed by the scan.
+        """
+
+        report = paths.analysis / "track-analysis.json"
+        inputs = {
+            "scan_sha256": sha256_file(paths.scan_json),
+            "schema_version": TRACK_ANALYSIS_SCHEMA_VERSION,
+        }
+        marker = paths.stages / "track-analysis.json"
+        analyses: dict[str, Any] = {}
+        if _valid_stage(marker, inputs, [report]):
+            try:
+                analyses = json.loads(report.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                analyses = {}
+        else:
+            if self.scanner_factory is not None:
+                # Test and alternative scanners have no real disc to read.
+                return result_json
+            try:
+                source = self.settings.authorize_source(job.source_path)
+            except Exception:  # noqa: BLE001 - advisory step
+                return result_json
+            playlists = [p for p in result_json.get("playlists") or [] if isinstance(p, dict)]
+            runner = self._runner(paths)
+
+            def run(argv: list[str], cwd: Path) -> str:
+                stdout = cwd / "stdout.txt"
+                runner.run(argv, cwd=cwd, stdout_path=stdout, stderr_path=cwd / "stderr.log", timeout=900)
+                return stdout.read_text(encoding="utf-8", errors="replace")
+
+            def detect(samples: Any) -> Any:
+                return self.language_runtime.detect_samples(samples)
+
+            chosen = playlists_to_analyse(playlists)
+            with self._step(paths, "track-analysis", ("Sávok elemzése", "Analysing tracks")) as step:
+                for number, playlist in enumerate(chosen):
+                    work = paths.analysis / "track-analysis" / str(playlist.get("playlist_id"))
+                    work.mkdir(parents=True, exist_ok=True)
+                    try:
+                        analyses[str(playlist["playlist_id"])] = analyse_playlist(
+                            source,
+                            playlist,
+                            work,
+                            run=run,
+                            detect_language=detect,
+                            on_window=lambda done, total, number=number: step.update(
+                                (number + done / total) / max(len(chosen), 1)
+                            ),
+                        )
+                    except Exception as exc:  # noqa: BLE001 - advisory only
+                        LOG.warning("track analysis of playlist %s failed: %s", playlist.get("playlist_id"), exc)
+                        analyses[str(playlist["playlist_id"])] = {
+                            "schema_version": TRACK_ANALYSIS_SCHEMA_VERSION,
+                            "status": "failed",
+                            "reason": type(exc).__name__,
+                        }
+            atomic_write_json(report, analyses)
+            _write_stage(marker, inputs, [report])
+        for playlist in result_json.get("playlists") or []:
+            if isinstance(playlist, dict) and str(playlist.get("playlist_id")) in analyses:
+                playlist["track_analysis"] = analyses[str(playlist.get("playlist_id"))]
+        return result_json
 
     def _detect_dolby_vision_layers(
         self, paths: JobPaths, source: Path, scan: DiscScan

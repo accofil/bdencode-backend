@@ -286,6 +286,25 @@ class AudioLanguageRuntime:
         atomic_write_json(result_path, result)
         return result
 
+    def detect_samples(self, samples: Sequence[tuple[Path, SampleWindow]]) -> dict[str, Any]:
+        """Consensus language of ready WAV samples (the selection-time analysis).
+
+        Unlike :meth:`infer` nothing is cached: the caller keeps the result.
+        """
+
+        if not samples:
+            raise LanguageInferenceUnavailable("invalid_sample")
+        model = self._get_model()
+        detections: list[ContentLanguageSample] = []
+        for wav_path, window in samples:
+            if not _wav_is_valid(wav_path):
+                raise LanguageInferenceUnavailable("invalid_sample")
+            try:
+                detections.append(detect_with_faster_whisper(model, wav_path, window))
+            except Exception:
+                raise LanguageInferenceUnavailable("transcription_failed") from None
+        return language_consensus(detections).to_dict()
+
     def _extract_samples(
         self,
         source: Path,

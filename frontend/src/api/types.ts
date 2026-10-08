@@ -590,6 +590,34 @@ export interface MediaStream {
   video: VideoProperties | null;
 }
 
+/** Selection-time analysis of a recommended playlist's tracks (3.7). */
+export interface AudioTrackAnalysis {
+  status: "detected" | "unavailable";
+  iso639_2t?: string | null;
+  confidence?: number;
+  agreement?: number;
+  usable_samples?: number;
+  needs_review?: boolean;
+  reason?: string;
+}
+
+export interface SubtitleTrackAnalysis {
+  events: number;
+  sampled_seconds: number;
+  events_per_minute: number;
+  suggested_kind: "full" | "forced" | null;
+  confidence: "high" | "medium" | "low";
+}
+
+export interface TrackAnalysis {
+  schema_version: number;
+  status?: "failed";
+  reason?: string;
+  windows?: Array<{ start_seconds: number; duration_seconds: number }>;
+  audio?: Record<string, AudioTrackAnalysis>;
+  subtitles?: Record<string, SubtitleTrackAnalysis>;
+}
+
 export interface Playlist {
   playlist_id: string;
   duration_seconds: number;
@@ -602,6 +630,7 @@ export interface Playlist {
   edition_label: string | null;
   episode_number: number | null;
   recommended: boolean;
+  track_analysis?: TrackAnalysis;
 }
 
 export interface DiscScanResult {
