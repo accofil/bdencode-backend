@@ -94,11 +94,13 @@ from .live_progress import read_live
 from .tracker_policy import tracker_findings
 from .review import (
     ReviewError,
+    accept_video_metrics,
     apply_track_languages,
     language_review,
     reset_upload,
     review_kind,
     upload_overview,
+    video_metrics_overview,
 )
 from .config import ConfigurationError, Settings
 from .doctor import build_report
@@ -226,6 +228,12 @@ class UploadResetRequest(_ApiRequest):
     provider: Literal["auto", "imgbb", "catbox", "freeimage"] | None = None
     image_set: Literal["all", "sdr", "native"] | None = None
     upload_images: bool = True
+    expected_version: int | None = Field(default=None, ge=1)
+
+
+class VideoMetricsAcceptRequest(_ApiRequest):
+    """Accept the sampled video measurement of the finished encode."""
+
     expected_version: int | None = Field(default=None, ge=1)
 
 
@@ -927,6 +935,7 @@ def create_app(
             "resume_state": job.resume_state.value if job.resume_state else None,
             "language": None,
             "upload": None,
+            "video_metrics": None,
         }
         if kind == "language":
             report: dict[str, Any] | None = None
@@ -945,7 +954,45 @@ def create_app(
             )
         if kind in {"upload", "upload_failed"} and settings is not None:
             body["upload"] = upload_overview(settings.job_root(job_id))
+        if kind == "video_metrics" and settings is not None:
+            body["video_metrics"] = video_metrics_overview(settings.job_root(job_id))
         return body
+
+    @application.post(f"{API_PREFIX}/jobs/{{job_id}}/review/video-metrics", response_model=Job)
+    def accept_job_video_metrics(
+        job_id: str, request: VideoMetricsAcceptRequest | None = None
+    ) -> Job:
+        """The operator accepts the measured frames; the comparison runs again
+        and finishes with the acceptance recorded in its report."""
+
+        action = request or VideoMetricsAcceptRequest()
+        job = db.get_job(job_id)
+        if review_kind(job, _review_details(job)) != "video_metrics":
+            raise StateConflictError(
+                "the job is not waiting on a video metrics review", current=job.state
+            )
+        if action.expected_version is not None and job.version != action.expected_version:
+            raise StateConflictError(
+                f"job version is {job.version}, expected {action.expected_version}",
+                current=job.state,
+            )
+        if settings is None:
+            raise StateConflictError("job storage is not configured", current=job.state)
+        acceptance = accept_video_metrics(settings.job_root(job_id))
+        db.add_event(
+            EventCreate(
+                job_id=job_id,
+                kind="job.video-metrics-accepted",
+                message="sampled video metrics accepted by operator",
+                payload={"errors": acceptance["errors"]},
+            )
+        )
+        return queue.advance(
+            job_id,
+            JobState.COMPARISON,
+            message="comparison resumed after the operator accepted the video metrics",
+            expected_version=job.version,
+        )
 
     @application.post(f"{API_PREFIX}/jobs/{{job_id}}/review/languages", response_model=Job)
     def confirm_track_languages(job_id: str, request: TrackLanguagesRequest) -> Job:

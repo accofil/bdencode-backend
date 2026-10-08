@@ -5,7 +5,7 @@ import { api } from "../api/client";
 import type { JobReview } from "../api/types";
 import { makeJob } from "../test/fixtures";
 import { renderApp } from "../test/render";
-import { LanguageReviewCard, languageLabel, UploadReviewCard } from "./ReviewPanels";
+import { LanguageReviewCard, languageLabel, UploadReviewCard, VideoMetricsReviewCard } from "./ReviewPanels";
 
 vi.mock("../api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api/client")>();
@@ -16,6 +16,7 @@ vi.mock("../api/client", async (importOriginal) => {
       confirmTrackLanguages: vi.fn(),
       resetUpload: vi.fn(),
       retryUpload: vi.fn(),
+      acceptVideoMetrics: vi.fn(),
     },
   };
 });
@@ -82,6 +83,40 @@ function uploadReview(overrides: Partial<JobReview> = {}): JobReview {
 
 describe("review cards", () => {
   beforeEach(() => vi.clearAllMocks());
+
+  it("shows the broken-looking samples and accepts the measurement", async () => {
+    const user = userEvent.setup();
+    const job = makeJob({ state: "NEEDS_REVIEW", version: 12 });
+    vi.mocked(api.acceptVideoMetrics).mockResolvedValue(makeJob({ state: "COMPARISON", version: 13 }));
+    const review: JobReview = {
+      state: "NEEDS_REVIEW",
+      kind: "video_metrics",
+      message: "sampled native-YUV video metrics require review",
+      details: {},
+      resume_state: "COMPARISON",
+      language: null,
+      upload: null,
+      video_metrics: {
+        errors: ["sample 2 SSIM is below 0.80 (0.710000)"],
+        warnings: [],
+        ssim_all_mean: 0.84,
+        psnr_average_db_mean: 36.1,
+        samples: [
+          { index: 1, category: "I", presentation_index: 0, ssim_all: 0.97, psnr_average_db: "inf" },
+          { index: 2, category: "B", presentation_index: 52920, ssim_all: 0.71, psnr_average_db: 31.2 },
+        ],
+      },
+    };
+    renderApp(<VideoMetricsReviewCard job={job} review={review} />);
+
+    expect(screen.getByText("A(z) 2. minta SSIM-je 0.710000, a határ 0.80")).toBeInTheDocument();
+    const samples = within(screen.getByRole("list", { name: "Érintett minták" })).getAllByRole("listitem");
+    expect(samples).toHaveLength(1);
+    expect(within(samples[0]).getByText("SSIM 0.7100 · PSNR 31.20 dB")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Elfogadom a mérést" }));
+    await waitFor(() => expect(api.acceptVideoMetrics).toHaveBeenCalledWith("job-1", 12));
+  });
 
   it("names languages in Hungarian and keeps unknown tags as codes", () => {
     expect(languageLabel("hun", "hu")).toBe("magyar (hun)");

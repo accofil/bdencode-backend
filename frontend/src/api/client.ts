@@ -194,6 +194,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ languages, expected_version: expectedVersion }),
     }),
+  acceptVideoMetrics: (id: string, expectedVersion: number) =>
+    apiFetch<Job>(`/jobs/${encodeURIComponent(id)}/review/video-metrics`, {
+      method: "POST",
+      body: JSON.stringify({ expected_version: expectedVersion }),
+    }),
   resetUpload: (id: string, request: UploadResetRequest) =>
     apiFetch<Job>(`/jobs/${encodeURIComponent(id)}/reset-upload`, {
       method: "POST",

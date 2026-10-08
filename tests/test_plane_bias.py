@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 from bdencode.qc.video import MAXIMUM_MEAN_PLANE_BIAS, plane_bias, y4m_plane_means
-from bdencode.worker import _mean_plane_bias, _sampled_video_metric_errors
+from bdencode.worker import (
+    _mean_plane_bias,
+    _sampled_video_metric_blockers,
+    _sampled_video_metric_errors,
+)
 
 
 def write_y4m(
@@ -63,6 +67,8 @@ def test_a_systematic_shift_fails_even_with_a_high_psnr() -> None:
     assert len(errors) == 1 and "Y plane is shifted by +2.07" in errors[0]
     errors = _sampled_video_metric_errors([sample(0, -3.0, 0) for _ in range(4)])
     assert any("U plane" in item for item in errors)
+    # A colour or levels error is a broken encode: it still stops the job.
+    assert any("U plane" in item for item in _sampled_video_metric_blockers([sample(0, -3.0, 0) for _ in range(4)]))
 
 
 def test_noise_around_zero_averages_out_and_unmeasured_samples_are_ignored() -> None:

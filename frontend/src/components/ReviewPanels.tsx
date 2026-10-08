@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { CloudUpload, ImageOff, Languages, Music, RefreshCw, Subtitles } from "lucide-react";
+import { CheckCircle2, CloudUpload, Gauge, ImageOff, Languages, Music, RefreshCw, Subtitles } from "lucide-react";
 import { useMemo, useState } from "react";
 import { api, ApiError } from "../api/client";
 import type {
@@ -14,7 +14,7 @@ import type {
 import { IMAGE_HOST_NAMES, IMAGE_UPLOAD_PROVIDER_LABELS, UPLOAD_IMAGE_SET_LABELS, uploadImageSet } from "../uploads";
 import { getLanguage, t, useLanguage } from "../i18n";
 import type { Language } from "../i18n";
-import { formatBytes, formatStatusMessage } from "../utils";
+import { formatBytes, formatStatusMessage, videoMetricFinding } from "../utils";
 import { Badge, Button, Card, Notice } from "./ui";
 
 const languageNames = new Map<Language, Intl.DisplayNames | null>();
@@ -182,6 +182,68 @@ export function LanguageReviewCard({ job, review }: { job: Job; review: JobRevie
 }
 
 /** Retry, move to another image host or image set, or finish without images. */
+function metricNumber(value: number | string | null | undefined, digits: number): string {
+  if (typeof value === "number") return value.toFixed(digits);
+  if (typeof value === "string" && value.toLowerCase().includes("inf")) return "∞";
+  return "—";
+}
+
+/** A finished encode whose sampled measurement points to a broken picture. */
+export function VideoMetricsReviewCard({ job, review }: { job: Job; review: JobReview }) {
+  useLanguage();
+  const refresh = useJobRefresh(job);
+  const info = review.video_metrics;
+  const accept = useMutation({ mutationFn: () => api.acceptVideoMetrics(job.id, job.version), onSuccess: refresh });
+  const failing = new Set(
+    (info?.errors ?? [])
+      .map((error) => /^sample (\d+) /.exec(error)?.[1])
+      .filter((value): value is string => Boolean(value))
+      .map(Number),
+  );
+  const shown = (info?.samples ?? []).filter((sample) => failing.has(sample.index));
+
+  return (
+    <Card className="operator-review">
+      <div className="section-heading">
+        <div>
+          <span className="section-heading__icon"><Gauge size={19} /></span>
+          <div>
+            <h2>{t("A képminőség-mérés hibás kódolásra utal", "The picture quality measurement points to a broken encode")}</h2>
+            <p>{t("A kész fájl mintáiban a PSNR/SSIM olyan alacsony, ami hibás képet (rossz képkockát, sérülést, színhibát) jelezhet. Nézd meg a comparison képpárokat: ha a kép rendben van, fogadd el a mérést; ha nem, módosítsd lent a beállításokat.", "The samples of the finished file measure so low that the picture may be broken (wrong frames, corruption, a colour error). Look at the comparison pairs: accept the measurement if the picture is fine, or change the settings below.")}</p>
+          </div>
+        </div>
+      </div>
+      <ul className="operator-review__findings">
+        {(info?.errors ?? []).map((error) => <li key={error}>{videoMetricFinding(error) ?? error}</li>)}
+      </ul>
+      <dl className="operator-review__facts">
+        <div><dt>{t("Átlagos SSIM", "Mean SSIM")}</dt><dd>{metricNumber(info?.ssim_all_mean, 4)}</dd></div>
+        <div><dt>{t("Átlagos PSNR", "Mean PSNR")}</dt><dd>{metricNumber(info?.psnr_average_db_mean, 2)} dB</dd></div>
+        <div><dt>{t("Minták", "Samples")}</dt><dd>{info?.samples.length ?? 0}</dd></div>
+      </dl>
+      {shown.length > 0 && (
+        <ul className="operator-review__hosts" aria-label={t("Érintett minták", "Affected samples")}>
+          {shown.map((sample) => (
+            <li key={sample.index}>
+              <strong>{t(`${sample.index}. minta`, `Sample ${sample.index}`)} · {sample.category ?? "?"}</strong>
+              <small>{t("képkocka", "frame")} {sample.presentation_index ?? "—"}</small>
+              <Badge tone="warning">SSIM {metricNumber(sample.ssim_all, 4)} · PSNR {metricNumber(sample.psnr_average_db, 2)} dB</Badge>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="operator-review__option">
+        <div>
+          <strong>{t("A kép rendben van", "The picture is fine")}</strong>
+          <small>{t("A döntés a mérési jelentésbe kerül; a comparison újrafut, és a job a meglévő kódolással befejeződik.", "The decision goes into the measurement report; the comparison runs again and the job finishes with the existing encode.")}</small>
+        </div>
+        <Button icon={<CheckCircle2 size={16} />} loading={accept.isPending} onClick={() => accept.mutate()}>{t("Elfogadom a mérést", "Accept the measurement")}</Button>
+      </div>
+      {accept.isError && <Notice tone="danger" title={t("Az elfogadás nem sikerült", "The acceptance failed")}>{accept.error instanceof ApiError ? accept.error.detail : accept.error.message}</Notice>}
+    </Card>
+  );
+}
+
 export function UploadReviewCard({
   job,
   review,

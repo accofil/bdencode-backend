@@ -1,4 +1,5 @@
-"""Resolving reviews from the web UI: track languages and image upload resets."""
+"""Resolving reviews from the web UI: track languages, image upload resets and
+video metric acceptance."""
 
 from __future__ import annotations
 
@@ -15,11 +16,14 @@ from bdencode.models import JobCreate, JobState
 from bdencode.review import (
     LANGUAGE_REVIEW_MESSAGE,
     STAGES_DIR,
+    VIDEO_METRICS_REVIEW_MESSAGE,
     ReviewError,
+    accept_video_metrics,
     apply_track_languages,
     language_review,
     read_upload_override,
     reset_upload,
+    video_metrics_accepted,
 )
 from bdencode.worker import JobPaths
 
@@ -261,3 +265,70 @@ def test_other_reviews_cannot_reset_the_upload(api) -> None:
 
     assert client.get(f"/api/v1/jobs/{job.id}/review").json()["kind"] == "other"
     assert client.post(f"/api/v1/jobs/{job.id}/reset-upload", json={}).status_code == 409
+
+
+def _metrics_report(errors: list[str]) -> dict:
+    return {
+        "aggregate": {"ssim_all_mean": 0.82, "psnr_average_db_mean": 31.5},
+        "samples": [
+            {"category": "I", "presentation_index": 0, "ssim_all": 0.97, "psnr_average_db": 44.0,
+             "reference_measurement_sha256": "r1", "encode_measurement_sha256": "e1"},
+            {"category": "B", "presentation_index": 52920, "ssim_all": 0.71, "psnr_average_db": 27.0,
+             "reference_measurement_sha256": "r2", "encode_measurement_sha256": "e2"},
+        ],
+        "quality_gate": {"status": "needs_review", "errors": errors, "warnings": []},
+    }
+
+
+def test_the_page_accepts_a_video_metrics_review_for_these_frames_only(api) -> None:
+    client, database, settings, job = api
+    errors = ["sample 2 SSIM is below 0.80 (0.710000)", "sample 2 PSNR is below 28 dB (27.000 dB)"]
+    _walk(database, job.id, JobState.SCANNING, JobState.AWAITING_SELECTION)
+    database.set_selection(job.id, SELECTION)
+    _walk(
+        database,
+        job.id,
+        JobState.ENCODING,
+        JobState.MUXING,
+        JobState.QC,
+        JobState.COMPARISON,
+        JobState.NEEDS_REVIEW,
+        message=VIDEO_METRICS_REVIEW_MESSAGE,
+        details={"errors": errors, "report": "video-metrics.json"},
+    )
+    comparison = settings.job_root(job.id) / "comparison"
+    comparison.mkdir(parents=True, exist_ok=True)
+    report = _metrics_report(errors)
+    (comparison / "video-metrics.json").write_text(json.dumps(report), encoding="utf-8")
+
+    review = client.get(f"/api/v1/jobs/{job.id}/review").json()
+    assert review["kind"] == "video_metrics"
+    assert review["video_metrics"]["errors"] == errors
+    assert review["video_metrics"]["samples"][1] == {
+        "index": 2, "category": "B", "presentation_index": 52920, "ssim_all": 0.71, "psnr_average_db": 27.0,
+    }
+
+    current = database.get_job(job.id)
+    stale = client.post(f"/api/v1/jobs/{job.id}/review/video-metrics", json={"expected_version": current.version - 1})
+    assert stale.status_code == 409
+    response = client.post(f"/api/v1/jobs/{job.id}/review/video-metrics", json={"expected_version": current.version})
+    assert response.status_code == 200, response.text
+    assert response.json()["state"] == "COMPARISON"
+
+    # The acceptance binds the findings and the measured frames.
+    assert video_metrics_accepted(comparison, errors, report["samples"]) is not None
+    assert video_metrics_accepted(comparison, errors[:1], report["samples"]) is None
+    other_encode = [dict(sample, encode_measurement_sha256="x") for sample in report["samples"]]
+    assert video_metrics_accepted(comparison, errors, other_encode) is None
+    # Not a metrics review any more.
+    assert client.post(f"/api/v1/jobs/{job.id}/review/video-metrics", json={}).status_code == 409
+
+
+def test_a_metrics_report_without_an_open_review_cannot_be_accepted(tmp_path: Path) -> None:
+    comparison = tmp_path / "comparison"
+    comparison.mkdir()
+    report = _metrics_report([])
+    report["quality_gate"]["status"] = "passed_with_warnings"
+    (comparison / "video-metrics.json").write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(ReviewError):
+        accept_video_metrics(tmp_path)

@@ -38,7 +38,7 @@ import { PipelineSteps } from "../components/JobCard";
 import { JobStatisticsCard } from "../components/JobStatisticsCard";
 import { LiveStepPanel, StepTimelineCard, useJobLive } from "../components/LiveStep";
 import { PlayerPanel } from "../components/PlayerPanel";
-import { LanguageReviewCard, UploadReviewCard } from "../components/ReviewPanels";
+import { LanguageReviewCard, UploadReviewCard, VideoMetricsReviewCard } from "../components/ReviewPanels";
 import { ReleasePanel } from "../components/ReleasePanel";
 import { SelectionWizard } from "../components/SelectionWizard";
 import { Badge, Button, Card, EmptyState, LoadingPanel, Modal, Notice, PageHeader, ProgressBar } from "../components/ui";
@@ -461,8 +461,9 @@ export function JobDetailPage() {
       )}
       {retryUpload.isError && <Notice tone="danger" title={t("A feltöltés nem indítható újra", "The upload cannot be restarted")}>{retryUpload.error instanceof ApiError ? retryUpload.error.detail : retryUpload.error.message}</Notice>}
       {reviewKind === "language" && reviewQuery.data?.language && <LanguageReviewCard key={`language-${job.version}`} job={job} review={reviewQuery.data} />}
+      {reviewKind === "video_metrics" && reviewQuery.data?.video_metrics && <VideoMetricsReviewCard key={`metrics-${job.version}`} job={job} review={reviewQuery.data} />}
       {uploadReview && reviewQuery.data && <UploadReviewCard key={`upload-${job.version}`} job={job} review={reviewQuery.data} credentials={runtimeQuery.data?.image_upload_credentials} />}
-      {job.state === "NEEDS_REVIEW" && !comparisonTimeoutReview && reviewKind !== "language" && !uploadReview && <Notice tone="warning" title={t("Operátori ellenőrzés szükséges", "Operator review needed")}>{formatStatusMessage(job.status_message, t("A munkafolyamat csak a beállítások felülvizsgálata után folytatható.", "The workflow can continue only after the settings are reviewed."))}</Notice>}
+      {job.state === "NEEDS_REVIEW" && !comparisonTimeoutReview && reviewKind !== "language" && reviewKind !== "video_metrics" && !uploadReview && <Notice tone="warning" title={t("Operátori ellenőrzés szükséges", "Operator review needed")}>{formatStatusMessage(job.status_message, t("A munkafolyamat csak a beállítások felülvizsgálata után folytatható.", "The workflow can continue only after the settings are reviewed."))}</Notice>}
 
       <Card className="job-progress-card">
         <div className="job-progress-card__top">

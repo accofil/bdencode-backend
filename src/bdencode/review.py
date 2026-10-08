@@ -1,6 +1,6 @@
 """Operator reviews the web UI resolves without hand-made API calls.
 
-Two kinds are resolved here:
+Three kinds are resolved here:
 
 * a language review: retained tracks whose language neither the disc's
   declarations nor the audio language detection could settle.  The operator
@@ -13,6 +13,9 @@ Two kinds are resolved here:
   job finishes without uploading images.  That choice lives in a stage file
   and not in the selection, because the preparation reports (crop policy,
   automatic CRF) are pinned to the selection's hash.
+* a sampled video metrics review: the operator looked at the image pairs and
+  accepts the measurement.  The acceptance names the exact findings and the
+  measured frames, so it never carries over to another encode.
 """
 
 from __future__ import annotations
@@ -34,6 +37,8 @@ from .utils import atomic_write_json
 LANGUAGE_REVIEW_MESSAGE = (
     "one or more retained tracks need a confirmed language before encoding"
 )
+VIDEO_METRICS_REVIEW_MESSAGE = "sampled native-YUV video metrics require review"
+VIDEO_METRICS_ACCEPTANCE_NAME = "video-metrics-acceptance.json"
 UPLOAD_REVIEW_CODES = frozenset({"image_upload_rejected", "image_too_large_for_host"})
 # Reviews raised by the upload stage that a fresh checkpoint resolves.
 _UPLOAD_REVIEW_PREFIXES = (
@@ -78,7 +83,94 @@ def review_kind(job: Job, details: Mapping[str, Any]) -> str | None:
         return "upload"
     if message.startswith("fast comparison exceeded"):
         return "comparison_timeout"
+    if message == VIDEO_METRICS_REVIEW_MESSAGE and job.resume_state is JobState.COMPARISON:
+        return "video_metrics"
     return "other"
+
+
+# -- sampled video metrics review -------------------------------------------
+def _metric_measurements(samples: Any) -> list[list[str]]:
+    return [
+        [str(sample.get("reference_measurement_sha256", "")), str(sample.get("encode_measurement_sha256", ""))]
+        for sample in samples or ()
+        if isinstance(sample, Mapping)
+    ]
+
+
+def _video_metrics_report(job_root: Path) -> dict[str, Any] | None:
+    try:
+        report = json.loads((job_root / "comparison" / "video-metrics.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return report if isinstance(report, dict) and isinstance(report.get("samples"), list) else None
+
+
+def video_metrics_overview(job_root: Path) -> dict[str, Any] | None:
+    """The findings and the per-sample values the review card shows."""
+
+    report = _video_metrics_report(job_root)
+    if report is None:
+        return None
+    gate = report.get("quality_gate") if isinstance(report.get("quality_gate"), Mapping) else {}
+    aggregate = report.get("aggregate") if isinstance(report.get("aggregate"), Mapping) else {}
+    samples = []
+    for index, sample in enumerate(report["samples"], start=1):
+        if not isinstance(sample, Mapping):
+            continue
+        samples.append(
+            {
+                "index": index,
+                "category": sample.get("category"),
+                "presentation_index": sample.get("presentation_index"),
+                "ssim_all": sample.get("ssim_all"),
+                "psnr_average_db": sample.get("psnr_average_db"),
+            }
+        )
+    return {
+        "errors": [str(item) for item in gate.get("errors") or ()],
+        "warnings": [str(item) for item in gate.get("warnings") or ()],
+        "ssim_all_mean": aggregate.get("ssim_all_mean"),
+        "psnr_average_db_mean": aggregate.get("psnr_average_db_mean"),
+        "samples": samples,
+    }
+
+
+def accept_video_metrics(job_root: Path, *, clock: Any = time.time) -> dict[str, Any]:
+    """Record that the operator accepts the measured findings of this encode."""
+
+    report = _video_metrics_report(job_root)
+    gate = report.get("quality_gate") if report is not None else None
+    errors = gate.get("errors") if isinstance(gate, Mapping) else None
+    if not errors or gate.get("status") != "needs_review":
+        raise ReviewError("the video metrics report holds no open review")
+    acceptance = {
+        "schema_version": 1,
+        "accepted_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(clock())),
+        "errors": [str(item) for item in errors],
+        "measurements": _metric_measurements(report["samples"]),
+    }
+    atomic_write_json(job_root / "comparison" / VIDEO_METRICS_ACCEPTANCE_NAME, acceptance)
+    return acceptance
+
+
+def video_metrics_accepted(
+    comparison_dir: Path, errors: Any, samples: Any
+) -> dict[str, Any] | None:
+    """The stored acceptance, when it names exactly these findings and frames."""
+
+    try:
+        acceptance = json.loads(
+            (comparison_dir / VIDEO_METRICS_ACCEPTANCE_NAME).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return None
+    if (
+        isinstance(acceptance, dict)
+        and acceptance.get("errors") == [str(item) for item in errors]
+        and acceptance.get("measurements") == _metric_measurements(samples)
+    ):
+        return acceptance
+    return None
 
 
 # -- language review --------------------------------------------------------

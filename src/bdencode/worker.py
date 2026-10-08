@@ -291,7 +291,7 @@ from .live_progress import (
     percent_in_tail,
     time_fraction,
 )
-from .review import read_upload_override
+from .review import read_upload_override, video_metrics_accepted
 from .tracker_bbcode import encoder_summary, screenshot_pair_numbers, tracker_bbcode
 from .tracker_policy import TrackerProfile
 from .release_naming import (
@@ -2509,10 +2509,65 @@ def _mean_plane_bias(
     return {name: round(sum(values) / len(values), 4) for name, values in totals.items()}
 
 
+# Below these the encode is broken (wrong frames, corruption, a failed
+# filter), not merely soft: the job stops for review.  The stricter quality
+# policy of ``_sampled_video_metric_errors`` only warns, because grainy film
+# can dip one sample under it while it looks identical to the source.
+BROKEN_SAMPLE_SSIM = 0.80
+BROKEN_SAMPLE_PSNR_DB = 28.0
+BROKEN_MEAN_SSIM = 0.90
+BROKEN_MEAN_PSNR_DB = 33.0
+
+
+def _sampled_video_metric_blockers(
+    samples: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Sampled measurements that show a broken encode or a broken measurement."""
+
+    errors: list[str] = []
+    finite_ssim: list[float] = []
+    finite_psnr: list[float] = []
+    for index, sample in enumerate(samples, start=1):
+        ssim = sample.get("ssim_all")
+        psnr = sample.get("psnr_average_db")
+        if not isinstance(ssim, float) or not 0 <= ssim <= 1:
+            errors.append(f"sample {index} has no finite SSIM value")
+        else:
+            finite_ssim.append(ssim)
+            if ssim < BROKEN_SAMPLE_SSIM:
+                errors.append(
+                    f"sample {index} SSIM is below {BROKEN_SAMPLE_SSIM:.2f} ({ssim:.6f})"
+                )
+        if isinstance(psnr, float):
+            finite_psnr.append(psnr)
+            if psnr < BROKEN_SAMPLE_PSNR_DB:
+                errors.append(
+                    f"sample {index} PSNR is below {BROKEN_SAMPLE_PSNR_DB:g} dB ({psnr:.3f} dB)"
+                )
+        elif str(psnr).casefold() not in {"inf", "+inf"}:
+            errors.append(f"sample {index} has no valid PSNR value")
+    if finite_ssim and sum(finite_ssim) / len(finite_ssim) < BROKEN_MEAN_SSIM:
+        errors.append(f"mean sampled SSIM is below {BROKEN_MEAN_SSIM:.2f}")
+    if finite_psnr and sum(finite_psnr) / len(finite_psnr) < BROKEN_MEAN_PSNR_DB:
+        errors.append(f"mean sampled PSNR is below {BROKEN_MEAN_PSNR_DB:g} dB")
+    for name, value in (_mean_plane_bias(samples) or {}).items():
+        if abs(value) > MAXIMUM_MEAN_PLANE_BIAS:
+            errors.append(
+                f"mean sampled {name.upper()} plane is shifted by {value:+.2f} "
+                f"(8-bit code values, limit {MAXIMUM_MEAN_PLANE_BIAS}); "
+                "a systematic colour or levels error in the encode"
+            )
+    return tuple(errors)
+
+
 def _sampled_video_metric_errors(
     samples: Sequence[Mapping[str, Any]],
 ) -> tuple[str, ...]:
-    """Conservative hard gates for catastrophic sampled video degradation."""
+    """The sampled quality policy: every finding is reported as a warning.
+
+    The ones that also show a broken encode come from
+    :func:`_sampled_video_metric_blockers`.
+    """
 
     errors: list[str] = []
     ssim_by_type: dict[str, list[float]] = {"I": [], "P": [], "B": []}
@@ -8325,10 +8380,25 @@ class PipelineWorker:
             },
             "samples": metric_samples,
         }
-        metric_errors = _sampled_video_metric_errors(metric_samples)
+        metric_errors = _sampled_video_metric_blockers(metric_samples)
+        metric_warnings = tuple(
+            item
+            for item in _sampled_video_metric_errors(metric_samples)
+            if item not in metric_errors
+        )
+        acceptance = (
+            video_metrics_accepted(paths.comparison, metric_errors, metric_samples)
+            if metric_errors
+            else None
+        )
+        if not metric_errors:
+            gate_status = "passed_with_warnings" if metric_warnings else "passed"
+        else:
+            gate_status = "accepted_by_operator" if acceptance else "needs_review"
         metric_document["quality_gate"] = {
-            "status": "needs_review" if metric_errors else "passed",
+            "status": gate_status,
             "errors": list(metric_errors),
+            "warnings": list(metric_warnings),
             "thresholds": {
                 "minimum_sample_ssim": 0.93,
                 "minimum_mean_ssim": 0.95,
@@ -8337,12 +8407,40 @@ class PipelineWorker:
                 "maximum_mean_plane_bias_8bit": MAXIMUM_MEAN_PLANE_BIAS,
                 "maximum_b_minus_p_ssim_deficit": 0.03,
             },
+            "blocking_thresholds": {
+                "minimum_sample_ssim": BROKEN_SAMPLE_SSIM,
+                "minimum_mean_ssim": BROKEN_MEAN_SSIM,
+                "minimum_sample_psnr_db": BROKEN_SAMPLE_PSNR_DB,
+                "minimum_mean_psnr_db": BROKEN_MEAN_PSNR_DB,
+                "maximum_mean_plane_bias_8bit": MAXIMUM_MEAN_PLANE_BIAS,
+            },
         }
+        if acceptance is not None:
+            metric_document["quality_gate"]["operator_acceptance"] = {
+                "accepted_at": acceptance.get("accepted_at"),
+            }
         atomic_write_json(metrics, metric_document)
-        if metric_errors:
+        if metric_errors and acceptance is None:
             raise ReviewRequired(
                 "sampled native-YUV video metrics require review",
                 details={"errors": list(metric_errors), "report": metrics.name},
+            )
+        if metric_warnings or acceptance is not None:
+            self.database.add_event(
+                EventCreate(
+                    job_id=job.id,
+                    kind="worker.video-metrics-warning",
+                    message=(
+                        "sampled video metrics accepted by the operator"
+                        if acceptance is not None
+                        else "sampled video metrics are below the quality policy; the job continues"
+                    ),
+                    payload={
+                        "errors": list(metric_errors),
+                        "warnings": list(metric_warnings),
+                        "report": metrics.name,
+                    },
+                )
             )
         _write_stage(
             paths.stages / "comparison-sampled-metrics-v4.json",
