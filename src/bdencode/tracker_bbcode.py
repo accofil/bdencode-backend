@@ -21,7 +21,10 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence
 
 COMPARISON_MINIMUM = 10
-COMPARISON_MAXIMUM = 12
+# Only this many of the measured pairs are uploaded and published: enough for
+# a convincing comparison (Aither asks for ten) without flooding the host.
+PUBLISHED_PAIR_COUNT = 10
+COMPARISON_MAXIMUM = PUBLISHED_PAIR_COUNT
 SCREENSHOT_COUNTS = {"aither": 6, "ncore": 3}
 
 # x264/x265 log lines worth publishing: the encoder's own [info]/[warning]
@@ -34,18 +37,38 @@ _ENCODER_LINE = re.compile(
 _LIBX_PREFIX = re.compile(r"^\[(libx26[45]) @ [^\]]+\] ")
 
 
-def comparison_pairs(pairs: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
-    """B pairs first, P pairs only to reach ten; never I-frames; in time order."""
+def _presentation(item: Mapping[str, Any]) -> int:
+    return int(item.get("presentation_index") or 0)
 
-    b_frames = [item for item in pairs if item.get("category") == "B"]
-    p_frames = [item for item in pairs if item.get("category") == "P"]
-    chosen = b_frames[:COMPARISON_MAXIMUM]
-    if len(chosen) < COMPARISON_MINIMUM:
-        chosen += p_frames[: COMPARISON_MINIMUM - len(chosen)]
-    return sorted(chosen, key=lambda item: int(item.get("presentation_index") or 0))
+
+def published_pairs(
+    pairs: Sequence[Mapping[str, Any]], count: int = PUBLISHED_PAIR_COUNT
+) -> list[Mapping[str, Any]]:
+    """The pairs whose pictures are uploaded, in time order.
+
+    B pairs first, then P, I-frames only when the others run out; each kind
+    spread over the runtime.
+    """
+
+    ordered = sorted(pairs, key=_presentation)
+    chosen: list[Mapping[str, Any]] = []
+    for category in ("B", "P", "I"):
+        missing = count - len(chosen)
+        if missing <= 0:
+            break
+        chosen += _spread([item for item in ordered if item.get("category") == category], missing)
+    return sorted(chosen, key=_presentation)
+
+
+def comparison_pairs(pairs: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """The published B and P pairs (never I-frames), in time order."""
+
+    return [item for item in published_pairs(pairs) if item.get("category") in {"B", "P"}]
 
 
 def _spread(items: Sequence[Any], count: int) -> list[Any]:
+    if count <= 0:
+        return []
     if len(items) <= count:
         return list(items)
     step = (len(items) - 1) / (count - 1) if count > 1 else 0
@@ -208,11 +231,13 @@ def tracker_bbcode(
 __all__ = [
     "COMPARISON_MAXIMUM",
     "COMPARISON_MINIMUM",
+    "PUBLISHED_PAIR_COUNT",
     "SCREENSHOT_COUNTS",
     "aither_bbcode",
     "comparison_pairs",
     "encoder_summary",
     "ncore_bbcode",
+    "published_pairs",
     "screenshot_pair_numbers",
     "tracker_bbcode",
 ]

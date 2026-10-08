@@ -3754,6 +3754,15 @@ def _advance_to_uploading(
     return worker, current, JobPaths.create(settings, job.id)
 
 
+def _published_pngs(paths: JobPaths) -> list[Path]:
+    """The comparison images the upload stage sends: the ten published pairs."""
+
+    from bdencode.worker import _images_to_upload
+
+    manifest = json.loads((paths.comparison / "video-comparison.json").read_text(encoding="utf-8"))
+    return _images_to_upload(_current_comparison_pngs(paths), "all", manifest["pairs"])
+
+
 def _read_upload_checkpoint(paths: JobPaths) -> dict[str, Any]:
     return json.loads((paths.comparison / "uploads.json").read_text(encoding="utf-8"))
 
@@ -3945,7 +3954,7 @@ def test_upload_falls_back_only_before_the_first_success(context):
         context,
         (lambda: primary, lambda: fallback, lambda: unused),
     )
-    expected_names = {path.name for path in _current_comparison_pngs(paths)}
+    expected_names = {path.name for path in _published_pngs(paths)}
 
     result = worker.process_job(uploading)
 
@@ -4309,7 +4318,7 @@ def test_schema_v1_upload_checkpoint_resumes_as_imgbb_without_mixing(context):
         context,
         (lambda: primary, lambda: fallback),
     )
-    pngs = _current_comparison_pngs(paths)
+    pngs = _published_pngs(paths)
     first = pngs[0]
     digest = sha256_file(first)
     legacy_url = f"https://i.ibb.co/legacy/{first.name}"

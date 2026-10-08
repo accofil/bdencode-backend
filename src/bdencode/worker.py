@@ -292,7 +292,12 @@ from .live_progress import (
     time_fraction,
 )
 from .review import read_upload_override, video_metrics_accepted
-from .tracker_bbcode import encoder_summary, screenshot_pair_numbers, tracker_bbcode
+from .tracker_bbcode import (
+    encoder_summary,
+    published_pairs,
+    screenshot_pair_numbers,
+    tracker_bbcode,
+)
 from .tracker_policy import TrackerProfile
 from .release_naming import (
     RELEASE_NAME_PATTERNS,
@@ -350,14 +355,31 @@ INTEGRITY_DECODE_THREADS = max(1, min(16, os.cpu_count() or 1))
 CROP_SCAN_SEGMENTS = max(1, min(16, os.cpu_count() or 1))
 
 
-def _images_to_upload(pngs: Sequence[Path], image_set: str) -> list[Path]:
+def _images_to_upload(
+    pngs: Sequence[Path],
+    image_set: str,
+    pairs: Sequence[Mapping[str, Any]] | None = None,
+) -> list[Path]:
     """The published subset of the comparison images.
 
-    ``sdr`` leaves out the native picture of every pair that also has a
-    tone-mapped ``-sdr`` view (an SDR title keeps its native pictures);
-    ``native`` leaves out the ``-sdr`` views.  Audio spectrograms always stay.
+    With the comparison ``pairs``, only the pictures of the published pairs
+    (:func:`published_pairs`, ten) are kept; the other measured pairs stay
+    local.  ``sdr`` leaves out the native picture of every pair that also has
+    a tone-mapped ``-sdr`` view (an SDR title keeps its native pictures);
+    ``native`` leaves out the ``-sdr`` views.  Audio spectrograms and tracker
+    screenshots always stay.
     """
 
+    if pairs:
+        kept = {id(item) for item in published_pairs(pairs)}
+        held_back = {
+            str(item.get(key))
+            for item in pairs
+            if isinstance(item, Mapping) and id(item) not in kept
+            for key in ("reference_png", "encode_png", "reference_sdr_png", "encode_sdr_png")
+            if item.get(key)
+        }
+        pngs = [png for png in pngs if png.name not in held_back]
     if image_set == "all":
         return list(pngs)
     names = {png.name for png in pngs}
@@ -8889,7 +8911,14 @@ class PipelineWorker:
 
         if selection.upload_images:
             try:
-                to_upload = _images_to_upload(pngs, selection.upload_image_set)
+                manifest_pairs = video_manifest.get("pairs")
+                to_upload = _images_to_upload(
+                    pngs,
+                    selection.upload_image_set,
+                    [item for item in manifest_pairs if isinstance(item, Mapping)]
+                    if isinstance(manifest_pairs, list)
+                    else None,
+                )
                 pending = [png for png in to_upload if png.name not in uploaded]
                 live = self._live(paths)
                 if pending:
