@@ -241,9 +241,9 @@ export function NewEncodePage() {
             <div className="folder-grid">
               {entries.map((entry) => (
                 <div key={entry.path} className={draft.sourcePath === entry.path ? "folder-tile folder-tile--selected" : "folder-tile"}>
-                  <button type="button" className="folder-tile__open" onClick={() => entry.is_bluray ? chooseSource(entry) : setBrowsePath(entry.path)}>
+                  <button type="button" className="folder-tile__open" title={entry.name} onClick={() => entry.is_bluray ? chooseSource(entry) : setBrowsePath(entry.path)}>
                     <span className="folder-tile__icon">{entry.is_bluray ? <Disc3 size={25} /> : <Folder size={25} />}</span>
-                    <span><strong>{entry.name}</strong><small>{entry.is_bluray ? t("Blu-ray forrás", "Blu-ray source") : t("Mappa", "Folder")}</small></span>
+                    <span className="folder-tile__name"><strong>{entry.name}</strong><small>{entry.is_bluray ? t("Blu-ray forrás", "Blu-ray source") : t("Mappa", "Folder")}</small></span>
                   </button>
                   {entry.is_bluray && (
                     <button type="button" className="folder-tile__select" onClick={() => chooseSource(entry)} aria-label={t(`${entry.name} kiválasztása`, `Select ${entry.name}`)}>

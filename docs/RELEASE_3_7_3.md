@@ -44,7 +44,7 @@ Stabilitás: a munka mérési zajon, ártalmatlan eszköz-figyelmeztetésen, FFm
 
 ## Megjegyzés
 
-A képvágás-ellenőrzés új, képkockánkénti naplózása miatt egy munka, amely újra a kódolás szakaszba lép, egyszer újra lefuttatja a teljes dekódolást.
+A 3.7.4-től a korábban lefutott teljes dekódolás és klipillesztés-ellenőrzés nem ismétlődik (lásd RELEASE_3_7_4.md).
 
 ## Ellenőrzőlista
 

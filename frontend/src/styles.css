@@ -249,11 +249,15 @@ input:checked + .toggle::after { left: 19px; background: white; }
 .breadcrumbs button { display: inline-flex; min-width: 0; align-items: center; gap: 5px; padding: 5px 7px; border: 0; border-radius: 7px; cursor: pointer; overflow: hidden; color: var(--text-soft); background: transparent; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .breadcrumbs button:not(:last-child)::after { margin-left: 5px; color: var(--muted); content: "/"; }
 .folder-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; max-height: 460px; overflow: auto; padding-right: 4px; }
-.folder-tile { position: relative; display: flex; min-height: 76px; align-items: center; border: 1px solid var(--border-soft); border-radius: 11px; background: rgba(255, 255, 255, 0.018); transition: 150ms ease; }
+.folder-tile { position: relative; display: flex; min-width: 0; min-height: 76px; align-items: center; border: 1px solid var(--border-soft); border-radius: 11px; background: rgba(255, 255, 255, 0.018); transition: 150ms ease; }
 .folder-tile:hover, .folder-tile--selected { border-color: rgba(101, 214, 179, 0.38); background: var(--accent-soft); }
 .folder-tile__open { display: flex; min-width: 0; flex: 1; align-items: center; gap: 11px; align-self: stretch; padding: 12px; border: 0; cursor: pointer; text-align: left; background: transparent; }
+.folder-tile__name { display: block; min-width: 0; flex: 1; }
+.folder-tile:has(.folder-tile__select) .folder-tile__name { padding-right: 62px; }
 .folder-tile__icon { display: grid; width: 40px; height: 40px; flex: 0 0 auto; place-items: center; border-radius: 10px; color: var(--accent); background: rgba(101, 214, 179, 0.1); }
-.folder-tile strong, .folder-tile small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.folder-tile strong { font-size: 12px; }.folder-tile small { margin-top: 4px; color: var(--muted); font-size: 10px; }
+/* Long release names wrap onto two lines (the full name is in the tooltip) and never spill into the next tile. */
+.folder-tile strong { display: -webkit-box; overflow: hidden; font-size: 12px; line-height: 1.3; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.folder-tile small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.folder-tile small { margin-top: 4px; color: var(--muted); font-size: 10px; }
 .folder-tile__select { position: absolute; right: 8px; bottom: 7px; padding: 3px 6px; border: 0; border-radius: 5px; cursor: pointer; color: var(--accent); background: transparent; font-size: 9px; font-weight: 800; }
 .folder-tile__chevron { margin-right: 8px; border: 0; cursor: pointer; color: var(--muted); background: transparent; }
 .folder-empty { grid-column: 1 / -1; display: flex; min-height: 120px; align-items: center; justify-content: center; gap: 10px; color: var(--muted); font-size: 12px; }
@@ -310,7 +314,7 @@ input:checked + .toggle::after { left: 19px; background: white; }
 @media (max-width: 900px) {
   .sidebar { transform: translateX(-105%); transition: transform 180ms ease; }.sidebar--open { transform: translateX(0); box-shadow: 20px 0 60px rgba(0,0,0,.45); }.sidebar-close { display: inline-grid; place-items: center; }.sidebar-scrim { position: fixed; inset: 0; z-index: 25; display: block; border: 0; background: rgba(0,0,0,.55); }.mobile-menu-button { position: fixed; z-index: 20; top: 15px; left: 15px; display: grid; width: 40px; height: 40px; place-items: center; border: 1px solid var(--border); border-radius: 10px; background: rgba(17,24,32,.92); box-shadow: 0 8px 22px rgba(0,0,0,.3); }.main-content { margin-left: 0; }.page { padding-top: 72px; }
   .page-header { align-items: flex-start; flex-direction: column; }.dashboard-grid--content, .overview-grid, .system-content-grid, .video-settings-layout, .review-layout, .release-layout { grid-template-columns: 1fr; }.job-grid, .frame-pair-grid, .release-evidence-grid { grid-template-columns: 1fr; }
-  .wizard-content-grid { grid-template-columns: 1fr; }.folder-grid { grid-template-columns: repeat(2, 1fr); }.choice-grid--detail { grid-template-columns: 1fr; }
+  .wizard-content-grid { grid-template-columns: 1fr; }.folder-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.choice-grid--detail { grid-template-columns: 1fr; }
   .source-browser__toolbar { align-items: stretch; flex-direction: column; }.search-field--small { max-width: none; }
   .playlist-grid { grid-template-columns: 1fr; }.video-settings-side { grid-row: 1; }.crop-editor { grid-template-columns: 1fr; }.crop-editor > .field-help { grid-column: auto; }
   .action-callout { grid-template-columns: 52px 1fr; }.action-callout .button { grid-column: 1 / -1; }
