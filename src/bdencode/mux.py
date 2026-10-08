@@ -524,16 +524,75 @@ def _normalized_codec(value: object) -> str:
     return aliases.get(normalized, normalized)
 
 
+# FFprobe names for one encoder profile differ between FFmpeg builds (5.x
+# reports libx265's 12-bit Main profile as "Rext"); compared without case,
+# spaces or punctuation.
+_PROFILE_ALIASES = (
+    frozenset({"main12", "rext", "formatrangeextensions", "rangeextensions"}),
+)
+# Chroma sample location 0 ("left") is the H.264/HEVC default for 4:2:0: a
+# stream that does not signal it is decoded exactly like one that signals
+# "left", and FFmpeg builds differ in which of the two they report.
+_DEFAULT_CHROMA_LOCATIONS = frozenset({"", "unspecified", "unknown", "left"})
+
+
+def _profile_key(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value).casefold())
+
+
+def _profiles_match(actual: object, expected: object) -> bool:
+    actual_key, expected_key = _profile_key(actual), _profile_key(expected)
+    if actual_key == expected_key:
+        return True
+    return any(
+        actual_key in family and expected_key in family for family in _PROFILE_ALIASES
+    )
+
+
+def _level_number(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
 def validate_ffprobe_stream_policy(
     document: Mapping[str, Any],
     *,
     video: FinalVideoPolicy,
     media_tracks: Sequence[FinalTrackPolicy],
 ) -> tuple[str, ...]:
+    """The final-stream policy errors (see :func:`assess_ffprobe_stream_policy`)."""
+
+    errors, _warnings = assess_ffprobe_stream_policy(
+        document, video=video, media_tracks=media_tracks
+    )
+    return errors
+
+
+def assess_ffprobe_stream_policy(
+    document: Mapping[str, Any],
+    *,
+    video: FinalVideoPolicy,
+    media_tracks: Sequence[FinalTrackPolicy],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Compare the final streams with the reviewed policy: (errors, warnings).
+
+    Codec, size, pixel format (bit depth), range, matrix, transfer and
+    primaries must match exactly.  Differences in how FFmpeg builds name or
+    default the descriptive fields are warnings: a profile alias, an
+    unsignalled chroma location, an unreported level or a level below the
+    configured one.
+    """
+
     errors: list[str] = []
+    warnings: list[str] = []
     raw_streams = document.get("streams")
     if not isinstance(raw_streams, list):
-        return ("ffprobe stream report has no streams array",)
+        return ("ffprobe stream report has no streams array",), ()
     # Attachments are never emitted by v2.  Ignore one here only so the media
     # topology diagnostic can report playable-stream differences independently;
     # the MKVToolNix topology validator rejects attachments separately.
@@ -548,7 +607,7 @@ def validate_ffprobe_stream_policy(
         errors.append(
             f"ffprobe stream topology differs: expected {expected_types}, got {actual_types}"
         )
-        return tuple(errors)
+        return tuple(errors), ()
 
     actual_video = streams[0]
     expected_video = {
@@ -567,12 +626,37 @@ def validate_ffprobe_stream_policy(
         expected_video["level"] = video.level
     for key, expected in expected_video.items():
         actual = actual_video.get(key)
+        message = f"video {key} differs: expected {expected}, got {actual}"
         if key == "codec_name":
             matches = _normalized_codec(actual) == _normalized_codec(expected)
+        elif key == "profile":
+            matches = actual == expected
+            if not matches and _profiles_match(actual, expected):
+                warnings.append(f"video profile is reported as {actual} for {expected}")
+                matches = True
+        elif key == "level":
+            matches = actual == expected
+            actual_level = _level_number(actual)
+            if not matches and (actual_level is None or actual_level < int(expected)):
+                warnings.append(
+                    f"video level is reported as {actual} (configured {expected})"
+                )
+                matches = True
+        elif key == "chroma_location":
+            matches = actual == expected
+            actual_location = str(actual or "").casefold()
+            expected_location = str(expected or "").casefold()
+            if not matches and actual_location in _DEFAULT_CHROMA_LOCATIONS:
+                matches = True
+                if expected_location not in _DEFAULT_CHROMA_LOCATIONS:
+                    warnings.append(
+                        f"video chroma location is reported as {actual or 'unspecified'} "
+                        f"(expected {expected})"
+                    )
         else:
             matches = actual == expected
         if not matches:
-            errors.append(f"video {key} differs: expected {expected}, got {actual}")
+            errors.append(message)
 
     for index, (actual, expected) in enumerate(
         zip(streams[1:], media_tracks, strict=True), start=1
@@ -584,7 +668,7 @@ def validate_ffprobe_stream_policy(
                 f"track {index} codec differs: expected {expected.codec_name}, "
                 f"got {actual.get('codec_name')}"
             )
-    return tuple(errors)
+    return tuple(errors), tuple(warnings)
 
 
 def validate_stream_start_times(

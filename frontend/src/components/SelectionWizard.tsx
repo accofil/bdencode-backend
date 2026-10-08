@@ -61,7 +61,7 @@ import { normalizeStoredSelection } from "../selection";
 import type { StoredTrackSelection } from "../selection";
 import { encoderHelp } from "../encoderHelp";
 import { IMAGE_UPLOAD_PROVIDER_LABELS, UPLOAD_IMAGE_SET_LABELS, uploadImageSet } from "../uploads";
-import { basename, formatDuration, humanize, suggestedOutputName } from "../utils";
+import { basename, formatDuration, humanize, stabilityWarning, suggestedOutputName } from "../utils";
 import {
   buildReleaseName,
   channelLayout,
@@ -633,7 +633,7 @@ export function SelectionWizard({
 
       {scan.warnings.length > 0 && (
         <Notice tone="warning" title={t("A scan figyelmeztetései", "Scan warnings")}>
-          <ul>{scan.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
+          <ul>{scan.warnings.map((warning) => <li key={warning}>{stabilityWarning(warning) ?? warning}</li>)}</ul>
         </Notice>
       )}
 

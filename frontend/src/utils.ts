@@ -133,6 +133,11 @@ function eventKindLabel(kind: string): string | undefined {
     "worker.dynamic-hdr": ["Dinamikus HDR", "Dynamic HDR"],
     "worker.variable-aspect": ["Változó képarány", "Variable aspect ratio"],
     "worker.final-vmaf": ["Mintavett VMAF a kész fájlon", "Sampled VMAF of the final file"],
+    "worker.crop-verification-warning": ["Crop-ellenőrzés: rövid felvillanás", "Crop check: short flash"],
+    "worker.subtitle-decode-warning": ["Felirat-dekódolás: figyelmeztetés", "Subtitle decode warning"],
+    "worker.video-duration-warning": ["Videóhossz: figyelmeztetés", "Video duration warning"],
+    "worker.video-efficiency-warning": ["Videóméret: figyelmeztetés", "Video size warning"],
+    "worker.stream-policy-warning": ["Videósáv leírása: figyelmeztetés", "Video stream description warning"],
     "job.upload-reset": ["Képfeltöltés elölről", "Image upload restarted"],
   };
   const pair = labels[kind];
@@ -237,6 +242,8 @@ export function formatStatusMessage(message: string | null, fallback: string): s
   if (uploadRetry) return t(`A képfeltöltés ${uploadRetry[1]}. kísérlete nem sikerült (a tárhely nem elérhető); automatikus újrapróbálás ${uploadRetry[2]} mp múlva`, `Image upload attempt ${uploadRetry[1]} failed (the host is unavailable); retrying automatically in ${uploadRetry[2]} s`);
   const metric = videoMetricFinding(message);
   if (metric) return metric;
+  const stability = stabilityWarning(message);
+  if (stability) return stability;
   const sampledVmaf = /^sampled VMAF of the final file: mean (\S+), 1% low (\S+) \((\d+) frames\)$/.exec(message);
   if (sampledVmaf) return t(`Mintavett VMAF a kész fájlon: átlag ${sampledVmaf[1]}, 1% low ${sampledVmaf[2]} (${sampledVmaf[3]} képkocka)`, `Sampled VMAF of the final file: mean ${sampledVmaf[1]}, 1% low ${sampledVmaf[2]} (${sampledVmaf[3]} frames)`);
   return encodeProgressLabel(message) ?? eventMessageLabel(message) ?? formatWorkerError(message);
@@ -253,6 +260,21 @@ export function formatWorkerError(error: string): string {
     return t("Egy feliratsáv Matroska-fájlja nem készült el. A kész videó- és hangsávok megmaradtak; a javítás után biztonságosan folytatható.", "A subtitle track's Matroska file was not created. The finished video and audio tracks are kept; after the fix the job can safely continue.");
   }
   return error;
+}
+
+/**
+ * Checks that record a measurement artefact or an FFmpeg-build difference as a
+ * warning and let the job continue (since 3.7.3), localised.
+ */
+export function stabilityWarning(message: string): string | undefined {
+  const flash = /^crop verification: (\d+) short flash\(es\) reach into the cropped border \((\d+) frame\(s\), longest ([\d.]+) s\); the crop is kept and the job continues$/.exec(message);
+  if (flash) return t(`Crop-ellenőrzés: ${flash[1]} rövid felvillanás ér bele a levágott sávba (${flash[2]} képkocka, a leghosszabb ${flash[3]} mp). A crop marad, a job folytatódik.`, `Crop check: ${flash[1]} short flash(es) reach into the cropped border (${flash[2]} frame(s), longest ${flash[3]} s). The crop is kept and the job continues.`);
+  if (message === "the final subtitle decode shows known harmless differences; the job continues") return t("A kész feliratok dekódolása ismert, ártalmatlan eltéréseket mutat; a job folytatódik (részletek a subtitle-integrity.json-ban)", "The final subtitle decode shows known harmless differences; the job continues (details in subtitle-integrity.json)");
+  if (message === "the estimated playlist duration differs from the frame count; the job continues") return t("A playlist becsült hossza eltér a képkockák számából adódó hossztól; a job folytatódik (részletek a video-frame-completeness.json-ban)", "The estimated playlist duration differs from the frame count; the job continues (details in video-frame-completeness.json)");
+  if (message === "the encoded video is not smaller than the source; the job continues") return t("A kódolt videó nem lett kisebb a forrásnál (alacsony bitrátájú vagy animációs lemeznél előfordul); a job folytatódik", "The encoded video is not smaller than the source (this happens with low-bitrate or animated discs); the job continues");
+  if (message === "the final video stream is described differently by this FFmpeg build; the job continues") return t("Ez az FFmpeg-verzió másképp írja le a kész videósávot (profilnév, chroma-pozíció vagy szint); a kép megfelel a beállításoknak, a job folytatódik", "This FFmpeg build describes the final video stream differently (profile name, chroma location or level); the picture matches the settings and the job continues");
+  if (message === "The libbluray playlist reader failed; playlist durations are ffprobe estimates and the duration check only warns.") return t("A libbluray playlist-olvasó nem futott le; a playlistek hossza az ffprobe becslése, ezért a hosszellenőrzés csak figyelmeztet.", "The libbluray playlist reader failed; playlist durations are ffprobe estimates and the duration check only warns.");
+  return undefined;
 }
 
 /** One finding of the sampled native-YUV PSNR/SSIM measurement, localised. */

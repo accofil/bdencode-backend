@@ -100,6 +100,7 @@ from .media.bluray import (
     DiscKind,
     DiscScan,
     HdrStaticMetadata,
+    LIBBLURAY_UNAVAILABLE_WARNING,
     MediaStream,
     PlaylistCandidate,
     PlaylistSegment,
@@ -176,7 +177,7 @@ from .mux import (
     plan_common_zero_timeline,
     stream_start_probe_command,
     validate_dynamic_hdr_output,
-    validate_ffprobe_stream_policy,
+    assess_ffprobe_stream_policy,
     validate_hdr10_side_data,
     validate_mkvmerge_identification,
     validate_stream_start_times,
@@ -259,6 +260,7 @@ from .qc.video import (
 from .qc.subtitle import (
     SubtitleDecodeError,
     parse_subtitle_probe,
+    assess_final_subtitle_decode,
     require_subtitle_decode,
     subtitle_decode_probe_command,
     subtitle_probe_command,
@@ -266,7 +268,6 @@ from .qc.subtitle import (
 )
 from .qc.integrity import (
     clip_join_decode_command,
-    VideoEfficiencyError,
     compare_packet_timelines,
     packet_timeline_probe_command,
     parse_packet_timeline,
@@ -275,7 +276,7 @@ from .qc.integrity import (
     parse_video_stream_hash,
     require_video_cadence,
     require_video_completeness,
-    require_video_efficiency,
+    evaluate_video_efficiency,
     source_video_integrity_command,
     split_clip_join_lines,
     stream_payload_hash_command,
@@ -2519,6 +2520,23 @@ BROKEN_MEAN_SSIM = 0.90
 BROKEN_MEAN_PSNR_DB = 33.0
 
 
+def _title_duration_is_estimate(scan: DiscScan, playlist: PlaylistCandidate) -> bool:
+    """Whether the playlist duration is ffprobe's container estimate.
+
+    The libbluray playlist reader provides both the exact playlist duration
+    and its clip segments.  When it failed or timed out during the scan the
+    playlist has no segments and its duration is ffprobe's ``format.duration``
+    estimate, which can be off by more than a frame or two.  A scan without
+    any playlist backend (the largest-clip fallback) is an estimate as well.
+    """
+
+    return not playlist.segments or any(
+        warning == LIBBLURAY_UNAVAILABLE_WARNING
+        or warning.startswith("No libbluray playlist backend")
+        for warning in scan.warnings
+    )
+
+
 def _sampled_video_metric_blockers(
     samples: Sequence[Mapping[str, Any]],
 ) -> tuple[str, ...]:
@@ -3958,7 +3976,7 @@ class PipelineWorker:
             "reference_sha256": reference_sha256,
             "context": "source",
             "decode_mode": "full-pixel-decode",
-            "crop_verification": "cropdetect-reset0",
+            "crop_verification": "cropdetect-per-frame",
         }
         outputs = [
             paths.analysis / "source-video-integrity.json",
@@ -4088,9 +4106,11 @@ class PipelineWorker:
 
         Preparation chooses the crop from the keyframes.  A shot shorter than a
         keyframe interval that shows more picture (a full-frame insert in a
-        scope film) appears only here; a crop that would cut into it stops the
-        job for review and drops the crop checkpoint, so a restart scans every
-        frame and encodes with the crop that keeps the whole picture.
+        scope film) appears only here; a crop that would cut into it for at
+        least half a second stops the job for review and drops the crop
+        checkpoint, so a restart scans every frame and encodes with the crop
+        that keeps the whole picture.  A shorter flash in the bar is recorded
+        as a ``worker.crop-verification-warning`` and the job continues.
         """
 
         report = paths.analysis / "crop-verification.json"
@@ -4125,15 +4145,39 @@ class PipelineWorker:
                 f"crop verification requires review: {exc}",
                 details={"code": exc.code, "report": report.name},
             ) from exc
+        flashes = verification.passed and verification.flash_runs > 0
         atomic_write_json(
             report,
             {
-                "schema_version": 1,
-                "status": "passed" if verification.passed else "needs_review",
+                "schema_version": 2,
+                "status": (
+                    "needs_review"
+                    if not verification.passed
+                    else "passed_with_warnings" if flashes else "passed"
+                ),
                 "reference_sha256": reference_sha256,
                 **verification.to_dict(),
             },
         )
+        if flashes:
+            # A bright frame in the bar (a flash, a logo, dust, grain in an HDR
+            # bar) is no lost picture: the crop stays and the job continues.
+            self.database.add_event(
+                EventCreate(
+                    job_id=paths.root.name,
+                    kind="worker.crop-verification-warning",
+                    message=verification.summary(),
+                    payload={
+                        "report": report.name,
+                        "flash_runs": verification.flash_runs,
+                        "cut_frames": verification.cut_frames,
+                        "minimum_persistent_seconds": (
+                            verification.minimum_persistent_seconds
+                        ),
+                        "runs": [run.to_dict() for run in verification.flashes[:5]],
+                    },
+                )
+            )
         if not verification.passed:
             (paths.stages / "crop-policy.json").unlink(missing_ok=True)
             raise ReviewRequired(
@@ -5871,17 +5915,16 @@ class PipelineWorker:
                 encoded_summary = parse_video_packet_sizes(
                     encoded_packets.read_text(encoding="utf-8")
                 )
-                verdict = require_video_efficiency(
+                # A low-bitrate or animated disc at a low CRF can legitimately
+                # come out larger than its source: that is a warning, not a
+                # defect.  Unreadable packet evidence still stops the job.
+                verdict = evaluate_video_efficiency(
                     source_summary.total_bytes,
                     encoded_summary.total_bytes,
                     encoded_is_lossy=True,
                 )
             except (OSError, ValueError) as exc:
-                failure = (
-                    str(exc)
-                    if isinstance(exc, VideoEfficiencyError)
-                    else f"video packet-size evidence is invalid: {exc}"
-                )
+                failure = f"video packet-size evidence is invalid: {exc}"
                 atomic_write_json(
                     efficiency_report,
                     {
@@ -5898,12 +5941,32 @@ class PipelineWorker:
                 efficiency_report,
                 {
                     "schema_version": 1,
-                    "status": "passed",
+                    "status": "passed" if verdict.passed else "passed_with_warnings",
                     "source": source_summary.to_dict(),
                     "encoded": encoded_summary.to_dict(),
                     "verdict": verdict.to_dict(),
+                    "warnings": [] if verdict.passed else [verdict.reason],
                 },
             )
+            if not verdict.passed:
+                self.database.add_event(
+                    EventCreate(
+                        job_id=job.id,
+                        kind="worker.video-efficiency-warning",
+                        message=(
+                            "the encoded video is not smaller than the source; "
+                            "the job continues"
+                        ),
+                        payload={
+                            "source_bytes": verdict.source_bytes,
+                            "encoded_bytes": verdict.encoded_bytes,
+                            "encoded_to_source_ratio": str(
+                                verdict.encoded_to_source_ratio
+                            ),
+                            "report": efficiency_report.name,
+                        },
+                    )
+                )
             _write_stage(
                 efficiency_marker,
                 efficiency_inputs,
@@ -6573,7 +6636,7 @@ class PipelineWorker:
         ffprobe_document = json.loads(
             (report_root / "ffprobe-streams.json").read_text(encoding="utf-8")
         )
-        stream_errors = validate_ffprobe_stream_policy(
+        stream_errors, stream_warnings = assess_ffprobe_stream_policy(
             ffprobe_document,
             video=video_policy,
             media_tracks=[*audio_policies, *subtitle_policies],
@@ -6621,12 +6684,27 @@ class PipelineWorker:
                 "final media streams differ from the reviewed codec/color/HDR policy",
                 details={"errors": list(policy_errors)},
             )
+        if stream_warnings:
+            # FFmpeg builds name a profile or default the chroma location
+            # differently; the picture itself matches the reviewed policy.
+            self.database.add_event(
+                EventCreate(
+                    job_id=job.id,
+                    kind="worker.stream-policy-warning",
+                    message=(
+                        "the final video stream is described differently by this "
+                        "FFmpeg build; the job continues"
+                    ),
+                    payload={"warnings": list(stream_warnings)},
+                )
+            )
 
         # The general full-decode pass maps video/audio only.  Send every final
         # subtitle event through FFmpeg's actual decoder; packet-copy/remux
         # evidence cannot prove that a PGS/text payload is parseable.
         subtitle_integrity_results: list[dict[str, Any]] = []
         subtitle_decode_reports: list[Path] = []
+        subtitle_warnings: list[dict[str, Any]] = []
         retained_subtitle_entries = [
             entry for entry in retained_streams if entry[2].kind is StreamKind.SUBTITLE
         ]
@@ -6664,36 +6742,26 @@ class PipelineWorker:
                         stdout_path=subtitle_decode_report,
                         stderr_path=subtitle_decode_log,
                     )
-                if subtitle_decode_log.read_text(
+                decode_stderr = subtitle_decode_log.read_text(
                     encoding="utf-8", errors="replace"
-                ).strip():
-                    raise SubtitleDecodeError(
-                        "subtitle decoder emitted error-level diagnostics"
-                    )
+                )
                 verdict = require_subtitle_decode(
                     subtitle_decode_report.read_text(encoding="utf-8")
                 )
                 sidecar_probe = parse_subtitle_probe(
                     sidecar_probe_path.read_text(encoding="utf-8")
                 )
-                if (
-                    stream.codec.casefold() == "hdmv_pgs_subtitle"
-                    and verdict.decoded_event_count != sidecar_probe.packet_count
-                ):
-                    raise SubtitleDecodeError(
-                        "decoded PGS event count differs from the sidecar packet count"
-                    )
-                title_duration = Decimal(str(playlist.duration_seconds))
-                timestamp_tolerance = Decimal("0.100")
-                if (
-                    verdict.first_timestamp is None
-                    or verdict.last_timestamp is None
-                    or verdict.first_timestamp < -timestamp_tolerance
-                    or verdict.last_timestamp > title_duration + timestamp_tolerance
-                ):
-                    raise SubtitleDecodeError(
-                        "decoded subtitle timestamps fall outside the reviewed title"
-                    )
+                # Real defects stop the job; known PGS quirks, FFmpeg-build
+                # differences in the event count and a trailing clear set
+                # just past the title end are recorded as warnings.
+                decode_errors, decode_warnings = assess_final_subtitle_decode(
+                    verdict,
+                    stderr_text=decode_stderr,
+                    packet_count=sidecar_probe.packet_count,
+                    title_duration_seconds=Decimal(str(playlist.duration_seconds)),
+                )
+                if decode_errors:
+                    raise SubtitleDecodeError("; ".join(decode_errors))
             except (OSError, UnicodeError, ProcessFailure, SubtitleDecodeError) as exc:
                 subtitle_integrity_results.append(
                     {
@@ -6731,22 +6799,45 @@ class PipelineWorker:
             subtitle_integrity_results.append(
                 {
                     "subtitle_ordinal": subtitle_ordinal,
-                    "status": "passed",
+                    "status": "passed_with_warnings" if decode_warnings else "passed",
                     "decode": verdict.to_dict(),
                     "sidecar_packet_count": sidecar_probe.packet_count,
+                    "warnings": list(decode_warnings),
                     "evidence_sha256": sha256_file(subtitle_decode_report),
                 }
             )
+            if decode_warnings:
+                subtitle_warnings.append(
+                    {
+                        "subtitle_ordinal": subtitle_ordinal,
+                        "warnings": list(decode_warnings),
+                    }
+                )
             subtitle_decode_reports.append(subtitle_decode_report)
         subtitle_integrity_report = report_root / "subtitle-integrity.json"
         atomic_write_json(
             subtitle_integrity_report,
             {
                 "schema_version": 2,
-                "status": "passed",
+                "status": "passed_with_warnings" if subtitle_warnings else "passed",
                 "tracks": subtitle_integrity_results,
             },
         )
+        if subtitle_warnings:
+            self.database.add_event(
+                EventCreate(
+                    job_id=job.id,
+                    kind="worker.subtitle-decode-warning",
+                    message=(
+                        "the final subtitle decode shows known harmless differences; "
+                        "the job continues"
+                    ),
+                    payload={
+                        "tracks": subtitle_warnings,
+                        "report": subtitle_integrity_report.name,
+                    },
+                )
+            )
         reports.extend(subtitle_decode_reports)
         reports.append(subtitle_integrity_report)
 
@@ -7717,6 +7808,7 @@ class PipelineWorker:
             "mux_integrity_report_sha256": sha256_file(mux_integrity_report),
             "final_video_timeline_sha256": sha256_file(final_video_timeline_path),
             "title_duration_seconds": str(playlist.duration_seconds),
+            "title_duration_is_estimate": _title_duration_is_estimate(scan, playlist),
             "final_video_duration_seconds": str(final_video_duration),
             "tolerance_frames": 2,
         }
@@ -7744,6 +7836,7 @@ class PipelineWorker:
                     title_duration_seconds=playlist.duration_seconds,
                     final_video_duration_seconds=final_video_duration,
                     tolerance_frames=2,
+                    title_duration_is_estimate=_title_duration_is_estimate(scan, playlist),
                 )
             except (OSError, ValueError) as exc:
                 error = str(exc)
@@ -7766,12 +7859,31 @@ class PipelineWorker:
                 completeness_report,
                 {
                     "schema_version": 1,
-                    "status": "passed",
+                    "status": (
+                        "passed_with_warnings"
+                        if completeness_verdict.warnings
+                        else "passed"
+                    ),
                     "encoded_packet_summary": encoded_packet_summary.to_dict(),
                     "cadence_verdict": cadence_verdict.to_dict(),
                     "verdict": completeness_verdict.to_dict(),
                 },
             )
+            if completeness_verdict.warnings:
+                self.database.add_event(
+                    EventCreate(
+                        job_id=job.id,
+                        kind="worker.video-duration-warning",
+                        message=(
+                            "the estimated playlist duration differs from the "
+                            "frame count; the job continues"
+                        ),
+                        payload={
+                            "warnings": list(completeness_verdict.warnings),
+                            "report": completeness_report.name,
+                        },
+                    )
+                )
             _write_stage(
                 completeness_marker,
                 completeness_inputs,

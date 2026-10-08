@@ -176,6 +176,8 @@ class VideoCompletenessVerdict:
     final_duration_matches: bool
     passed: bool
     reasons: tuple[str, ...]
+    title_duration_is_estimate: bool = False
+    warnings: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-ready, precision-preserving representation."""
@@ -203,6 +205,8 @@ class VideoCompletenessVerdict:
             "duration_matches": self.duration_matches,
             "passed": self.passed,
             "reasons": list(self.reasons),
+            "title_duration_is_estimate": self.title_duration_is_estimate,
+            "warnings": list(self.warnings),
         }
 
 
@@ -369,8 +373,9 @@ def source_video_integrity_command(
     without weakening ``-xerror``/``explode`` error handling.  No copy codec is
     selected: every source frame must pass through the decoder before the null
     muxer accepts it.  ``threads`` sets the decoder's frame threads.
-    ``cropdetect`` adds the running active-picture envelope of every frame to
-    the log, which verifies a crop chosen from the keyframes.
+    ``cropdetect`` adds the active picture of every single frame to the log
+    (``reset=1``), which verifies a crop chosen from the keyframes and tells a
+    lasting wider shot from a one-frame flash in the bar.
     """
 
     if stream < 0:
@@ -398,7 +403,7 @@ def source_video_integrity_command(
         f"0:v:{stream}",
         "-map_metadata",
         "-1",
-        *(("-vf", "cropdetect=limit=0.094:round=2:reset=0") if cropdetect else ()),
+        *(("-vf", "cropdetect=limit=0.094:round=2:reset=1") if cropdetect else ()),
         "-f",
         "null",
         "-",
@@ -906,6 +911,7 @@ def evaluate_video_completeness(
     title_duration_seconds: Decimal | int | float | str,
     final_video_duration_seconds: Decimal | int | float | str,
     tolerance_frames: int = DEFAULT_VIDEO_COMPLETENESS_TOLERANCE_FRAMES,
+    title_duration_is_estimate: bool = False,
 ) -> VideoCompletenessVerdict:
     """Evaluate whether the encoded Matroska video covers the complete title.
 
@@ -914,6 +920,12 @@ def evaluate_video_completeness(
     Independent duration checks derive the reference duration from its exact
     frame count and rational FPS, then require both the reviewed playlist and
     the final Matroska packet timeline to remain within ``tolerance_frames``.
+
+    ``title_duration_is_estimate`` marks a playlist duration that came from
+    ffprobe's container estimate (the libbluray playlist reader failed or
+    timed out during the scan) rather than from the playlist itself.  Such a
+    duration is not evidence of a lost segment: a mismatch against it is a
+    warning, while the packet count and the final timeline still decide.
 
     Invalid or non-finite evidence raises instead of producing a passing verdict.
     Use :func:`require_video_completeness` for a single fail-closed gate.
@@ -953,10 +965,16 @@ def evaluate_video_completeness(
             f"count: encoded_packets={encoded_packets}, "
             f"reference_frames={reference_frames}"
         )
+    warnings: list[str] = []
     if not duration_matches:
-        reasons.append(
-            "reference frame-derived duration does not match playlist/title "
-            f"duration within {tolerance} frame(s): "
+        (warnings if title_duration_is_estimate else reasons).append(
+            "reference frame-derived duration does not match "
+            + (
+                "the estimated playlist/title duration "
+                if title_duration_is_estimate
+                else "playlist/title duration "
+            )
+            + f"within {tolerance} frame(s): "
             f"reference_duration_seconds={reference_duration}, "
             f"title_duration_seconds={title_duration}, "
             f"delta_seconds={duration_delta}, "
@@ -989,9 +1007,13 @@ def evaluate_video_completeness(
         duration_matches=duration_matches,
         final_duration_matches=final_duration_matches,
         passed=(
-            packet_count_matches and duration_matches and final_duration_matches
+            packet_count_matches
+            and (duration_matches or title_duration_is_estimate)
+            and final_duration_matches
         ),
         reasons=tuple(reasons),
+        title_duration_is_estimate=title_duration_is_estimate,
+        warnings=tuple(warnings),
     )
 
 
@@ -1004,6 +1026,7 @@ def require_video_completeness(
     title_duration_seconds: Decimal | int | float | str,
     final_video_duration_seconds: Decimal | int | float | str,
     tolerance_frames: int = DEFAULT_VIDEO_COMPLETENESS_TOLERANCE_FRAMES,
+    title_duration_is_estimate: bool = False,
 ) -> VideoCompletenessVerdict:
     """Return a passing completeness verdict or raise for manual review."""
 
@@ -1016,6 +1039,7 @@ def require_video_completeness(
             title_duration_seconds=title_duration_seconds,
             final_video_duration_seconds=final_video_duration_seconds,
             tolerance_frames=tolerance_frames,
+            title_duration_is_estimate=title_duration_is_estimate,
         )
     except ValueError as exc:
         raise VideoCompletenessError(

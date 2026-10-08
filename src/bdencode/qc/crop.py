@@ -14,7 +14,7 @@ import re
 from dataclasses import asdict, dataclass
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from pathlib import Path
-from typing import Iterable, Literal
+from typing import Iterable, Literal, Sequence
 
 from .video import CropMargins, parse_cropdetect
 
@@ -28,6 +28,11 @@ DEFAULT_SUBSTANTIAL_BORDER_PIXELS = 8
 DEFAULT_SAFETY_MARGIN_PIXELS = 2
 DEFAULT_DECODE_PREROLL_SECONDS = Decimal("12")
 DEFAULT_FULL_TITLE_SAMPLE_FPS = Decimal("1")
+# A wider picture must last this long in the full decode to stop the job; a
+# shorter flash (a bright frame in the bar, a logo, dust, grain in an HDR bar)
+# is recorded as a warning.  Half a second is twelve frames at 24 fps.
+DEFAULT_PERSISTENT_CUT_SECONDS = 0.5
+DEFAULT_UNTIMED_PERSISTENT_FRAMES = 12
 
 
 _CROP_OBSERVATION_PATTERN = re.compile(
@@ -36,6 +41,9 @@ _CROP_OBSERVATION_PATTERN = re.compile(
 _TIMED_CROP_PATTERN = re.compile(
     r"(?:\bt:(?P<time>-?\d+(?:\.\d+)?)\b.*?)?"
     r"(?:^|\s)crop=(?P<width>\d+):(?P<height>\d+):(?P<x>\d+):(?P<y>\d+)"
+)
+_ANY_CROP_PATTERN = re.compile(
+    r"(?:\bt:(?P<time>-?\d+(?:\.\d+)?)\b.*?)?(?:^|\s)crop=-?\d+:-?\d+:-?\d+:-?\d+"
 )
 _EDGES = ("left", "top", "right", "bottom")
 DEFAULT_ASPECT_WARMUP_FRACTION = 0.05
@@ -908,27 +916,76 @@ def _cuts(used: CropMargins, picture: CropMargins, safety_margin_pixels: int) ->
 
 
 @dataclass(frozen=True, slots=True)
+class CropCutRun:
+    """Consecutive frames whose picture reaches into the cropped border."""
+
+    start_seconds: float | None
+    frames: int
+    duration_seconds: float | None
+    picture: CropMargins
+    persistent: bool
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "start_seconds": (
+                None if self.start_seconds is None else round(self.start_seconds, 3)
+            ),
+            "frames": self.frames,
+            "duration_seconds": (
+                None if self.duration_seconds is None else round(self.duration_seconds, 3)
+            ),
+            "picture": self.picture.to_dict(),
+            "persistent": self.persistent,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class CropVerification:
-    """The crop of an encode checked against the picture of every frame."""
+    """The crop of an encode checked against the picture of every frame.
+
+    Only a wider picture that lasts (a ``persistent`` run) fails the check;
+    shorter runs are flashes, reported as a warning.
+    """
 
     used: CropMargins
     envelope: CropMargins
     observations: int
     safety_margin_pixels: int
     first_cut_seconds: float | None
+    minimum_persistent_seconds: float = DEFAULT_PERSISTENT_CUT_SECONDS
+    frame_interval_seconds: float | None = None
+    cut_frames: int = 0
+    runs: tuple[CropCutRun, ...] = ()
+    persistent_runs: int = 0
+    flash_runs: int = 0
 
     @property
     def passed(self) -> bool:
-        return not _cuts(self.used, self.envelope, self.safety_margin_pixels)
+        return self.persistent_runs == 0
+
+    @property
+    def flashes(self) -> tuple[CropCutRun, ...]:
+        return tuple(run for run in self.runs if not run.persistent)
 
     def summary(self) -> str:
         if self.passed:
+            if self.flash_runs:
+                longest = max(
+                    (run.duration_seconds or 0.0 for run in self.flashes), default=0.0
+                )
+                return (
+                    f"crop verification: {self.flash_runs} short flash(es) reach into "
+                    f"the cropped border ({self.cut_frames} frame(s), longest "
+                    f"{longest:.2f} s); the crop is kept and the job continues"
+                )
             return "the crop keeps the active picture of every frame"
+        run = next((item for item in self.runs if item.persistent), None)
+        picture = self.envelope if run is None else run.picture
         edges = ", ".join(
             f"{edge} {getattr(self.used, edge)}px where the picture starts at "
-            f"{getattr(self.envelope, edge)}px"
+            f"{getattr(picture, edge)}px"
             for edge in _EDGES
-            if getattr(self.used, edge) - getattr(self.envelope, edge)
+            if getattr(self.used, edge) - getattr(picture, edge)
             > self.safety_margin_pixels
         )
         when = (
@@ -948,7 +1005,61 @@ class CropVerification:
             "first_cut_seconds": (
                 None if self.first_cut_seconds is None else round(self.first_cut_seconds, 3)
             ),
+            "minimum_persistent_seconds": self.minimum_persistent_seconds,
+            "frame_interval_seconds": (
+                None
+                if self.frame_interval_seconds is None
+                else round(self.frame_interval_seconds, 6)
+            ),
+            "cut_frames": self.cut_frames,
+            "persistent_runs": self.persistent_runs,
+            "flash_runs": self.flash_runs,
+            "runs": [run.to_dict() for run in self.runs],
         }
+
+
+def _frame_observations(
+    log: str, *, source_width: int, source_height: int
+) -> list[tuple[float | None, CropMargins | None]]:
+    """Every frame's cropdetect line; ``None`` for a frame without a picture.
+
+    A black frame makes cropdetect print negative sizes; such a frame (or an
+    otherwise unusable line) shows no picture, so it cuts nothing and breaks a
+    run of cutting frames.
+    """
+
+    frames: list[tuple[float | None, CropMargins | None]] = []
+    for line in log.splitlines():
+        loose = _ANY_CROP_PATTERN.search(line)
+        if loose is None:
+            continue
+        moment = None if loose["time"] is None else float(loose["time"])
+        match = _TIMED_CROP_PATTERN.search(line)
+        margins: CropMargins | None = None
+        if match is not None:
+            try:
+                margins = _margins_of(
+                    *(int(match[name]) for name in ("width", "height", "x", "y")),
+                    source_width=source_width,
+                    source_height=source_height,
+                )
+            except CropPolicyError:
+                margins = None
+        frames.append((moment, margins))
+    return frames
+
+
+def _frame_interval(moments: Sequence[float | None]) -> float | None:
+    """The typical frame spacing of the log: the median positive step."""
+
+    steps = sorted(
+        later - earlier
+        for earlier, later in zip(moments, moments[1:])
+        if earlier is not None and later is not None and later > earlier
+    )
+    if not steps:
+        return None
+    return steps[len(steps) // 2]
 
 
 def verify_crop_against_full_decode(
@@ -958,42 +1069,105 @@ def verify_crop_against_full_decode(
     source_width: int,
     source_height: int,
     safety_margin_pixels: int = DEFAULT_SAFETY_MARGIN_PIXELS,
+    minimum_persistent_seconds: float = DEFAULT_PERSISTENT_CUT_SECONDS,
+    untimed_persistent_frames: int = DEFAULT_UNTIMED_PERSISTENT_FRAMES,
 ) -> CropVerification:
-    """Check a crop against a ``reset=0`` cropdetect log of every frame.
+    """Check a crop against a per-frame cropdetect log of the full decode.
 
     The keyframe scan that chose the crop sees about one frame a second.  The
-    full decode beside the encode sees the rest: the crop fails when it cuts
-    more than ``safety_margin_pixels`` into the largest picture of any frame,
-    for example a short full-frame insert in a scope film.
+    full decode beside the encode sees the rest, one picture per frame
+    (``reset=1``).  The crop fails when it cuts more than
+    ``safety_margin_pixels`` into the picture of consecutive frames lasting at
+    least ``minimum_persistent_seconds`` (a short full-frame insert in a scope
+    film, burnt-in text in the bar).  A shorter run (a bright frame in the
+    bar, a logo, dust, grain in an HDR bar) is a flash: reported, not failed.
+
+    A run lasts its frame count times the log's typical frame spacing; without
+    timestamps ``untimed_persistent_frames`` frames count as persistent.  A
+    cumulative (``reset=0``) log is still judged safely: after a flash its
+    envelope stays wide, so it fails as before, never more leniently.
     """
 
     if source_width < 1 or source_height < 1:
         raise ValueError("source dimensions must be positive")
     if safety_margin_pixels < 0:
         raise ValueError("crop safety margin cannot be negative")
-    timed = _timed_margins(log, source_width=source_width, source_height=source_height)
-    if not timed:
+    if minimum_persistent_seconds <= 0 or untimed_persistent_frames < 1:
+        raise ValueError("the persistence threshold must be positive")
+    frames = _frame_observations(
+        log, source_width=source_width, source_height=source_height
+    )
+    pictures = [margins for _moment, margins in frames if margins is not None]
+    if not pictures:
         raise CropPolicyError(
             "missing_verification",
             "the full decode reported no cropdetect observations",
         )
     envelope = CropMargins(
-        **{edge: min(getattr(margins, edge) for _moment, margins in timed) for edge in _EDGES}
+        **{edge: min(getattr(margins, edge) for margins in pictures) for edge in _EDGES}
     )
-    first_cut = next(
-        (
-            moment
-            for moment, margins in timed
-            if _cuts(used, margins, safety_margin_pixels)
-        ),
-        None,
+    interval = _frame_interval([moment for moment, _margins in frames])
+    # Timestamps are printed to the microsecond, so half a second at 24 fps
+    # may measure 0.49999 s: count frames, with a hundredth of a frame slack.
+    required_frames = (
+        untimed_persistent_frames
+        if interval is None
+        else max(1, math.ceil(minimum_persistent_seconds / interval - 0.01))
+    )
+
+    runs: list[CropCutRun] = []
+    current: list[tuple[float | None, CropMargins]] = []
+
+    def close() -> None:
+        if not current:
+            return
+        count = len(current)
+        duration = None if interval is None else count * interval
+        persistent = count >= required_frames
+        runs.append(
+            CropCutRun(
+                start_seconds=current[0][0],
+                frames=count,
+                duration_seconds=duration,
+                picture=CropMargins(
+                    **{
+                        edge: min(getattr(margins, edge) for _moment, margins in current)
+                        for edge in _EDGES
+                    }
+                ),
+                persistent=persistent,
+            )
+        )
+        current.clear()
+
+    for moment, margins in frames:
+        if margins is not None and _cuts(used, margins, safety_margin_pixels):
+            current.append((moment, margins))
+        else:
+            close()
+    close()
+
+    persistent_runs = [run for run in runs if run.persistent]
+    flash_runs = [run for run in runs if not run.persistent]
+    # A bounded report: the first persistent runs and the longest flashes.
+    reported = persistent_runs[:MAX_REPORTED_EXPANSIONS] + sorted(
+        flash_runs, key=lambda run: run.frames, reverse=True
+    )[:MAX_REPORTED_EXPANSIONS]
+    reported.sort(
+        key=lambda run: (run.start_seconds is None, run.start_seconds or 0.0)
     )
     return CropVerification(
         used=used,
         envelope=envelope,
-        observations=len(timed),
+        observations=len(pictures),
         safety_margin_pixels=safety_margin_pixels,
-        first_cut_seconds=first_cut,
+        first_cut_seconds=persistent_runs[0].start_seconds if persistent_runs else None,
+        minimum_persistent_seconds=minimum_persistent_seconds,
+        frame_interval_seconds=interval,
+        cut_frames=sum(run.frames for run in runs),
+        runs=tuple(reported),
+        persistent_runs=len(persistent_runs),
+        flash_runs=len(flash_runs),
     )
 
 
@@ -1031,6 +1205,7 @@ __all__ = [
     "AspectExpansion",
     "AspectProfile",
     "CropDetectInterval",
+    "CropCutRun",
     "CropDetectionEvidence",
     "CropPolicyDecision",
     "CropPolicyError",

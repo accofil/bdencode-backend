@@ -61,6 +61,22 @@ describe("formatEventMessage", () => {
     expect(formatStatusMessage(timeout, "")).toMatch(/ötperces időkorlátot/i);
   });
 
+  it("localizes the warnings that let a job continue", () => {
+    expect(formatEventMessage(
+      "worker.crop-verification-warning",
+      "crop verification: 2 short flash(es) reach into the cropped border (3 frame(s), longest 0.08 s); the crop is kept and the job continues",
+    )).toBe("Crop-ellenőrzés: 2 rövid felvillanás ér bele a levágott sávba (3 képkocka, a leghosszabb 0.08 mp). A crop marad, a job folytatódik.");
+    for (const [kind, message] of [
+      ["worker.subtitle-decode-warning", "the final subtitle decode shows known harmless differences; the job continues"],
+      ["worker.video-duration-warning", "the estimated playlist duration differs from the frame count; the job continues"],
+      ["worker.video-efficiency-warning", "the encoded video is not smaller than the source; the job continues"],
+      ["worker.stream-policy-warning", "the final video stream is described differently by this FFmpeg build; the job continues"],
+    ]) {
+      expect(formatEventMessage(kind, message)).toMatch(/a job folytatódik/);
+    }
+    expect(formatEventMessage("worker.video-efficiency-warning", null)).toBe("Videóméret: figyelmeztetés");
+  });
+
   it("uses backend pipeline baselines for legacy jobs without progress", () => {
     expect(stageProgress(makeJob({ state: "MUXING", progress: null }))).toBe(0.78);
     expect(stageProgress(makeJob({ state: "FAILED", resume_state: "MUXING", progress: null }))).toBe(0.78);
