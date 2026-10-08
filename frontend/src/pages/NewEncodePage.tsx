@@ -25,7 +25,7 @@ import { api, ApiError } from "../api/client";
 import type { ContentType, DetailLevel, DiscType, ImageUploadProvider, SourceEntry, UploadImageSet } from "../api/types";
 import { Badge, Button, Card, LoadingPanel, Notice, PageHeader } from "../components/ui";
 import { IMAGE_UPLOAD_PROVIDER_LABELS, UPLOAD_IMAGE_SET_LABELS, uploadImageSet } from "../uploads";
-import { basename, CONTENT_LABELS } from "../utils";
+import { basename, contentLabel } from "../utils";
 
 interface Draft {
   sourcePath: string;
@@ -336,7 +336,7 @@ export function NewEncodePage() {
             <dl className="summary-list">
               <div><dt>Forrás</dt><dd>{draft.sourceName}</dd></div>
               <div><dt>Név</dt><dd>{draft.name}</dd></div>
-              <div><dt>Tartalom</dt><dd>{CONTENT_LABELS[draft.contentType]}</dd></div>
+              <div><dt>Tartalom</dt><dd>{contentLabel(draft.contentType)}</dd></div>
               <div><dt>Lemez</dt><dd>{draft.discType === "AUTO" ? "Automatikus felismerés" : draft.discType}</dd></div>
               <div><dt>Nézet</dt><dd>{detailOptions.find((item) => item.value === draft.detailLevel)?.title}</dd></div>
               <div><dt>Képfeltöltés</dt><dd>{draft.uploadImages ? `${IMAGE_UPLOAD_PROVIDER_LABELS[draft.imageUploadProvider]} · ${UPLOAD_IMAGE_SET_LABELS[draft.uploadImageSet]}` : "Kikapcsolva"}</dd></div>

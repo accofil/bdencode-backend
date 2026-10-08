@@ -15,20 +15,50 @@ import {
 import { useState } from "react";
 import { NavLink, Outlet } from "react-router";
 import clsx from "clsx";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
+import { LANGUAGES, setLanguage, t, useLanguage } from "../i18n";
 import { cpuShareInForce, useCpuPolicy } from "./CpuPolicyPanel";
 
-const navigation = [
-  { to: "/", label: "Áttekintés", icon: Gauge, end: true },
-  { to: "/new", label: "Új kódolás", icon: CirclePlus },
-  { to: "/queue", label: "Várólista", icon: ListOrdered },
-  { to: "/archive", label: "Elkészült munkák", icon: Archive },
-  { to: "/comparisons", label: "Összehasonlítások", icon: AudioWaveform },
-  { to: "/statistics", label: "Statisztika", icon: BarChart3 },
-  { to: "/settings", label: "Rendszer", icon: Settings },
-  { to: "/help", label: "Súgó", icon: BookOpen },
-];
+function navigation() {
+  return [
+    { to: "/", label: t("Áttekintés", "Overview"), icon: Gauge, end: true },
+    { to: "/new", label: t("Új kódolás", "New encode"), icon: CirclePlus },
+    { to: "/queue", label: t("Várólista", "Queue"), icon: ListOrdered },
+    { to: "/archive", label: t("Elkészült munkák", "Finished jobs"), icon: Archive },
+    { to: "/comparisons", label: t("Összehasonlítások", "Comparisons"), icon: AudioWaveform },
+    { to: "/statistics", label: t("Statisztika", "Statistics"), icon: BarChart3 },
+    { to: "/settings", label: t("Rendszer", "System"), icon: Settings },
+    { to: "/help", label: t("Súgó", "Help"), icon: BookOpen },
+  ];
+}
+
+/** HU / EN switch; backend texts are fetched again in the new language. */
+function LanguageSwitch() {
+  const language = useLanguage();
+  const queryClient = useQueryClient();
+  return (
+    <div className="language-switch" role="group" aria-label={t("Nyelv", "Language")}>
+      {LANGUAGES.map((option) => (
+        <button
+          key={option}
+          type="button"
+          className={clsx("language-switch__option", option === language && "language-switch__option--active")}
+          aria-pressed={option === language}
+          lang={option}
+          title={option === "hu" ? "Magyar" : "English"}
+          onClick={() => {
+            if (option === language) return;
+            setLanguage(option);
+            void queryClient.invalidateQueries();
+          }}
+        >
+          {option.toUpperCase()}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 export function Layout() {
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -46,11 +76,11 @@ export function Layout() {
 
   return (
     <div className="app-shell">
-      <a className="skip-link" href="#main-content">Ugrás a tartalomhoz</a>
+      <a className="skip-link" href="#main-content">{t("Ugrás a tartalomhoz", "Skip to content")}</a>
       <button
         type="button"
         className="mobile-menu-button"
-        aria-label="Menü megnyitása"
+        aria-label={t("Menü megnyitása", "Open menu")}
         aria-expanded={mobileOpen}
         aria-controls="primary-sidebar"
         onClick={() => setMobileOpen(true)}
@@ -66,20 +96,20 @@ export function Layout() {
           <div>
             <strong>BDEncode</strong>
             <small>Studio Console</small>
-            {serverVersion && <span className="brand-version" title="A szerveren futó verzió">v{serverVersion}</span>}
+            {serverVersion && <span className="brand-version" title={t("A szerveren futó verzió", "Version running on the server")}>v{serverVersion}</span>}
           </div>
           <button
             type="button"
             className="sidebar-close"
-            aria-label="Menü bezárása"
+            aria-label={t("Menü bezárása", "Close menu")}
             onClick={() => setMobileOpen(false)}
           >
             <X size={20} />
           </button>
         </div>
 
-        <nav className="primary-nav" aria-label="Fő navigáció">
-          {navigation.map(({ to, label, icon: Icon, end }) => (
+        <nav className="primary-nav" aria-label={t("Fő navigáció", "Main navigation")}>
+          {navigation().map(({ to, label, icon: Icon, end }) => (
             <NavLink
               key={to}
               to={to}
@@ -102,18 +132,18 @@ export function Layout() {
               )}
               aria-hidden="true"
             />
-            <span>{health.isSuccess ? "Szerver elérhető" : health.isError ? "Kapcsolati hiba" : "Kapcsolódás…"}</span>
+            <span>{health.isSuccess ? t("Szerver elérhető", "Server online") : health.isError ? t("Kapcsolati hiba", "Connection error") : t("Kapcsolódás…", "Connecting…")}</span>
           </div>
           {health.data && (
             <small>
-              {health.data.active_job_id ? "1 aktív munka" : "Nincs aktív munka"} · {health.data.queued_jobs} várakozik
+              {health.data.active_job_id ? t("1 aktív munka", "1 active job") : t("Nincs aktív munka", "No active job")} · {health.data.queued_jobs} {t("várakozik", "waiting")}
             </small>
           )}
           {staleInterface && (
             <div className="sidebar-update">
-              <small>Ez a lap a v{__APP_VERSION__} felületét futtatja, a szerveren a v{serverVersion} van.</small>
+              <small>{t(`Ez a lap a v${__APP_VERSION__} felületét futtatja, a szerveren a v${serverVersion} van.`, `This tab runs the v${__APP_VERSION__} interface; the server has v${serverVersion}.`)}</small>
               <button type="button" className="sidebar-update__reload" onClick={() => window.location.reload()}>
-                <RefreshCw size={14} aria-hidden="true" /> Oldal frissítése
+                <RefreshCw size={14} aria-hidden="true" /> {t("Oldal frissítése", "Reload page")}
               </button>
             </div>
           )}
@@ -121,11 +151,12 @@ export function Layout() {
 
         <div className="sidebar-footer">
           <Activity size={16} aria-hidden="true" />
-          <span>{cpuShare ? `${cpuShare.percent}% CPU-keret${cpuShare.mode === "night" ? " · éjszakai mód" : ""}` : "CPU-védelem aktív"}</span>
+          <span>{cpuShare ? `${cpuShare.percent}% ${t("CPU-keret", "CPU share")}${cpuShare.mode === "night" ? ` · ${t("éjszakai mód", "night mode")}` : ""}` : t("CPU-védelem aktív", "CPU limit active")}</span>
         </div>
+        <LanguageSwitch />
       </aside>
 
-      {mobileOpen && <button type="button" className="sidebar-scrim" aria-label="Menü bezárása" onClick={() => setMobileOpen(false)} />}
+      {mobileOpen && <button type="button" className="sidebar-scrim" aria-label={t("Menü bezárása", "Close menu")} onClick={() => setMobileOpen(false)} />}
 
       <main id="main-content" className="main-content" tabIndex={-1}>
         <Outlet />

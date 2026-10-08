@@ -1,28 +1,35 @@
 import type { ContentType, Job, JobState } from "./api/types";
+import { locale, t } from "./i18n";
 
-export const STATE_LABELS: Record<JobState, string> = {
-  QUEUED: "Scanre vár",
-  SCANNING: "Lemez elemzése",
-  AWAITING_SELECTION: "Beállításra vár",
-  READY: "Kódolásra vár",
-  ENCODING: "Videó kódolása",
-  MUXING: "MKV összeállítása",
-  QC: "Minőség-ellenőrzés",
-  COMPARISON: "Kép-összehasonlítás",
-  UPLOADING: "Képek feltöltése",
-  COMPLETED: "Elkészült",
-  FAILED: "Hibás",
-  CANCELLED: "Megszakítva",
-  NEEDS_REVIEW: "Ellenőrzést kér",
-  UPLOAD_FAILED: "Feltöltési hiba",
-};
+export function stateLabel(state: JobState): string {
+  switch (state) {
+    case "QUEUED": return t("Scanre vár", "Waiting for scan");
+    case "SCANNING": return t("Lemez elemzése", "Analysing disc");
+    case "AWAITING_SELECTION": return t("Beállításra vár", "Waiting for settings");
+    case "READY": return t("Kódolásra vár", "Waiting to encode");
+    case "ENCODING": return t("Videó kódolása", "Encoding video");
+    case "MUXING": return t("MKV összeállítása", "Building MKV");
+    case "QC": return t("Minőség-ellenőrzés", "Quality check");
+    case "COMPARISON": return t("Kép-összehasonlítás", "Comparison");
+    case "UPLOADING": return t("Képek feltöltése", "Uploading images");
+    case "COMPLETED": return t("Elkészült", "Finished");
+    case "FAILED": return t("Hibás", "Failed");
+    case "CANCELLED": return t("Megszakítva", "Cancelled");
+    case "NEEDS_REVIEW": return t("Ellenőrzést kér", "Needs review");
+    case "UPLOAD_FAILED": return t("Feltöltési hiba", "Upload failed");
+    default: return state;
+  }
+}
 
-export const CONTENT_LABELS: Record<ContentType, string> = {
-  FILM: "Film",
-  CONCERT: "Koncert",
-  ANIME: "Anime",
-  SERIES: "Sorozat",
-};
+export function contentLabel(content: ContentType): string {
+  switch (content) {
+    case "FILM": return t("Film", "Film");
+    case "CONCERT": return t("Koncert", "Concert");
+    case "ANIME": return t("Anime", "Anime");
+    case "SERIES": return t("Sorozat", "Series");
+    default: return content;
+  }
+}
 
 const PIPELINE_BASELINES: Partial<Record<JobState, number>> = {
   QUEUED: 0,
@@ -71,7 +78,7 @@ export function formatDate(value: string | null, withTime = true): string {
   if (!value) return "—";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("hu-HU", {
+  return new Intl.DateTimeFormat(locale(), {
     year: "numeric",
     month: "short",
     day: "2-digit",
@@ -109,42 +116,64 @@ export function humanize(value: string): string {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-const EVENT_KIND_LABELS: Record<string, string> = {
-  "job.created": "Munka létrehozva",
-  "job.state": "Állapotváltozás",
-  "job.selection": "Beállítások jóváhagyva",
-  "job.progress": "Előrehaladás",
-  "job.retry": "Folytatás elindítva",
-  "job.workspace-cleaned": "Ideiglenes munkafájlok törölve",
-  "job.workspace-cleanup-warning": "Az ideiglenes munkafájlok takarítása nem sikerült",
-  "scan.created": "Lemezvizsgálat létrehozva",
-  "scan.state": "Lemezvizsgálat állapota",
-  "artifact.created": "Melléklet létrehozva",
-  "worker.auto-crf-probe": "CRF-próba",
-  "worker.auto-crf": "Automatikus CRF kiválasztva",
-  "worker.dynamic-hdr": "Dinamikus HDR",
-  "worker.variable-aspect": "Változó képarány",
-  "worker.final-vmaf": "Mintavett VMAF a kész fájlon",
-  "job.upload-reset": "Képfeltöltés elölről",
-};
+function eventKindLabel(kind: string): string | undefined {
+  const labels: Record<string, [string, string]> = {
+    "job.created": ["Munka létrehozva", "Job created"],
+    "job.state": ["Állapotváltozás", "State change"],
+    "job.selection": ["Beállítások jóváhagyva", "Settings approved"],
+    "job.progress": ["Előrehaladás", "Progress"],
+    "job.retry": ["Folytatás elindítva", "Continuation started"],
+    "job.workspace-cleaned": ["Ideiglenes munkafájlok törölve", "Temporary work files removed"],
+    "job.workspace-cleanup-warning": ["Az ideiglenes munkafájlok takarítása nem sikerült", "Cleaning up the temporary work files failed"],
+    "scan.created": ["Lemezvizsgálat létrehozva", "Disc scan created"],
+    "scan.state": ["Lemezvizsgálat állapota", "Disc scan state"],
+    "artifact.created": ["Melléklet létrehozva", "Attachment created"],
+    "worker.auto-crf-probe": ["CRF-próba", "CRF probe"],
+    "worker.auto-crf": ["Automatikus CRF kiválasztva", "Automatic CRF chosen"],
+    "worker.dynamic-hdr": ["Dinamikus HDR", "Dynamic HDR"],
+    "worker.variable-aspect": ["Változó képarány", "Variable aspect ratio"],
+    "worker.final-vmaf": ["Mintavett VMAF a kész fájlon", "Sampled VMAF of the final file"],
+    "job.upload-reset": ["Képfeltöltés elölről", "Image upload restarted"],
+  };
+  const pair = labels[kind];
+  return pair ? t(pair[0], pair[1]) : undefined;
+}
 
-const EVENT_MESSAGE_LABELS: Record<string, string> = {
-  "claimed by worker": "A worker megkezdte a lemezvizsgálatot",
-  "scan complete; playlist, processing and tracks require confirmation": "A lemezvizsgálat elkészült; a playlist, a feldolgozás és a sávok jóváhagyásra várnak",
-  "selection accepted": "A beállítások elfogadva",
-  "reference timeline prepared": "A referencia-idővonal elkészült",
-  "video encode complete": "A videókódolás elkészült",
-  "final Matroska mux complete": "A végleges Matroska összeállítása elkészült",
-  "container and audio QC passed": "A konténer- és hangellenőrzés sikeres",
-  "I/P/B comparison complete": "Az I/P/B összehasonlítás elkészült",
-  "encode, QC and comparison completed": "A kódolás, az ellenőrzés és az összehasonlítás elkészült",
-  "image upload failed; retry is safe": "A képfeltöltés sikertelen; biztonságosan újrapróbálható",
-  "one or more retained tracks need a confirmed language before encoding": "Egy vagy több megtartott sáv nyelvét meg kell erősíteni a kódolás előtt",
-  "track languages confirmed by operator": "A sávok nyelve megerősítve",
-  "image upload reset by operator": "A képfeltöltés elölről indul",
-  "image upload restarted after a reset": "A képfeltöltés újraindult",
-  "finishing without image upload": "Befejezés képfeltöltés nélkül",
-};
+function eventMessageLabel(message: string): string | undefined {
+  const labels: Record<string, [string, string]> = {
+    "claimed by worker": ["A worker megkezdte a lemezvizsgálatot", "The worker started the disc scan"],
+    "scan complete; playlist, processing and tracks require confirmation": ["A lemezvizsgálat elkészült; a playlist, a feldolgozás és a sávok jóváhagyásra várnak", "Disc scan complete; the playlist, processing and tracks wait for approval"],
+    "selection accepted": ["A beállítások elfogadva", "Settings accepted"],
+    "reference timeline prepared": ["A referencia-idővonal elkészült", "Reference timeline prepared"],
+    "video encode complete": ["A videókódolás elkészült", "Video encode complete"],
+    "final Matroska mux complete": ["A végleges Matroska összeállítása elkészült", "Final Matroska mux complete"],
+    "container and audio QC passed": ["A konténer- és hangellenőrzés sikeres", "Container and audio checks passed"],
+    "I/P/B comparison complete": ["Az I/P/B összehasonlítás elkészült", "I/P/B comparison complete"],
+    "encode, QC and comparison completed": ["A kódolás, az ellenőrzés és az összehasonlítás elkészült", "Encode, checks and comparison complete"],
+    "image upload failed; retry is safe": ["A képfeltöltés sikertelen; biztonságosan újrapróbálható", "Image upload failed; a retry is safe"],
+    "one or more retained tracks need a confirmed language before encoding": ["Egy vagy több megtartott sáv nyelvét meg kell erősíteni a kódolás előtt", "One or more kept tracks need a confirmed language before encoding"],
+    "track languages confirmed by operator": ["A sávok nyelve megerősítve", "Track languages confirmed"],
+    "image upload reset by operator": ["A képfeltöltés elölről indul", "Image upload starts over"],
+    "image upload restarted after a reset": ["A képfeltöltés újraindult", "Image upload restarted"],
+    "finishing without image upload": ["Befejezés képfeltöltés nélkül", "Finishing without image upload"],
+  };
+  const pair = labels[message];
+  return pair ? t(pair[0], pair[1]) : undefined;
+}
+
+/**
+ * The encode progress line.  Since 3.6 the worker writes it in English
+ * ("Encoding video: 12.3% · … · projected video size ~19.2 GB"); earlier
+ * releases wrote it in Hungarian.  Both are shown in the interface language.
+ */
+function encodeProgressLabel(message: string): string | undefined {
+  const match = /^(?:Encoding video|Videó kódolása): (.*)$/.exec(message);
+  if (!match) return undefined;
+  const rest = match[1]
+    .replace(/(?:ETA számítása…|computing ETA…)/, t("ETA számítása…", "computing ETA…"))
+    .replace(/(?:várható videóméret|projected video size) ~/, t("várható videóméret ~", "projected video size ~"));
+  return `${t("Videó kódolása", "Encoding video")}: ${rest}`;
+}
 
 export function isFastComparisonTimeoutReview(message: string | null): boolean {
   if (!message) return false;
@@ -157,71 +186,72 @@ export function formatStatusMessage(message: string | null, fallback: string): s
   const retry = /^retrying failed ([A-Z_]+) stage$/.exec(message);
   if (retry) {
     const state = retry[1] as JobState;
-    return `${STATE_LABELS[state] ?? retry[1]}: biztonságos folytatás`;
+    return `${stateLabel(state)}: ${t("biztonságos folytatás", "safe continuation")}`;
   }
   if (isFastComparisonTimeoutReview(message)) {
-    return "A gyors videó-comparison elérte az ötperces időkorlátot. Az elkészült minták megmaradtak, a folyamat biztonságosan folytatható.";
+    return t("A gyors videó-comparison elérte az ötperces időkorlátot. Az elkészült minták megmaradtak, a folyamat biztonságosan folytatható.", "The fast video comparison hit its five-minute limit. The finished samples are kept; the job can safely continue.");
   }
   const selected = /^fast comparison: (\d+) I\/P\/B pairs selected$/.exec(message);
-  if (selected) return `Gyors comparison: ${selected[1]} I/P/B képpár kiválasztva`;
+  if (selected) return t(`Gyors comparison: ${selected[1]} I/P/B képpár kiválasztva`, `Fast comparison: ${selected[1]} I/P/B pairs selected`);
   const pair = /^fast comparison: pair (\d+)\/(\d+) complete$/.exec(message);
-  if (pair) return `Gyors comparison: ${pair[1]}/${pair[2]} képpár elkészült`;
+  if (pair) return t(`Gyors comparison: ${pair[1]}/${pair[2]} képpár elkészült`, `Fast comparison: pair ${pair[1]}/${pair[2]} complete`);
   const complete = /^(\d+) sampled I\/P\/B comparison pairs complete$/.exec(message);
-  if (complete) return `A gyors comparison ${complete[1]} I/P/B képpárja elkészült`;
+  if (complete) return t(`A gyors comparison ${complete[1]} I/P/B képpárja elkészült`, `${complete[1]} sampled I/P/B comparison pairs complete`);
   if (message === "fast comparison: preparing bounded samples") {
-    return "Gyors comparison: a rövid videóminták előkészítése";
+    return t("Gyors comparison: a rövid videóminták előkészítése", "Fast comparison: preparing the short samples");
   }
   if (message.startsWith("bounded comparison sampling could not find")) {
-    return "A rövid mintákban nem található elegendő, azonos típusú I/P/B képpár. Operátori ellenőrzés szükséges.";
+    return t("A rövid mintákban nem található elegendő, azonos típusú I/P/B képpár. Operátori ellenőrzés szükséges.", "The short samples hold too few same-type I/P/B pairs. Please review.");
   }
   if (message.startsWith("encoded comparison sample is invalid")) {
-    return "A kész videó mintájának időzítése nem ellenőrizhető biztonságosan.";
+    return t("A kész videó mintájának időzítése nem ellenőrizhető biztonságosan.", "The timing of the encoded sample cannot be verified safely.");
   }
   if (message.startsWith("source comparison sample is invalid")) {
-    return "A source videóminta időzítése nem ellenőrizhető biztonságosan.";
+    return t("A source videóminta időzítése nem ellenőrizhető biztonságosan.", "The timing of the source sample cannot be verified safely.");
   }
   const probe = /^CRF (\S+) scored VMAF (\S+)$/.exec(message);
-  if (probe) return `CRF ${probe[1]} próba: VMAF ${probe[2]}`;
+  if (probe) return t(`CRF ${probe[1]} próba: VMAF ${probe[2]}`, `CRF ${probe[1]} probe: VMAF ${probe[2]}`);
   const chosen = /^automatic CRF search selected CRF (\S+)$/.exec(message);
-  if (chosen) return `Az automatikus CRF-keresés a CRF ${chosen[1]} értéket választotta`;
+  if (chosen) return t(`Az automatikus CRF-keresés a CRF ${chosen[1]} értéket választotta`, `The automatic CRF search chose CRF ${chosen[1]}`);
   const verified = /^(hdr10plus|dolby_vision) metadata verified for (\d+) frames$/.exec(message);
   if (verified) {
-    return `${verified[1] === "hdr10plus" ? "HDR10+" : "Dolby Vision"} metaadat ellenőrizve ${verified[2]} képkockára`;
+    const format = verified[1] === "hdr10plus" ? "HDR10+" : "Dolby Vision";
+    return t(`${format} metaadat ellenőrizve ${verified[2]} képkockára`, `${format} metadata verified for ${verified[2]} frames`);
   }
   if (message.startsWith("dynamic HDR is discarded")) {
-    return "A dinamikus HDR nem marad meg (csak a statikus HDR10)";
+    return t("A dinamikus HDR nem marad meg (csak a statikus HDR10)", "Dynamic HDR is not kept (static HDR10 only)");
   }
   if (message.startsWith("variable aspect ratio")) {
-    return "Változó képarányú film: a legszélesebb vászon marad meg, semmi sem vágódik le";
+    return t("Változó képarányú film: a legszélesebb vászon marad meg, semmi sem vágódik le", "Variable aspect ratio: the widest frame is kept, nothing is cut off");
   }
   if (message.startsWith("the image host rejected the upload")) {
-    return "A képtárhely végleg elutasította a feltöltést: másik tárhely vagy képkészlet kell, vagy befejezhető képek nélkül.";
+    return t("A képtárhely végleg elutasította a feltöltést: másik tárhely vagy képkészlet kell, vagy befejezhető képek nélkül.", "The image host refused the upload for good: choose another host or image set, or finish without images.");
   }
   const tooLarge = /^comparison image (\S+) \(([\d.]+) MB\) exceeds the upload limit/.exec(message);
   if (tooLarge) {
-    return `A(z) ${tooLarge[1]} kép (${tooLarge[2]} MB) nagyobb a képtárhely korlátjánál: másik tárhellyel kell elölről kezdeni a feltöltést.`;
+    return t(`A(z) ${tooLarge[1]} kép (${tooLarge[2]} MB) nagyobb a képtárhely korlátjánál: másik tárhellyel kell elölről kezdeni a feltöltést.`, `Image ${tooLarge[1]} (${tooLarge[2]} MB) exceeds the host's limit: restart the upload with another host.`);
   }
   const sampledVmaf = /^sampled VMAF of the final file: mean (\S+), 1% low (\S+) \((\d+) frames\)$/.exec(message);
-  if (sampledVmaf) return `Mintavett VMAF a kész fájlon: átlag ${sampledVmaf[1]}, 1% low ${sampledVmaf[2]} (${sampledVmaf[3]} képkocka)`;
-  return EVENT_MESSAGE_LABELS[message] ?? formatWorkerError(message);
+  if (sampledVmaf) return t(`Mintavett VMAF a kész fájlon: átlag ${sampledVmaf[1]}, 1% low ${sampledVmaf[2]} (${sampledVmaf[3]} képkocka)`, `Sampled VMAF of the final file: mean ${sampledVmaf[1]}, 1% low ${sampledVmaf[2]} (${sampledVmaf[3]} frames)`);
+  return encodeProgressLabel(message) ?? eventMessageLabel(message) ?? formatWorkerError(message);
 }
 
 export function formatWorkerError(error: string): string {
   if (error.includes("showspectrumpic") || error.includes("-spectrum.png")) {
-    return "A hang spektrumképének elkészítése sikertelen volt. A kész kódolás és az ellenőrzési eredmények megmaradtak; a javítás után a QC szakasztól biztonságosan folytatható.";
+    return t("A hang spektrumképének elkészítése sikertelen volt. A kész kódolás és az ellenőrzési eredmények megmaradtak; a javítás után a QC szakasztól biztonságosan folytatható.", "Making the audio spectrum image failed. The finished encode and the check results are kept; after the fix the job can safely continue from the QC stage.");
   }
   if (error.includes("chapters.xml")) {
-    return "A fejezetlista létrehozása sikertelen volt. A kész videó- és hangsávok megmaradtak; a javítás után biztonságosan folytatható.";
+    return t("A fejezetlista létrehozása sikertelen volt. A kész videó- és hangsávok megmaradtak; a javítás után biztonságosan folytatható.", "Creating the chapter list failed. The finished video and audio tracks are kept; after the fix the job can safely continue.");
   }
   if (error.includes("subtitle.mks") || error.includes("-subtitle.mks")) {
-    return "Egy feliratsáv Matroska-fájlja nem készült el. A kész videó- és hangsávok megmaradtak; a javítás után biztonságosan folytatható.";
+    return t("Egy feliratsáv Matroska-fájlja nem készült el. A kész videó- és hangsávok megmaradtak; a javítás után biztonságosan folytatható.", "A subtitle track's Matroska file was not created. The finished video and audio tracks are kept; after the fix the job can safely continue.");
   }
   return error;
 }
 
 export function formatEventMessage(kind: string, message: string | null): string {
   if (message && message !== kind) return formatStatusMessage(message, "");
-  return EVENT_KIND_LABELS[kind] ?? humanize(kind.replaceAll(".", "_"));
+  return eventKindLabel(kind) ?? humanize(kind.replaceAll(".", "_"));
 }
 
 export function basename(path: string): string {

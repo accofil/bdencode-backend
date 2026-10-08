@@ -2,7 +2,7 @@ import { ArrowRight, Check, Clock3, Disc3, MoreHorizontal, Pause, Play } from "l
 import { useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router";
 import type { Job } from "../api/types";
-import { CONTENT_LABELS, formatDate, formatStatusMessage, stageProgress, STATE_LABELS, stateTone } from "../utils";
+import { contentLabel, formatDate, formatStatusMessage, stageProgress, stateLabel, stateTone } from "../utils";
 import { Badge, ProgressBar } from "./ui";
 
 type JobControlState = "RUNNING" | "PAUSE_REQUESTED" | "PAUSED" | "CANCEL_REQUESTED";
@@ -39,7 +39,7 @@ function statusPresentation(job: Job) {
   if (controlState === "PAUSED") return { label: "Szüneteltetve", tone: "warning" as const };
   if (controlState === "PAUSE_REQUESTED") return { label: "Szüneteltetés folyamatban", tone: "warning" as const };
   if (controlState === "CANCEL_REQUESTED") return { label: "Megszakítás folyamatban", tone: "danger" as const };
-  return { label: STATE_LABELS[job.state], tone: stateTone(job.state) };
+  return { label: stateLabel(job.state), tone: stateTone(job.state) };
 }
 
 function JobActionControls({
@@ -194,7 +194,7 @@ export function JobCard({ job, compact = false, onAction, pendingAction }: JobCa
           <div className="job-card__heading">
             <div>
               <strong id={titleId}>{job.name}</strong>
-              <span>{CONTENT_LABELS[job.content_type]} · {job.disc_type === "AUTO" ? "Automatikus lemeztípus" : job.disc_type}</span>
+              <span>{contentLabel(job.content_type)} · {job.disc_type === "AUTO" ? "Automatikus lemeztípus" : job.disc_type}</span>
             </div>
             <Badge tone={status.tone}>{status.label}</Badge>
           </div>

@@ -21,6 +21,7 @@ from . import __version__
 from .audio import AUDIO_ACTIONS, audio_presets_payload
 from .capabilities import dynamic_hdr_support
 from .crf_search import AutoCrfConfig
+from .i18n import parse_accept_language, reset_language, set_language
 from .ai_recommendation import (
     AIRecommendationError,
     AIRecommendationRequest,
@@ -369,6 +370,17 @@ def create_app(
                 },
             )
         return await call_next(http_request)
+
+    @application.middleware("http")
+    async def interface_language(http_request: Request, call_next) -> Response:
+        # Messages built while answering follow the interface language.
+        token = set_language(
+            parse_accept_language(http_request.headers.get("accept-language"))
+        )
+        try:
+            return await call_next(http_request)
+        finally:
+            reset_language(token)
 
     @application.exception_handler(NotFoundError)
     async def not_found_handler(_request: Request, exc: NotFoundError) -> JSONResponse:

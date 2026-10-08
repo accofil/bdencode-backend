@@ -44,7 +44,7 @@ import { SelectionWizard } from "../components/SelectionWizard";
 import { Badge, Button, Card, EmptyState, LoadingPanel, Modal, Notice, PageHeader, ProgressBar } from "../components/ui";
 import { normalizeStoredSelection } from "../selection";
 import { UPLOAD_IMAGE_SET_LABELS } from "../uploads";
-import { CONTENT_LABELS, formatBytes, formatDate, formatEventMessage, formatStatusMessage, formatWorkerError, humanize, isFastComparisonTimeoutReview, isRunningState, stageProgress, STATE_LABELS, stateTone } from "../utils";
+import { contentLabel, formatBytes, formatDate, formatEventMessage, formatStatusMessage, formatWorkerError, humanize, isFastComparisonTimeoutReview, isRunningState, stageProgress, stateLabel, stateTone } from "../utils";
 
 type Tab = "overview" | "settings" | "comparison" | "player" | "release" | "events" | "files";
 type JobDetailLocationState = {
@@ -102,7 +102,7 @@ function controlStatus(job: Job): { label: string; message: string; tone: "neutr
   if (job.control_state === "PAUSED") return { label: "Szüneteltetve", message: job.control_message || "A munka biztonságos ponton vár a folytatásra.", tone: "warning" };
   if (job.control_state === "PAUSE_REQUESTED") return { label: "Szüneteltetés folyamatban", message: job.control_message || "A worker a következő biztonságos ponton állítja meg a munkát.", tone: "warning" };
   if (job.control_state === "CANCEL_REQUESTED") return { label: "Megszakítás folyamatban", message: job.control_message || "A worker rendezetten lezárja a futó folyamatot.", tone: "danger" };
-  return { label: STATE_LABELS[job.state], message: formatStatusMessage(job.status_message, "Állapotfrissítésre vár"), tone: stateTone(job.state) };
+  return { label: stateLabel(job.state), message: formatStatusMessage(job.status_message, "Állapotfrissítésre vár"), tone: stateTone(job.state) };
 }
 
 function latestSuccessfulScan(scans: Scan[]): Scan | undefined {
@@ -392,7 +392,7 @@ export function JobDetailPage() {
     <div className="page page--job-detail">
       <Link className="back-link" to={terminal ? "/archive" : "/queue"}><ArrowLeft size={16} /> {terminal ? "Vissza az archívumhoz" : "Vissza a várólistához"}</Link>
       <PageHeader
-        eyebrow={`${CONTENT_LABELS[job.content_type]} · ${job.disc_type}`}
+        eyebrow={`${contentLabel(job.content_type)} · ${job.disc_type}`}
         title={job.name}
         description={currentControlStatus.message}
         actions={
@@ -731,7 +731,7 @@ function EventItem({ event, compact = false }: { event: EventRecord; compact?: b
   return (
     <article className={isError ? "event-item event-item--error" : isSuccess ? "event-item event-item--success" : "event-item"}>
       <span className="event-item__marker">{isError ? <AlertTriangle size={15} /> : isSuccess ? <CheckCircle2 size={15} /> : <Info size={14} />}</span>
-      <div><div className="event-item__heading"><strong>{formatEventMessage(event.kind, event.message)}</strong><time>{formatDate(event.created_at)}</time></div>{event.state_from && event.state_to && <p>{STATE_LABELS[event.state_from]} → {STATE_LABELS[event.state_to]}</p>}{compact && uploadDetail && <p>{uploadDetail}</p>}{!compact && Object.keys(event.payload).length > 0 && <details><summary>Részletek</summary><pre>{JSON.stringify(event.payload, null, 2)}</pre></details>}</div>
+      <div><div className="event-item__heading"><strong>{formatEventMessage(event.kind, event.message)}</strong><time>{formatDate(event.created_at)}</time></div>{event.state_from && event.state_to && <p>{stateLabel(event.state_from)} → {stateLabel(event.state_to)}</p>}{compact && uploadDetail && <p>{uploadDetail}</p>}{!compact && Object.keys(event.payload).length > 0 && <details><summary>Részletek</summary><pre>{JSON.stringify(event.payload, null, 2)}</pre></details>}</div>
     </article>
   );
 }

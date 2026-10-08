@@ -17,7 +17,7 @@ import { JobCard } from "../components/JobCard";
 import { cpuShareInForce, useCpuPolicy } from "../components/CpuPolicyPanel";
 import { LiveStepLine } from "../components/LiveStep";
 import { Badge, Card, EmptyState, LoadingPanel, PageHeader, ProgressBar } from "../components/ui";
-import { formatDate, formatStatusMessage, isActiveState, isRunningState, stageProgress, STATE_LABELS, stateTone } from "../utils";
+import { formatDate, formatStatusMessage, isActiveState, isRunningState, stageProgress, stateLabel, stateTone } from "../utils";
 
 function nestedNumber(value: unknown, ...keys: string[]): number | null {
   let current: unknown = value;
@@ -78,14 +78,14 @@ export function DashboardPage() {
               <span className="eyebrow">Aktív munka</span>
               <h2>{active ? active.name : "A kódoló szabad"}</h2>
             </div>
-            {active ? <Badge tone={stateTone(active.state)}>{STATE_LABELS[active.state]}</Badge> : <Badge tone="success">Készen áll</Badge>}
+            {active ? <Badge tone={stateTone(active.state)}>{stateLabel(active.state)}</Badge> : <Badge tone="success">Készen áll</Badge>}
           </div>
           {jobs.isLoading || health.isLoading ? (
             <LoadingPanel />
           ) : active ? (
             <>
               <div className="active-card__progress-number">{Math.round(stageProgress(active) * 100)}<small>% · teljes</small></div>
-              <ProgressBar value={stageProgress(active)} label={formatStatusMessage(active.status_message, STATE_LABELS[active.state])} />
+              <ProgressBar value={stageProgress(active)} label={formatStatusMessage(active.status_message, stateLabel(active.state))} />
               <LiveStepLine jobId={active.id} running={isRunningState(active.state) && active.control_state !== "PAUSED"} />
               <Link to={`/jobs/${active.id}`} className="text-link">Részletek megnyitása <ArrowRight size={15} /></Link>
             </>
@@ -157,7 +157,7 @@ export function DashboardPage() {
                 <Link key={job.id} to={`/jobs/${job.id}`} className="recent-item">
                   <span className="recent-item__icon"><Disc3 size={18} /></span>
                   <span><strong>{job.name}</strong><small>{formatDate(job.finished_at || job.updated_at)}</small></span>
-                  <Badge tone={stateTone(job.state)}>{STATE_LABELS[job.state]}</Badge>
+                  <Badge tone={stateTone(job.state)}>{stateLabel(job.state)}</Badge>
                 </Link>
               ))}
             </div>

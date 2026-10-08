@@ -1,3 +1,4 @@
+import { getLanguage } from "../i18n";
 import type {
   AIKeyRequest,
   AIProvider,
@@ -101,6 +102,8 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: {
       Accept: "application/json",
+      // The backend answers its messages in the interface language.
+      "Accept-Language": getLanguage(),
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
       ...init?.headers,
     },
