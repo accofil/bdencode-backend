@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from decimal import Decimal, InvalidOperation
 import json
+import math
+import re
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -642,20 +644,183 @@ def _required_fraction(value: Any, *, name: str) -> Decimal:
     return parsed
 
 
+# Messages the PGS decoder prints at error level for one display set that
+# Blu-ray authoring commonly produces: a composition that refers to an object
+# or palette of an earlier epoch, or a segment type the decoder does not know.
+# Each costs at most that one display set (its event is dropped or left
+# empty); the number of such lines is bounded by the event-count tolerance.
+_INFORMATIONAL_SUBTITLE_DIAGNOSTICS = (
+    re.compile(r"\bInvalid object id \d+", re.IGNORECASE),
+    re.compile(r"\bInvalid palette id \d+", re.IGNORECASE),
+    re.compile(r"\bUnknown subtitle segment type\b", re.IGNORECASE),
+    re.compile(r"\bPalette ID mismatch\b", re.IGNORECASE),
+)
+_REPEATED_MESSAGE = re.compile(r"^\s*Last message repeated (\d+) times?\s*$")
+# A last event this far past the title end is a timing defect; less than it is
+# a trailing PGS clear (end-of-display) set or a container rounding.
+SUBTITLE_TIMESTAMP_TOLERANCE = Decimal("0.100")
+SUBTITLE_TIMESTAMP_SLACK = Decimal("3.0")
+
+
+@dataclass(frozen=True, slots=True)
+class SubtitleDiagnostics:
+    """Error-level decoder lines, split into defects and known quirks."""
+
+    fatal: tuple[str, ...]
+    informational: tuple[str, ...]
+    informational_count: int
+
+
+def classify_subtitle_decode_stderr(text: str) -> SubtitleDiagnostics:
+    """Split the decode probe's stderr into fatal and informational lines.
+
+    The probe runs at ``-v error``, so every line is an error-level message.
+    Only known per-display-set PGS quirks are informational; anything else
+    (I/O errors, container damage, an unknown message) stays fatal.
+    ``Last message repeated N times`` counts with the line it repeats.
+    """
+
+    fatal: list[str] = []
+    informational: list[str] = []
+    informational_count = 0
+    previous: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        repeated = _REPEATED_MESSAGE.match(line)
+        if repeated is not None:
+            if previous == "informational":
+                informational_count += int(repeated.group(1))
+                continue
+            if previous == "fatal":
+                continue
+        if any(pattern.search(line) for pattern in _INFORMATIONAL_SUBTITLE_DIAGNOSTICS):
+            informational.append(line)
+            informational_count += 1
+            previous = "informational"
+        else:
+            fatal.append(line)
+            previous = "fatal"
+    return SubtitleDiagnostics(
+        fatal=tuple(fatal),
+        informational=tuple(informational),
+        informational_count=informational_count,
+    )
+
+
+def subtitle_event_count_tolerance(packet_count: int) -> int:
+    """How far the decoded PGS event count may drift from the packet count.
+
+    The packets themselves are already proven identical to the sidecar by the
+    payload hash comparison; this count only shows that the decoder turned
+    them into events.  FFmpeg builds differ in whether a palette-only update
+    or an empty epoch display set becomes an event, and a quirky display set
+    can be dropped (see :func:`classify_subtitle_decode_stderr`); that is a
+    few events per title.  A damaged or truncated track loses far more than
+    five percent of its events.
+    """
+
+    return max(5, math.ceil(max(packet_count, 0) * 0.05))
+
+
+def assess_final_subtitle_decode(
+    verdict: SubtitleDecodeVerdict,
+    *,
+    stderr_text: str,
+    packet_count: int | None,
+    title_duration_seconds: Decimal,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The final-subtitle gates: (errors that stop the job, warnings).
+
+    Errors are real defects: fatal decoder output, a large event-count
+    difference, missing timestamps, or events far outside the title.
+    Measurement and FFmpeg-version differences are warnings.
+    """
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    diagnostics = classify_subtitle_decode_stderr(stderr_text)
+    pgs = verdict.codec_name == "hdmv_pgs_subtitle"
+    tolerance = subtitle_event_count_tolerance(packet_count or 0)
+    if diagnostics.fatal:
+        errors.append(
+            "subtitle decoder emitted error-level diagnostics: "
+            + diagnostics.fatal[0][:300]
+        )
+    if diagnostics.informational_count:
+        message = (
+            f"subtitle decoder reported {diagnostics.informational_count} known "
+            "PGS display-set quirk(s)"
+        )
+        if pgs and diagnostics.informational_count > tolerance:
+            errors.append(f"{message}, more than the tolerance of {tolerance}")
+        else:
+            warnings.append(message)
+    if pgs and packet_count is not None:
+        difference = verdict.decoded_event_count - packet_count
+        if abs(difference) > tolerance:
+            errors.append(
+                "decoded PGS event count differs from the sidecar packet count "
+                f"({verdict.decoded_event_count} events, {packet_count} packets, "
+                f"tolerance {tolerance})"
+            )
+        elif difference:
+            warnings.append(
+                f"decoded PGS event count ({verdict.decoded_event_count}) differs "
+                f"from the packet count ({packet_count}) within the tolerance of "
+                f"{tolerance}"
+            )
+    elif pgs:
+        warnings.append(
+            "the sidecar packet count is unavailable; the decoded event count "
+            "was not compared"
+        )
+    title_duration = Decimal(str(title_duration_seconds))
+    first, last = verdict.first_timestamp, verdict.last_timestamp
+    if first is None or last is None:
+        errors.append("decoded subtitle timestamps are missing")
+    else:
+        early = -first
+        late = last - title_duration
+        if early > SUBTITLE_TIMESTAMP_SLACK or late > SUBTITLE_TIMESTAMP_SLACK:
+            errors.append(
+                "decoded subtitle timestamps fall outside the reviewed title "
+                f"(first {first} s, last {last} s, title {title_duration} s)"
+            )
+        elif late > SUBTITLE_TIMESTAMP_TOLERANCE:
+            warnings.append(
+                f"the last subtitle event starts {late:.3f} s after the title end, "
+                "within the allowed slack"
+            )
+        elif early > SUBTITLE_TIMESTAMP_TOLERANCE:
+            warnings.append(
+                f"the first subtitle event starts {early:.3f} s before the title, "
+                "within the allowed slack"
+            )
+    return tuple(errors), tuple(warnings)
+
+
 __all__ = [
     "DEFAULT_FORCED_COVERAGE_LIMIT",
     "DEFAULT_FORCED_PACKET_LIMIT",
+    "SUBTITLE_TIMESTAMP_SLACK",
+    "SUBTITLE_TIMESTAMP_TOLERANCE",
     "SubtitleDecodeError",
     "SubtitleDecodeEvent",
     "SubtitleDecodeProbe",
     "SubtitleDecodeVerdict",
+    "SubtitleDiagnostics",
     "SubtitleProbe",
     "SubtitleProbeError",
+    "assess_final_subtitle_decode",
+    "classify_subtitle_decode_stderr",
     "evaluate_subtitle_decode",
     "parse_subtitle_decode_probe",
     "parse_subtitle_probe",
     "require_subtitle_decode",
     "subtitle_decode_probe_command",
+    "subtitle_event_count_tolerance",
     "subtitle_probe_command",
     "validate_subtitle_classification",
 ]
