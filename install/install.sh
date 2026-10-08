@@ -888,8 +888,61 @@ if [[ -d /etc/nginx/apps && -f /etc/htpasswd ]]; then
     fi
     sudo rm -f "$nginx_backup"
     sudo systemctl reload nginx
+elif grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
+    # WSL: install/wsl-install.sh publishes the Windows-local page itself.
+    :
 else
-    echo "Warning: Swizzin nginx apps directory or /etc/htpasswd is missing; /encoder was not installed." >&2
+    # A server without Swizzin: the page listens on the loopback address only
+    # and is opened through an SSH tunnel, so no port is exposed and no web
+    # password is needed.  The port survives updates: an unattended update
+    # does not pass BDENCODE_LOCAL_WEB_PORT, so the installed one is reused.
+    local_nginx_target=/etc/nginx/conf.d/bdencode-local.conf
+    local_web_port="${BDENCODE_LOCAL_WEB_PORT:-}"
+    if [[ -z "$local_web_port" ]] && sudo test -f "$local_nginx_target"; then
+        local_web_port="$(sudo sed -n 's/^[[:space:]]*listen 127\.0\.0\.1:\([0-9]*\).*/\1/p' "$local_nginx_target" | head -n 1)"
+    fi
+    local_web_port="${local_web_port:-8787}"
+    if [[ ! "$local_web_port" =~ ^[0-9]+$ ]] || \
+        ((local_web_port < 1024 || local_web_port > 65535 || local_web_port == 8796)); then
+        echo "BDENCODE_LOCAL_WEB_PORT must be an unprivileged port other than 8796." >&2
+        exit 2
+    fi
+    if ! command -v nginx >/dev/null 2>&1 && [[ ! -x /usr/sbin/nginx ]]; then
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nginx
+        # A fresh nginx serves its welcome page on every address on port 80;
+        # BDEncode needs none of that.
+        sudo rm -f /etc/nginx/sites-enabled/default
+    fi
+    local_nginx_new="${local_nginx_target}.new-${release_id}"
+    local_nginx_backup="${local_nginx_target}.rollback"
+    sudo sed \
+        -e "s|@LISTEN_PORT@|$local_web_port|g" \
+        -e 's|@BACKEND_PORT@|8796|g' \
+        -e "s|@FRONTEND_ROOT@|$frontend_root/current|g" \
+        "$repo_root/deploy/nginx/bdencode-standalone.conf.in" \
+        | sudo tee "$local_nginx_new" >/dev/null
+    sudo chmod 0644 "$local_nginx_new"
+    if sudo test -e "$local_nginx_target"; then
+        sudo cp -a "$local_nginx_target" "$local_nginx_backup"
+    else
+        sudo rm -f "$local_nginx_backup"
+    fi
+    sudo mv -f "$local_nginx_new" "$local_nginx_target"
+    if sudo nginx -t && sudo systemctl enable nginx.service && sudo systemctl reload-or-restart nginx.service; then
+        sudo rm -f "$local_nginx_backup"
+        echo "Web page (loopback only): http://127.0.0.1:${local_web_port}/encoder/"
+        echo "From your own computer: ssh -L ${local_web_port}:127.0.0.1:${local_web_port} ${task_user}@<server>, then open http://localhost:${local_web_port}/encoder/"
+    else
+        # The web page is optional; the encoder itself keeps working.
+        if sudo test -e "$local_nginx_backup"; then
+            sudo mv -f "$local_nginx_backup" "$local_nginx_target"
+        else
+            sudo rm -f "$local_nginx_target"
+        fi
+        sudo nginx -t >/dev/null 2>&1 && sudo systemctl reload-or-restart nginx.service || true
+        echo "Warning: the local web page could not be installed (is port ${local_web_port} free?)." >&2
+        echo "Set another port with BDENCODE_LOCAL_WEB_PORT and rerun the installer." >&2
+    fi
 fi
 
 sudo systemctl daemon-reload
