@@ -113,8 +113,11 @@ from .media.language import (
     LanguageDecision,
     LanguageEvidence,
     LanguageResolver,
+    LanguageSettlement,
     LanguageSource,
     LanguageStatus,
+    normalize_iso639_2,
+    settle_track_language,
 )
 from .media.language_runtime import AudioLanguageRuntime, LanguageInferenceUnavailable
 from .media.track_analysis import (
@@ -3415,6 +3418,45 @@ class PipelineWorker:
                 result[item.source.value] = item.raw_code
         return result
 
+    @staticmethod
+    def _declared_language_codes(
+        decision: LanguageDecision | None,
+    ) -> dict[str, str | None]:
+        raw = PipelineWorker._declared_language_evidence(decision)
+        return {source: normalize_iso639_2(code) for source, code in raw.items()}
+
+    @staticmethod
+    def _settle_language(
+        stream: MediaStream,
+        settlement: LanguageSettlement,
+        resolved: dict[str, str],
+        unresolved: list[dict[str, Any]],
+        warnings: list[dict[str, Any]],
+        *,
+        decision: LanguageDecision | None = None,
+    ) -> None:
+        if settlement.stop:
+            entry: dict[str, Any] = {
+                "stream_id": stream.id,
+                "kind": stream.kind.value,
+                "reason": "language_conflict_or_low_confidence",
+            }
+            if decision is not None:
+                entry["decision"] = decision.to_dict()
+            unresolved.append(entry)
+            return
+        if settlement.language is not None:
+            resolved[stream.id] = settlement.language
+        if settlement.warning:
+            warnings.append(
+                {
+                    "stream_id": stream.id,
+                    "kind": stream.kind.value,
+                    "language": settlement.language,
+                    "warning": settlement.warning,
+                }
+            )
+
     def _resolve_selected_languages(
         self,
         job: Job,
@@ -3458,6 +3500,7 @@ class PipelineWorker:
             except (OSError, TypeError, ValueError, json.JSONDecodeError):
                 pass
         unresolved: list[dict[str, Any]] = []
+        language_warnings: list[dict[str, Any]] = []
         reference_digest = sha256_file(paths.reference)
         resolver = LanguageResolver()
         audio_ordinals = {
@@ -3471,6 +3514,7 @@ class PipelineWorker:
             if stream is None:
                 continue
             declared = stream.language
+            labels = self._declared_language_codes(declared)
             if stream.kind is StreamKind.SUBTITLE:
                 # Subtitle declarations remain usable when their independent
                 # authored metadata agrees.  Audio is different: repeated
@@ -3482,12 +3526,8 @@ class PipelineWorker:
                     and not declared.needs_review
                 ):
                     continue
-                unresolved.append(
-                    {
-                        "stream_id": stream.id,
-                        "kind": stream.kind.value,
-                        "reason": "subtitle_ocr_or_manual_override_required",
-                    }
+                self._settle_language(
+                    stream, settle_track_language(labels), resolved, unresolved, language_warnings
                 )
                 continue
             if stream.kind is not StreamKind.AUDIO:
@@ -3512,13 +3552,16 @@ class PipelineWorker:
                         },
                     }
                 )
-                unresolved.append(
-                    {
-                        "stream_id": stream.id,
-                        "kind": stream.kind.value,
-                        "reason": exc.reason_code,
-                    }
-                )
+                settlement = settle_track_language(labels)
+                if settlement.language is not None and settlement.warning is None:
+                    settlement = replace(
+                        settlement,
+                        warning=(
+                            f"the language detection is unavailable ({exc.reason_code}); "
+                            f"the disc label {settlement.language} is used"
+                        ),
+                    )
+                self._settle_language(stream, settlement, resolved, unresolved, language_warnings)
                 continue
             consensus = inference.get("consensus", {})
             raw = self._declared_language_evidence(declared)
@@ -3539,13 +3582,17 @@ class PipelineWorker:
             if decision.iso639_2t and not decision.needs_review:
                 resolved[stream.id] = decision.iso639_2t
             else:
-                unresolved.append(
-                    {
-                        "stream_id": stream.id,
-                        "kind": stream.kind.value,
-                        "reason": "language_conflict_or_low_confidence",
-                        "decision": decision.to_dict(),
-                    }
+                self._settle_language(
+                    stream,
+                    settle_track_language(
+                        labels,
+                        normalize_iso639_2(consensus.get("iso639_2t")),
+                        float(consensus.get("confidence", 0.0)),
+                    ),
+                    resolved,
+                    unresolved,
+                    language_warnings,
+                    decision=decision,
                 )
 
         report = {
@@ -3557,6 +3604,7 @@ class PipelineWorker:
             "resolved_languages": resolved,
             "evidence": evidence_records,
             "unresolved": unresolved,
+            "warnings": language_warnings,
         }
         atomic_write_json(paths.language_json, report)
         self._register_artifact(
@@ -3570,6 +3618,18 @@ class PipelineWorker:
             raise ReviewRequired(
                 "one or more retained tracks need a confirmed language before encoding",
                 details={"tracks": unresolved},
+            )
+        if language_warnings:
+            self.database.add_event(
+                EventCreate(
+                    job_id=job.id,
+                    kind="worker.language-warning",
+                    message=(
+                        "track languages were chosen with warnings; check them in "
+                        "language-inference.json"
+                    ),
+                    payload={"tracks": language_warnings},
+                )
             )
         if not resolved:
             return selection
@@ -5601,11 +5661,19 @@ class PipelineWorker:
         }
         extracted_audio: list[tuple[int, TrackSelection, MediaStream, Path]] = []
         extracted_subtitles: list[tuple[int, TrackSelection, MediaStream, Path]] = []
-        for number, item, stream in retained:
-            if item.bcp47(stream) == "und":
-                raise ReviewRequired(
-                    f"retained track {stream.id} has no confirmed language; provide an override"
+        untagged = [stream.id for _number, item, stream in retained if item.bcp47(stream) == "und"]
+        if untagged:
+            # Nothing names these languages; they are muxed as ``und`` and the
+            # tag can be fixed later without touching the encode.
+            self.database.add_event(
+                EventCreate(
+                    job_id=job.id,
+                    kind="worker.language-warning",
+                    message="some retained tracks have no known language and are tagged und",
+                    payload={"tracks": untagged},
                 )
+            )
+        for number, item, stream in retained:
             output = self._track_path(paths, number, item, stream)
             inputs = {
                 "reference_sha256": sha256_file(paths.reference),

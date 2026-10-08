@@ -151,6 +151,8 @@ function eventMessageLabel(message: string): string | undefined {
     "I/P/B comparison complete": ["Az I/P/B összehasonlítás elkészült", "I/P/B comparison complete"],
     "encode, QC and comparison completed": ["A kódolás, az ellenőrzés és az összehasonlítás elkészült", "Encode, checks and comparison complete"],
     "image upload failed; retry is safe": ["A képfeltöltés sikertelen; biztonságosan újrapróbálható", "Image upload failed; a retry is safe"],
+    "track languages were chosen with warnings; check them in language-inference.json": ["A sávnyelveket a program figyelmeztetéssel választotta ki (például a lemez címkéje és a nyelvfelismerés eltér); a részletek a language-inference.json-ban", "Track languages were chosen with warnings (for example the disc label and the language detection differ); details in language-inference.json"],
+    "some retained tracks have no known language and are tagged und": ["Néhány megtartott sáv nyelve ismeretlen, ezért „und” jelölést kap; a jelölés a kódolás után is javítható", "Some kept tracks have no known language and are tagged und; the tag can be fixed after the encode"],
     "one or more retained tracks need a confirmed language before encoding": ["Egy vagy több megtartott sáv nyelvét meg kell erősíteni a kódolás előtt", "One or more kept tracks need a confirmed language before encoding"],
     "track languages confirmed by operator": ["A sávok nyelve megerősítve", "Track languages confirmed"],
     "image upload reset by operator": ["A képfeltöltés elölről indul", "Image upload starts over"],
