@@ -15,7 +15,7 @@ import re
 from dataclasses import asdict, dataclass
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Literal, Mapping, Sequence
 
 
 DEFAULT_MINIMUM_SAVINGS_RATIO = Decimal("0.001")
@@ -246,18 +246,61 @@ def _positive_decimal(
     return parsed
 
 
-# FFmpeg's message when the timestamps of an input stream jump; "vist"/"aist"
-# input streams carry the picture and the sound, "sist" the subtitles.
-_TIMESTAMP_JUMP = re.compile(r"\[(?P<kind>[vas])ist#[^\]]*\] timestamp discontinuity\b")
+# FFmpeg's message when the timestamps of an input stream jump.  FFmpeg 6.1+
+# logs it as a warning in the input stream's context, where "vist"/"aist"
+# streams carry the picture and the sound and "sist" the subtitles:
+#   [vist#0:0/hevc @ 0x...] timestamp discontinuity (stream id=4113): ...
+# FFmpeg 5.1 (Debian 12) logs it without a context and only at debug level:
+#   timestamp discontinuity for stream #0:1 (id=4352, type=audio): ...
+# A ``-loglevel level`` tag ("[warning] ") may stand before the text.
+_TIMESTAMP_JUMP = re.compile(
+    r"(?:\[(?P<kind>[vas])ist#[^\]]*\]\s*(?:\[[a-z]+\]\s*)?timestamp discontinuity\b"
+    r"|timestamp discontinuity for stream #\d+:\d+ \(id=\d+, type=(?P<type>[a-z]+)\))"
+)
+
+# The demuxer and parser messages that the cut at a clip join (or at the end
+# of the title) causes: the earlier clip's last packet is incomplete, so the
+# MPEG-TS demuxer flags it ("Packet corrupt"), a TrueHD parser fails its
+# parity check, and the timestamps jump.  Only these are set apart by the
+# time of the join; every other message near a join is judged as usual.
+_JOIN_ARTIFACT = re.compile(
+    r"(?i)(?:packet corrupt|parity check failed|PES packet size mismatch|"
+    r"timestamp discontinuity|non[- ]monoton|invalid dropping)"
+)
+
+# FFmpeg's progress record ("frame=  123 fps=... time=00:01:02.34 ...").
+_PROGRESS_RECORD = re.compile(r"^(?:\[[^\]]*\]\s*)*(?:frame=|size=)")
+_PROGRESS_TIME = re.compile(r"\btime=\s*(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
+
+
+def _jump_kind(record: str) -> str | None:
+    match = _TIMESTAMP_JUMP.search(record)
+    if match is None:
+        return None
+    if match["kind"]:
+        return match["kind"]
+    return {"video": "v", "audio": "a", "subtitle": "s"}.get(match["type"] or "", "d")
+
+
+def _progress_seconds(record: str) -> float | None:
+    if not _PROGRESS_RECORD.match(record.strip()):
+        return None
+    match = _PROGRESS_TIME.search(record)
+    if match is None:
+        return None
+    return int(match[1]) * 3600 + int(match[2]) * 60 + float(match[3])
 
 
 def split_clip_join_lines(
     text: str,
     joins: int,
     *,
+    moments: Sequence[float] = (),
     before: int = 2,
     after: int = 2,
     gap: int = 4,
+    window_before: float = 20.0,
+    window_after: float = 10.0,
 ) -> tuple[str, tuple[str, ...]] | None:
     """Separate the remux messages that a playlist's clip joins explain.
 
@@ -270,6 +313,15 @@ def split_clip_join_lines(
     to it.  Subtitle streams jump at the joins too, whenever their next
     packet comes.
 
+    FFmpeg 5.1 does not log the jumps at the remux's log level, so the join
+    messages are also found by time: ``moments`` are the playlist times of
+    the joins (and of the end of the title, where the last packet is cut
+    the same way).  A cut-packet or timestamp message whose position between
+    two progress records reaches from ``window_before`` seconds ahead of to
+    ``window_after`` seconds past a moment belongs to it; that is the span
+    :func:`clip_join_decode_command` decodes strictly.  A log without
+    progress records gives no time, and nothing is set apart by time.
+
     Returns the remaining log and the join messages, or ``None`` when the
     log has more bursts than the playlist has joins: then something other
     than a join moved the timestamps.
@@ -277,12 +329,13 @@ def split_clip_join_lines(
 
     if joins < 0:
         raise ValueError("the number of clip joins cannot be negative")
+    if window_before < 0 or window_after < 0:
+        raise ValueError("clip join time windows cannot be negative")
     records = re.split(r"[\r\n]+", text)
     jumps = [
         index
         for index, record in enumerate(records)
-        if (match := _TIMESTAMP_JUMP.search(record)) is not None
-        and match["kind"] in {"v", "a"}
+        if _jump_kind(record) in {"v", "a"}
     ]
     bursts: list[list[int]] = []
     for index in jumps:
@@ -295,24 +348,145 @@ def split_clip_join_lines(
     inside: set[int] = set()
     for first, last in bursts:
         inside.update(range(max(0, first - before), min(len(records), last + after + 1)))
+    times = [_progress_seconds(record) for record in records]
+    timed = any(value is not None for value in times)
+    # The progress time last seen before, and first seen after, each record.
+    previous: list[float | None] = []
+    seen: float | None = None
+    for value in times:
+        previous.append(seen)
+        if value is not None:
+            seen = value
+    following: list[float | None] = [None] * len(records)
+    seen = None
+    for index in range(len(records) - 1, -1, -1):
+        following[index] = seen
+        if times[index] is not None:
+            seen = times[index]
+
+    def near_a_moment(index: int) -> bool:
+        if not timed or not moments:
+            return False
+        earlier = previous[index]
+        later = following[index]
+        low = earlier if earlier is not None else 0.0
+        high = later if later is not None else float("inf")
+        return any(
+            low <= moment + window_after and high >= moment - window_before
+            for moment in moments
+        )
+
     kept: list[str] = []
     joined: list[str] = []
     for index, record in enumerate(records):
         message = record.strip()
-        subtitle_jump = (
-            joins > 0
-            and (match := _TIMESTAMP_JUMP.search(record)) is not None
-            and match["kind"] == "s"
-        )
+        subtitle_jump = joins > 0 and _jump_kind(record) == "s"
         # Progress records and the muxer's closing summary are not messages.
-        noise = message.startswith(("frame=", "[out#"))
-        if message and not noise and (index in inside or subtitle_jump):
+        noise = message.startswith(("frame=", "[out#")) or times[index] is not None
+        timed_artifact = bool(_JOIN_ARTIFACT.search(message)) and near_a_moment(index)
+        if message and not noise and (index in inside or subtitle_jump or timed_artifact):
             joined.append(message)
         else:
             kept.append(record)
     if not joined:
         return text, ()
     return "\n".join(kept), tuple(joined)
+
+
+def _join_message_key(message: str) -> str:
+    """A join message without its context, level tag, numbers and timestamps.
+
+    The context differs between the source and the final file (``[mpegts @
+    0x...]`` against ``[matroska,webm @ 0x...]``); the message text does not.
+    """
+
+    key = re.sub(r"^(?:\[[^\]]*\]\s*)+", "", message.strip())
+    key = re.sub(r"0x[0-9a-fA-F]+", "0x", key)
+    key = re.sub(r"\bNOPTS\b", "N", key)
+    key = re.sub(r"-?\d+", "N", key)
+    return " ".join(key.split())
+
+
+# Messages of a full decode that show a defect in the decoded file.  The
+# decode runs with ``-xerror``/``explode`` and exits non-zero on a frame a
+# decoder rejects; these are the messages that report damage, concealment or
+# a failed read of the file while the decode can still reach the end.
+_FINAL_DECODE_FATAL = re.compile(
+    r"(?i)(?:error while decoding|decoding error|invalid NAL|decode_slice_header error|"
+    r"concealing \d+ DC|corrupt decoded frame|missing reference picture|"
+    r"mmco:\s*unref short failure|reference picture missing during reorder|"
+    r"packet corrupt|corrupt(?:ed)? input packet|CRC error|PES packet size mismatch|"
+    r"truncated (?:file|packet|nal)|unexpected end of file|"
+    r"read error|I/O error|Input/output error|No space left on device|"
+    r"Invalid data found|EBML|exceeds containing master element)"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class FinalDecodeVerdict:
+    """The messages of the final file's full decode, sorted by meaning."""
+
+    blocking: tuple[str, ...]
+    warnings: tuple[str, ...]
+    excused_join_messages: tuple[str, ...]
+
+    @property
+    def status(self) -> str:
+        if self.blocking:
+            return "needs_review"
+        if self.warnings or self.excused_join_messages:
+            return "passed_with_warnings"
+        return "passed"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "blocking": list(self.blocking),
+            "warnings": list(self.warnings),
+            "excused_join_messages": list(self.excused_join_messages),
+        }
+
+
+def classify_final_decode_log(
+    text: str, *, join_messages: Sequence[str] = ()
+) -> FinalDecodeVerdict:
+    """Judge the error-level log of the final file's full decode.
+
+    The decode runs with ``-xerror``/``-err_detect explode``: a frame the
+    decoders reject ends it with a failure before this is called.  What the
+    log still holds is judged line by line:
+
+    * a message of :data:`_FINAL_DECODE_FATAL` (damage, concealment, a failed
+      read) blocks the file, unless it is one of the source's verified
+      clip-join messages (``join_messages`` of ``clip-joins.json``): copied
+      TrueHD/DTS tracks carry the join's cut packet into the final file, and
+      the source check proved by a strict decode across the join that it
+      damages no frame.  Each verified join message excuses one line of the
+      same text (level tag, pointers, stream numbers and timestamps aside);
+    * every other message (a parser's parity note, a timestamp correction)
+      is a warning: the decoders accepted every frame.
+    """
+
+    budget: dict[str, int] = {}
+    for message in join_messages:
+        key = _join_message_key(message)
+        budget[key] = budget.get(key, 0) + 1
+    blocking: list[str] = []
+    warnings: list[str] = []
+    excused: list[str] = []
+    for raw in re.split(r"[\r\n]+", text):
+        line = raw.strip()
+        if not line or _progress_seconds(line) is not None:
+            continue
+        key = _join_message_key(line)
+        if _JOIN_ARTIFACT.search(line) and budget.get(key, 0) > 0:
+            budget[key] -= 1
+            excused.append(line)
+        elif _FINAL_DECODE_FATAL.search(line):
+            blocking.append(line)
+        else:
+            warnings.append(line)
+    return FinalDecodeVerdict(tuple(blocking), tuple(warnings), tuple(excused))
 
 
 def clip_join_decode_command(
@@ -1144,6 +1318,8 @@ __all__ = [
     "VideoEfficiencyError",
     "VideoEfficiencyVerdict",
     "VideoPacketSummary",
+    "FinalDecodeVerdict",
+    "classify_final_decode_log",
     "clip_join_decode_command",
     "PacketTimelineEntry",
     "PacketTimelineFingerprint",

@@ -84,12 +84,14 @@ def test_join_messages_cleared_by_a_strict_decode_do_not_stop_the_job(context) -
     encoding = worker.process_one_stage(ready)
 
     assert encoding.state is JobState.ENCODING
+    # The end of the title logged nothing, so only the join is decoded.
     (decode,) = join_decodes
     assert decode[decode.index("-ss") + 1] == f"{JOIN_SECONDS - 20:.3f}"
     paths = JobPaths.create(settings, job.id)
     report = json.loads((paths.analysis / "clip-joins.json").read_text("utf-8"))
     assert report["verified"] is True
     assert report["joins"] == [JOIN_SECONDS]
+    assert report["title_end"] == 7200.0 and report["title_end_verified"] is False
     assert any("Packet corrupt" in line for line in report["join_messages"])
     events = [e for e in database.list_events(job_id=job.id) if e.kind == "worker.clip-joins-verified"]
     assert len(events) == 1
@@ -134,3 +136,154 @@ def test_a_single_clip_title_is_judged_as_before(context) -> None:
     with pytest.raises(ReviewRequired, match="source corruption"):
         worker.process_one_stage(ready)
     assert join_decodes == []
+
+
+def _progress(seconds: float) -> str:
+    minutes, secs = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"frame=1000 fps=287 q=-1.0 size=74980608kB time={int(hours):02d}:{int(minutes):02d}:{secs:05.2f} speed=12x    \r"
+
+
+# FFmpeg 5.1 (Debian 12) logs no timestamp jump at -v info, only the cut packet.
+JOIN_51 = (
+    "[mpegts @ 0x1] Packet corrupt (stream = 0, dts = NOPTS).\n"
+    "[truehd @ 0x3] mlpparse: Parity check failed.\n"
+)
+
+
+def test_ffmpeg_51_join_messages_are_verified_by_their_time(context) -> None:
+    _database, settings, _scan, _scanner, runner, worker = context
+    _two_clip_disc(context)
+    log = (
+        "".join(_progress(t) for t in range(7150, 7180, 5))
+        + JOIN_51
+        + "".join(_progress(t) for t in range(7180, 7200, 5))
+        # The title's own last packet is cut too.
+        + JOIN_51
+    )
+    join_decodes = _remux_logs(runner, log)
+    job, ready = _ready(context)
+
+    encoding = worker.process_one_stage(ready)
+
+    assert encoding.state is JobState.ENCODING
+    assert [decode[decode.index("-ss") + 1] for decode in join_decodes] == [
+        f"{JOIN_SECONDS - 20:.3f}",
+        f"{7200 - 20:.3f}",
+    ]
+    report = json.loads(
+        (JobPaths.create(settings, job.id).analysis / "clip-joins.json").read_text("utf-8")
+    )
+    assert report["verified"] is True and report["title_end_verified"] is True
+    assert len(report["join_messages"]) == 4
+    assert worker.process_one_stage(encoding).state is JobState.MUXING
+
+
+def test_a_failed_decode_at_the_title_end_keeps_the_end_messages_only(context) -> None:
+    _database, settings, _scan, _scanner, runner, worker = context
+    _two_clip_disc(context)
+    log = (
+        "".join(_progress(t) for t in range(7150, 7180, 5))
+        + JOIN_51
+        + "".join(_progress(t) for t in range(7180, 7200, 5))
+        + JOIN_51
+    )
+    _remux_logs(runner, log)
+    real_run = runner.run
+
+    def run(*args: Any, **kwargs: Any):
+        command = tuple(os.fspath(item) for item in args[0])
+        if "0:a?" in command and command[command.index("-ss") + 1] == f"{7200 - 20:.3f}":
+            real_run(*args, **kwargs)
+            raise ProcessFailure(
+                ProcessResult(command, 1, 0.0, 0.0, None, kwargs.get("stderr_path"))
+            )
+        return real_run(*args, **kwargs)
+
+    runner.run = run  # type: ignore[method-assign]
+    job, ready = _ready(context)
+
+    with pytest.raises(ReviewRequired, match="source corruption"):
+        worker.process_one_stage(ready)
+    report = json.loads(
+        (JobPaths.create(settings, job.id).analysis / "clip-joins.json").read_text("utf-8")
+    )
+    assert report["verified"] is True and report["title_end_verified"] is False
+    assert len(report["join_messages"]) == 2
+
+
+def test_the_cut_last_packet_of_a_single_clip_title_is_verified(context) -> None:
+    _database, _settings, _scan, _scanner, runner, worker = context
+    log = "".join(_progress(t) for t in range(7170, 7200, 5)) + JOIN_51
+    join_decodes = _remux_logs(runner, log)
+    _job, ready = _ready(context)
+
+    assert worker.process_one_stage(ready).state is JobState.ENCODING
+    (decode,) = join_decodes
+    assert decode[decode.index("-ss") + 1] == f"{7200 - 20:.3f}"
+
+
+def _full_decode_log(runner, text: str) -> None:
+    real_run = runner.run
+
+    def run(*args: Any, **kwargs: Any):
+        result = real_run(*args, **kwargs)
+        stderr_path = kwargs.get("stderr_path")
+        if stderr_path is not None and stderr_path.name == "full-decode.log":
+            runner._write(stderr_path, text)
+        return result
+
+    runner.run = run  # type: ignore[method-assign]
+
+
+def test_final_decode_notes_are_recorded_and_the_job_completes(context) -> None:
+    database, settings, _scan, _scanner, runner, worker = context
+    _full_decode_log(runner, "[truehd @ 0x7] mlpparse: Parity check failed.\n")
+    job, ready = _ready(context)
+
+    assert worker.process_job(ready).state is JobState.COMPLETED
+    events = [
+        event
+        for event in database.list_events(job_id=job.id)
+        if event.kind == "worker.full-decode-warning"
+    ]
+    assert len(events) == 1
+    assert events[0].message == (
+        "the full decode of the final file logged messages that are not decode errors; "
+        "the job continues"
+    )
+    assert events[0].payload["warnings"] == ["[truehd @ 0x7] mlpparse: Parity check failed."]
+
+
+def test_a_final_decode_error_still_stops_the_job(context) -> None:
+    _database, settings, _scan, _scanner, runner, worker = context
+    _full_decode_log(
+        runner, "[h264 @ 0x2] concealing 120 DC, 120 AC, 120 MV errors in P frame\n"
+    )
+    job, ready = _ready(context)
+
+    result = worker.process_job(ready)
+
+    assert result.state is JobState.NEEDS_REVIEW
+    assert result.resume_state is JobState.QC
+    assert "full decode emitted an error-level diagnostic" in (result.status_message or "")
+    report = json.loads(
+        (
+            JobPaths.create(settings, job.id).analysis
+            / "container"
+            / "full-decode-diagnostics.json"
+        ).read_text("utf-8")
+    )
+    assert report["status"] == "needs_review"
+
+
+def test_a_copied_join_packet_in_the_final_decode_is_excused(context) -> None:
+    _database, _settings, _scan, _scanner, runner, worker = context
+    _two_clip_disc(context)
+    _remux_logs(runner, PROGRESS * 10 + JOIN + PROGRESS * 2)
+    _full_decode_log(
+        runner, "[matroska,webm @ 0x9] Packet corrupt (stream = 3, dts = NOPTS).\n"
+    )
+    _job, ready = _ready(context)
+
+    assert worker.process_job(ready).state is JobState.COMPLETED

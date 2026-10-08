@@ -275,6 +275,25 @@ _DIAGNOSTIC_RULES: tuple[
 )
 
 
+# A line FFmpeg logged at info level or below (``-loglevel level+info`` tags
+# every line), or a line of the info-level stream header that ``-v info``
+# prints without a tag: stream lines, chapters and ``key : value`` metadata.
+# Such a line is never an error report, even when a title or metadata value
+# contains the word "error" or "failed", so the catch-all rule skips it.
+_INFO_LEVEL_LINE = re.compile(
+    r"^(?:\[[^\]]*\]\s*)*?\[(?:info|verbose|debug|trace)\]\s"
+)
+_INFO_HEADER_LINE = re.compile(
+    r"^(?:(?:Input|Output) #\d|Duration:|Stream #\d|Stream mapping:|Chapters?:|"
+    r"Chapter #\d|Metadata:|Side data:|Press \[q\]|"
+    r"[A-Za-z0-9_][A-Za-z0-9_ .()/-]*?\s+:\s)"
+)
+
+
+def _informational_line(line: str) -> bool:
+    return bool(_INFO_LEVEL_LINE.match(line) or _INFO_HEADER_LINE.match(line))
+
+
 def classify_media_diagnostics(
     text: str,
     *,
@@ -296,6 +315,8 @@ def classify_media_diagnostics(
         for code, category, severity, pattern in _DIAGNOSTIC_RULES:
             if not pattern.search(line):
                 continue
+            if code == "unclassified_error" and _informational_line(line):
+                break
             effective_category = category
             effective_severity = severity
             if category is DiagnosticCategory.OPEN_GOP_SEEK and context != "sampled":
@@ -324,9 +345,13 @@ def classify_media_diagnostics(
 
     results = []
     for code, (category, severity, examples, count) in grouped.items():
+        # FFmpeg corrects a timestamp jump itself (a multi-clip playlist jumps
+        # at every join); the packet timeline and cadence checks judge the
+        # result, so in the source logs a jump is a recorded warning.
         known_source_advisory = context == "source" and code in {
             "bdj_runtime_unavailable",
             "output_timestamp_corrected",
+            "timestamp_discontinuity",
         }
         requires_review = not known_source_advisory and not (
             category is DiagnosticCategory.OPEN_GOP_SEEK and context == "sampled"
