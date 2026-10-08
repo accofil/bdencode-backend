@@ -88,6 +88,10 @@ class AudioFrameContinuity:
     maximum_gap_samples: int
     maximum_overlap_samples: int
     discontinuity_frame_indexes: tuple[int, ...]
+    # False when ffprobe reported no per-frame sample rate (ffprobe before
+    # 6.0, e.g. Debian 12's 5.1); the stream's rate then stands for every
+    # frame, and a rate change inside the stream cannot be seen.
+    frame_sample_rates_reported: bool = True
 
     @property
     def continuous(self) -> bool:
@@ -722,6 +726,7 @@ def parse_audio_frame_continuity(
     maximum_overlap_samples = 0
     discontinuity_indexes: list[int] = []
     last_frame_samples = 0
+    frames_without_rate = 0
     for index, frame in enumerate(frames):
         if not isinstance(frame, Mapping):
             raise ValueError(f"audio frame {index} is malformed")
@@ -734,8 +739,10 @@ def parse_audio_frame_continuity(
             and frame_stream_index != stream_index
         ):
             raise ValueError("audio frame evidence contains another stream")
-        sample_rate = _strict_optional_int(frame.get("sample_rate"))
-        if sample_rate != stream_sample_rate:
+        reported_rate = frame.get("sample_rate")
+        if reported_rate is None:
+            frames_without_rate += 1
+        elif _strict_optional_int(reported_rate) != stream_sample_rate:
             raise ValueError(f"audio frame {index} sample rate changed or is missing")
         frame_samples = _strict_optional_int(frame.get("nb_samples"))
         if frame_samples is None or frame_samples <= 0:
@@ -767,6 +774,10 @@ def parse_audio_frame_continuity(
         last_pts = pts
         last_frame_samples = frame_samples
 
+    # Either ffprobe reports every frame's rate or none (older ffprobe); a
+    # partly reported walk is not trustworthy evidence.
+    if 0 < frames_without_rate < len(frames):
+        raise ValueError("audio frame sample rate is missing for some frames")
     assert first_pts is not None and last_pts is not None
     normalized_end = (
         last_pts - first_pts + Decimal(last_frame_samples) / Decimal(stream_sample_rate)
@@ -788,6 +799,7 @@ def parse_audio_frame_continuity(
         maximum_gap_samples=maximum_gap_samples,
         maximum_overlap_samples=maximum_overlap_samples,
         discontinuity_frame_indexes=tuple(discontinuity_indexes),
+        frame_sample_rates_reported=frames_without_rate == 0,
     )
 
 
