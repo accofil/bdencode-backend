@@ -51,6 +51,8 @@ describe("NewEncodePage", () => {
     renderApp(<NewEncodePage />, "/new");
 
     fireEvent.click(await screen.findByRole("button", { name: "MOVIE_DISC kiválasztása" }));
+    // A long name is clamped in its tile; the full name stays in the tooltip.
+    expect(screen.getByTitle("OTHER_DISC")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "OTHER_DISC kiválasztása" }));
     expect(screen.getByText("/storage/OTHER_DISC")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Tovább" }));

@@ -287,3 +287,30 @@ def test_a_copied_join_packet_in_the_final_decode_is_excused(context) -> None:
     _job, ready = _ready(context)
 
     assert worker.process_job(ready).state is JobState.COMPLETED
+
+
+def test_a_join_report_from_before_3_7_3_is_not_decoded_again(context) -> None:
+    from bdencode.worker import _recorded_output_sha256
+
+    _database, settings, _scan, scanner, runner, worker = context
+    _two_clip_disc(context)
+    join_decodes = _remux_logs(runner, PROGRESS * 10 + JOIN + PROGRESS * 2)
+    job, ready = _ready(context)
+    worker.process_one_stage(ready)
+    paths = JobPaths.create(settings, job.id)
+    report_path = paths.analysis / "clip-joins.json"
+    report = json.loads(report_path.read_text("utf-8"))
+    # The 3.7.2 shape: no title end at all.
+    legacy = {key: value for key, value in report.items() if not key.startswith("title_end")}
+    legacy["schema_version"] = 1
+    report_path.write_text(json.dumps(legacy), encoding="utf-8")
+    join_decodes.clear()
+
+    worker._verify_clip_joins(
+        paths,
+        scanner.result.playlists[0],
+        _recorded_output_sha256(paths.stages / "reference-remux.json", paths.reference),
+    )
+
+    assert join_decodes == []
+    assert json.loads(report_path.read_text("utf-8")) == legacy

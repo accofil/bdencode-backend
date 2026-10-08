@@ -5248,3 +5248,21 @@ def test_a_missing_file_is_not_retried(context):
     claimed = JobQueue(database).claim_next()
 
     assert worker.process_job(claimed).state is JobState.FAILED
+
+
+def test_a_full_source_decode_from_before_3_7_3_is_not_repeated(context):
+    from bdencode.worker import _write_stage
+
+    _database, settings, _scan, _scanner, _runner, worker = context
+    paths = JobPaths.create(settings, "legacy-job")
+    paths.analysis.mkdir(parents=True, exist_ok=True)
+    paths.stages.mkdir(parents=True, exist_ok=True)
+    marker, inputs, outputs = worker._source_integrity_stage(paths, "ab" * 32)
+    for output in outputs:
+        output.write_text("{}", encoding="utf-8")
+    assert not worker._source_integrity_current(paths, "ab" * 32)
+
+    _write_stage(marker, {**inputs, "crop_verification": "cropdetect-reset0"}, outputs)
+    assert worker._source_integrity_current(paths, "ab" * 32)
+    # Another reference still needs its own decode.
+    assert not worker._source_integrity_current(paths, "cd" * 32)

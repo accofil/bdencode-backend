@@ -4233,8 +4233,17 @@ class PipelineWorker:
         return paths.stages / "source-video-integrity.json", inputs, outputs
 
     def _source_integrity_current(self, paths: JobPaths, reference_sha256: str) -> bool:
+        """Whether the full source decode already ran for this reference.
+
+        A decode finished before 3.7.3 logged a cumulative crop maximum, which
+        judged the crop at least as strictly as the per-frame log does: its
+        verdict stands and the hour-long decode is never repeated for it.
+        """
+
         marker, inputs, outputs = self._source_integrity_stage(paths, reference_sha256)
-        return _valid_stage(marker, inputs, outputs)
+        return _valid_stage(marker, inputs, outputs) or _valid_stage(
+            marker, {**inputs, "crop_verification": "cropdetect-reset0"}, outputs
+        )
 
     def _check_source_integrity(
         self,
@@ -4257,7 +4266,7 @@ class PipelineWorker:
         )
         integrity_report, integrity_progress, _crop_verification = outputs
         integrity_log = paths.logs / "source-video-integrity.log"
-        if not _valid_stage(integrity_marker, integrity_inputs, outputs):
+        if not self._source_integrity_current(paths, reference_sha256):
             command = source_video_integrity_command(
                 paths.reference, threads=INTEGRITY_DECODE_THREADS, cropdetect=True
             )
@@ -4497,7 +4506,9 @@ class PipelineWorker:
         if (
             current is not None
             and current.get("joins") == joins
-            and current.get("title_end") == title_end
+            # A report from before 3.7.3 covers the joins only; its strict
+            # decode is not repeated for the title end.
+            and (current.get("title_end") == title_end or "title_end" not in current)
         ):
             return
         report_path = paths.analysis / "clip-joins.json"
