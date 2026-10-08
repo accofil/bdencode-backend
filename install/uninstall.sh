@@ -446,6 +446,8 @@ fi
 
 nginx_target=/etc/nginx/apps/bdencode.conf
 nginx_binary=/usr/sbin/nginx
+# The loopback-only page of a server without Swizzin (install.sh).
+local_nginx_target=/etc/nginx/conf.d/bdencode-local.conf
 if (sudo test -e "$nginx_target" || sudo test -L "$nginx_target") && \
     [[ ! -x "$nginx_binary" ]]; then
     echo "Cannot validate nginx after removing $nginx_target" >&2
@@ -595,6 +597,14 @@ if sudo test -e "$nginx_target" || sudo test -L "$nginx_target"; then
     fi
     sudo rm -f -- "$nginx_backup"
     nginx_backup=""
+fi
+
+if sudo test -e "$local_nginx_target" || sudo test -L "$local_nginx_target"; then
+    sudo rm -f -- "$local_nginx_target"
+    if [[ -x "$nginx_binary" ]] && sudo "$nginx_binary" -t >/dev/null 2>&1 && \
+        sudo systemctl is-active --quiet nginx.service; then
+        sudo systemctl reload nginx.service
+    fi
 fi
 
 system_files=(
