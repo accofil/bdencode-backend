@@ -231,6 +231,8 @@ export function formatStatusMessage(message: string | null, fallback: string): s
   if (tooLarge) {
     return t(`A(z) ${tooLarge[1]} kép (${tooLarge[2]} MB) nagyobb a képtárhely korlátjánál: másik tárhellyel kell elölről kezdeni a feltöltést.`, `Image ${tooLarge[1]} (${tooLarge[2]} MB) exceeds the host's limit: restart the upload with another host.`);
   }
+  const reducedI = /^comparison uses (\d+) I pairs: too few source and encode I-frames coincide in the sample windows$/.exec(message);
+  if (reducedI) return t(`Az összehasonlítás ${reducedI[1]} I-képpárt használ: a mintaablakokban kevés helyen esik egybe a forrás és a kódolás I-képkockája (a hiányzó helyekre P- és B-párok kerültek).`, `The comparison uses ${reducedI[1]} I pairs: few source and encode I-frames coincide in the sample windows (P and B pairs fill the rest).`);
   const sampledVmaf = /^sampled VMAF of the final file: mean (\S+), 1% low (\S+) \((\d+) frames\)$/.exec(message);
   if (sampledVmaf) return t(`Mintavett VMAF a kész fájlon: átlag ${sampledVmaf[1]}, 1% low ${sampledVmaf[2]} (${sampledVmaf[3]} képkocka)`, `Sampled VMAF of the final file: mean ${sampledVmaf[1]}, 1% low ${sampledVmaf[2]} (${sampledVmaf[3]} frames)`);
   return encodeProgressLabel(message) ?? eventMessageLabel(message) ?? formatWorkerError(message);

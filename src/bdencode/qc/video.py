@@ -588,6 +588,93 @@ def _globally_distributed_frames(
     return sorted(selected, key=lambda item: item.presentation_index)
 
 
+def select_frame_pairs_reducing_i(
+    encoded: Sequence[FrameRecord],
+    reference: Sequence[FrameRecord],
+    *,
+    total_pairs: int,
+    timeline_frames: int,
+    dual_type_match: bool,
+    type_counts: Mapping[str, int] | None = None,
+    pts_tolerance: Decimal = Decimal("0.001"),
+) -> tuple[list[FramePair], dict[str, int] | None]:
+    """:func:`select_frame_pairs`, with fewer I pairs when the samples hold too few.
+
+    A long-GOP encode (for example keyint 240 with 16 B-frames) places an
+    I-frame every ten seconds or at a cut, and the source must have an I-frame
+    on the very same picture for a dual-type pair: the bounded sample windows
+    can hold fewer such pictures than the requested I share.  Then the I count
+    steps down (never below one) and the freed slots go to P and B, which every
+    window holds plenty of.  Every other rule (alignment, dual type, spread) is
+    unchanged.  Returns the pairs and the adjusted counts, ``None`` when the
+    request was met as asked.
+    """
+
+    try:
+        return (
+            select_frame_pairs(
+                encoded,
+                reference,
+                total_pairs=total_pairs,
+                timeline_frames=timeline_frames,
+                dual_type_match=dual_type_match,
+                type_counts=type_counts,
+                pts_tolerance=pts_tolerance,
+            ),
+            None,
+        )
+    except FrameSelectionError as first_error:
+        requested = dict(type_counts) if type_counts is not None else _balanced_type_counts(total_pairs)
+        available_i = len(
+            _aligned_candidates(encoded, reference, pts_tolerance, dual_type_match)["I"]
+        )
+        for i_count in range(min(requested["I"] - 1, available_i), 0, -1):
+            moved = requested["I"] - i_count
+            adjusted = {
+                "I": i_count,
+                "P": requested["P"] + moved - moved // 2,
+                "B": requested["B"] + moved // 2,
+            }
+            try:
+                return (
+                    select_frame_pairs(
+                        encoded,
+                        reference,
+                        total_pairs=total_pairs,
+                        timeline_frames=timeline_frames,
+                        dual_type_match=dual_type_match,
+                        type_counts=adjusted,
+                        pts_tolerance=pts_tolerance,
+                    ),
+                    adjusted,
+                )
+            except FrameSelectionError:
+                continue
+        raise first_error
+
+
+def _aligned_candidates(
+    encoded: Sequence[FrameRecord],
+    reference: Sequence[FrameRecord],
+    pts_tolerance: Decimal,
+    dual_type_match: bool,
+) -> dict[str, list[FrameRecord]]:
+    reference_by_index = {frame.presentation_index: frame for frame in reference}
+    candidates: dict[str, list[FrameRecord]] = {name: [] for name in FRAME_TYPES}
+    for frame in encoded:
+        if frame.pict_type not in candidates:
+            continue
+        source = reference_by_index.get(frame.presentation_index)
+        if source is None:
+            continue
+        if abs(frame.pts_seconds - source.pts_seconds) > pts_tolerance:
+            continue
+        if dual_type_match and source.pict_type != frame.pict_type:
+            continue
+        candidates[frame.pict_type].append(frame)
+    return candidates
+
+
 def select_frame_pairs(
     encoded: Sequence[FrameRecord],
     reference: Sequence[FrameRecord],
@@ -618,18 +705,7 @@ def select_frame_pairs(
     if len(reference_by_index) != len(reference):
         raise FrameSelectionError("reference presentation indexes are not unique")
 
-    candidates: dict[str, list[FrameRecord]] = {name: [] for name in FRAME_TYPES}
-    for frame in encoded:
-        if frame.pict_type not in candidates:
-            continue
-        source = reference_by_index.get(frame.presentation_index)
-        if source is None:
-            continue
-        if abs(frame.pts_seconds - source.pts_seconds) > pts_tolerance:
-            continue
-        if dual_type_match and source.pict_type != frame.pict_type:
-            continue
-        candidates[frame.pict_type].append(frame)
+    candidates = _aligned_candidates(encoded, reference, pts_tolerance, dual_type_match)
 
     if type_counts is not None:
         if set(type_counts) != set(FRAME_TYPES) or any(

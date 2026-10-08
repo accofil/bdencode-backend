@@ -38,6 +38,7 @@ from bdencode.qc.video import (
     parse_ffmpeg_metric_stats,
     parse_ffprobe_frame_origin,
     parse_sampled_ffprobe_frames,
+    select_frame_pairs_reducing_i,
     parse_vspipe_info,
     plan_sample_intervals,
     recommended_comparison_pair_count,
@@ -561,6 +562,50 @@ def test_release_grade_pair_plan_is_balanced_distributed_and_not_clustered() -> 
     assert all(right - left >= 25 for left, right in zip(indexes, indexes[1:]))
     assert indexes[0] > len(frames) * 0.02
     assert indexes[-1] < len(frames) * 0.98
+
+
+def test_too_few_coinciding_i_frames_reduce_the_i_share_not_the_pair_count() -> None:
+    # A long-GOP encode: an I-frame only every 400 frames; the source has an
+    # I-frame there too only three times, so eight dual-type I pairs cannot exist.
+    length = 2400
+    encoded_types = ["P" if index % 3 == 1 else "B" for index in range(length)]
+    source_types = list(encoded_types)
+    for index in range(0, length, 400):
+        encoded_types[index] = "I"
+    for index in (400, 1200, 2000):
+        source_types[index] = "I"
+    encoded = _frames("".join(encoded_types))
+    source = _frames("".join(source_types))
+
+    with pytest.raises(FrameSelectionError, match="I frame"):
+        select_frame_pairs(encoded, source, total_pairs=24, timeline_frames=length, dual_type_match=True)
+
+    pairs, adjusted = select_frame_pairs_reducing_i(
+        encoded, source, total_pairs=24, timeline_frames=length, dual_type_match=True
+    )
+    assert len(pairs) == 24
+    assert adjusted is not None and adjusted["I"] <= 3 and sum(adjusted.values()) == 24
+    counts = {category: sum(pair.category == category for pair in pairs) for category in "IPB"}
+    assert counts == adjusted
+    assert all(pair.dual_type_match for pair in pairs)
+
+
+def test_enough_i_frames_keep_the_requested_split() -> None:
+    frames = _frames("IPB" * 800)
+    pairs, adjusted = select_frame_pairs_reducing_i(
+        frames, frames, total_pairs=24, timeline_frames=len(frames), dual_type_match=True
+    )
+    assert adjusted is None
+    assert len(pairs) == 24
+
+
+def test_no_coinciding_i_frame_still_needs_review() -> None:
+    encoded = _frames("I" + "PB" * 600)
+    source = _frames("P" + "PB" * 600)
+    with pytest.raises(FrameSelectionError):
+        select_frame_pairs_reducing_i(
+            encoded, source, total_pairs=24, timeline_frames=len(encoded), dual_type_match=True
+        )
 
 
 def test_release_grade_pair_count_has_explicit_bounds() -> None:
