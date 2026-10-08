@@ -621,6 +621,12 @@ Minden megtartott feliratot külön `full` vagy `forced` típusba is be kell sor
 
 Ha a lemez nem tartalmaz megbízható nyelvkódot, a rendszer javaslatot adhat, de a felületen kézzel felülbírálható. Bizonytalan esetben rövid mintát kell meghallgatni vagy a feliratot meg kell nyitni.
 
+**Sávelemzés a beállítás előtt (3.7-től).** A scan végén a worker a javasolt playlist(ek)ből egyenként egyetlen olvasással kivesz 6 × 30 másodpercet a film törzséből (az első és utolsó 8% kimarad). Minden hangsávból mono 16 kHz-es WAV, minden feliratsávból a PGS-csomagok kerülnek ki.
+- **Hangsávok:** ugyanaz a faster-whisper nyelvfelismerés fut rajtuk, mint az előkészítésben; az eredmény a playlist `track_analysis.audio` mezőjébe kerül (nyelvkód, biztonság, egyetértés).
+- **Feliratok:** egy legalább 512 bájtos PGS-csomag egy megjelenő feliratsor; a kis csomagok törlő jelek. Percenként legalább 3 esemény: **Teljes**. Legfeljebb 1: **Forced**. Ha két azonos nyelvű felirat közül az egyiknek legfeljebb negyedannyi eseménye van, az a forced. A köztes eset bizonytalan. Mérés: a La Femme Nikita három teljes feliratán percenként 8–10 esemény.
+
+A varázsló ezeket javaslatként mutatja, egy kattintással elfogadhatók; magától semmit nem állít be. Az elemzés a nem talált vagy hibás esetben sem állítja meg a scant (a playlist `track_analysis.status` ilyenkor `failed`). Az eredmény a munka `analysis/track-analysis.json` fájljában is megmarad. Ideje: UHD-lemezen Windows-meghajtóról olvasva kb. 2,5–3 perc, helyi lemezről kevesebb. Ha az elemzés egy hangsáv nyelvét elfogadod, az előkészítés azt a sávot már nem mintázza újra.
+
 A hangművelet lehet például:
 
 - eredeti formátum változtatás nélküli megtartása;

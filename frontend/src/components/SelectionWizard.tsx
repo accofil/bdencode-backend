@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   ArrowRight,
+  CheckCircle2,
   Check,
   ChevronDown,
   Clapperboard,
@@ -38,12 +39,13 @@ import type {
   Playlist,
   SelectionPayload,
   SelectionValidation,
+  TrackAnalysis,
   TrackAction,
   TrackSelection,
   UploadImageSet,
 } from "../api/types";
 import { api, ApiError } from "../api/client";
-import { t, tx } from "../i18n";
+import { locale, t, tx } from "../i18n";
 import type { LocalText } from "../i18n";
 import {
   blockingSourceColorFields,
@@ -75,6 +77,7 @@ import {
 import type { TrackerProfile } from "../releaseName";
 import { arrangeForTracker, plannedOrder } from "../trackerArrangement";
 import { FieldHelpButton } from "./EncoderHelp";
+import { languageLabel } from "./ReviewPanels";
 import { ProfileLibraryPanel } from "./ProfileLibraryPanel";
 import { QualityOptions } from "./QualityOptions";
 import { Badge, Button, Card, Notice, ProgressBar } from "./ui";
@@ -720,12 +723,14 @@ export function SelectionWizard({
               </ol>
             )}
           </Card>
+          <TrackAnalysisSummary playlist={playlist} selections={tracks} onUpdate={updateTrack} />
           <TrackTable
             title={t("Hangsávok", "Audio tracks")}
             icon={<Music size={20} />}
             streams={playlist.streams.filter((stream) => stream.kind === "audio")}
             selections={tracks}
             onUpdate={updateTrack}
+            analysis={playlist.track_analysis}
           />
           <TrackTable
             title={t("Feliratok", "Subtitles")}
@@ -733,6 +738,7 @@ export function SelectionWizard({
             streams={playlist.streams.filter((stream) => stream.kind === "subtitle")}
             selections={tracks}
             onUpdate={updateTrack}
+            analysis={playlist.track_analysis}
           />
           {unclassifiedRetainedSubtitles.length > 0 && (
             <Notice tone="warning" title={t("Felirattípus megadása szükséges", "Subtitle type required")}>
@@ -1235,18 +1241,89 @@ function SourceColorConfirmation({
   );
 }
 
+/** The detected language of an audio track, when it is trustworthy. */
+function detectedAudioLanguage(analysis: TrackAnalysis | undefined, streamId: string): { code: string; confidence: number } | null {
+  const record = analysis?.audio?.[streamId];
+  if (!record || record.status !== "detected" || !record.iso639_2t) return null;
+  return { code: record.iso639_2t, confidence: record.confidence ?? 0 };
+}
+
+function bcp47For(stream: MediaStream, code: string): string | null {
+  return stream.language?.iso639_2t === code ? stream.language?.bcp47 ?? null : null;
+}
+
+function subtitleKindLabel(kind: "full" | "forced"): string {
+  return kind === "full" ? t("Teljes felirat", "Full subtitle") : "Forced / signs";
+}
+
+/** Suggestions still waiting for the operator, for the "accept all" button. */
+function pendingSuggestions(playlist: Playlist, selections: TrackSelection[]): Array<{ streamId: string; update: Partial<TrackSelection> }> {
+  const analysis = playlist.track_analysis;
+  if (!analysis) return [];
+  const pending: Array<{ streamId: string; update: Partial<TrackSelection> }> = [];
+  for (const stream of playlist.streams) {
+    const selection = selections.find((item) => item.stream_id === stream.id);
+    if (!selection) continue;
+    if (stream.kind === "audio") {
+      if (selection.action === "omit") continue;
+      const detected = detectedAudioLanguage(analysis, stream.id);
+      const current = selection.language || stream.language?.iso639_2t || null;
+      if (detected && detected.code !== current) pending.push({ streamId: stream.id, update: { language: detected.code } });
+    } else if (stream.kind === "subtitle") {
+      const suggestion = analysis.subtitles?.[stream.id];
+      if (suggestion?.suggested_kind && (selection.subtitle_kind ?? "unknown") === "unknown") {
+        pending.push({ streamId: stream.id, update: { subtitle_kind: suggestion.suggested_kind, forced: suggestion.suggested_kind === "forced" } });
+      }
+    }
+  }
+  return pending;
+}
+
+function TrackAnalysisSummary({
+  playlist,
+  selections,
+  onUpdate,
+}: {
+  playlist: Playlist;
+  selections: TrackSelection[];
+  onUpdate: (streamId: string, update: Partial<TrackSelection>) => void;
+}) {
+  const analysis = playlist.track_analysis;
+  if (!analysis) return null;
+  if (analysis.status === "failed") {
+    return <Notice tone="info" title={t("Sávelemzés", "Track analysis")}>{t("A sávok automatikus elemzése ennél a playlistnél nem sikerült; a nyelvet és a felirattípust kézzel add meg.", "The automatic track analysis failed for this playlist; set the language and subtitle type by hand.")}</Notice>;
+  }
+  const pending = pendingSuggestions(playlist, selections);
+  const minutes = Math.round(((analysis.windows ?? []).reduce((sum, window) => sum + window.duration_seconds, 0) / 60) * 10) / 10;
+  return (
+    <Notice tone="info" title={t("Sávelemzés a lemezből", "Track analysis from the disc")}>
+      <p>{t(
+        `A scan ${analysis.windows?.length ?? 0} rövid részletből (összesen ${minutes} perc) felismerte a hangsávok nyelvét, és megszámolta a feliratok eseményeit: a teljes feliratnak percenként több eseménye van, a forcednak csak néhány az egész filmben. Ezek javaslatok; minden sornál ellenőrizheted.`,
+        `The scan read ${analysis.windows?.length ?? 0} short windows (${minutes} min in total), detected the audio languages and counted the subtitle events: a full subtitle has several events a minute, a forced one only a few in the whole film. These are suggestions; check each row.`,
+      )}</p>
+      {pending.length > 0 && (
+        <Button variant="secondary" icon={<WandSparkles size={16} />} onClick={() => pending.forEach(({ streamId, update }) => onUpdate(streamId, update))}>
+          {t(`Minden javaslat elfogadása (${pending.length})`, `Accept all suggestions (${pending.length})`)}
+        </Button>
+      )}
+    </Notice>
+  );
+}
+
 function TrackTable({
   title,
   icon,
   streams,
   selections,
   onUpdate,
+  analysis,
 }: {
   title: string;
   icon: ReactNode;
   streams: MediaStream[];
   selections: TrackSelection[];
   onUpdate: (streamId: string, update: Partial<TrackSelection>) => void;
+  analysis?: TrackAnalysis;
 }) {
   return (
     <Card className="track-card">
@@ -1304,6 +1381,52 @@ function TrackTable({
                   ))}
                 </div>
                 {stream.kind === "audio" && <div className="track-target-note"><strong>{actionDetails.label}:</strong> {actionDetails.description}</div>}
+                {stream.kind === "audio" && (() => {
+                  const detected = detectedAudioLanguage(analysis, stream.id);
+                  const record = analysis?.audio?.[stream.id];
+                  if (!detected) {
+                    return record?.status === "detected"
+                      ? <div className="track-analysis">{t("A hang alapján a nyelv nem egyértelmű (kevés beszéd vagy eltérő minták).", "From the audio the language is not clear (little speech or disagreeing samples).")}</div>
+                      : null;
+                  }
+                  const current = selection.language || declaredLanguage;
+                  const label = languageLabel(detected.code, bcp47For(stream, detected.code));
+                  const percent = Math.round(detected.confidence * 100);
+                  if (current === detected.code) {
+                    return <div className="track-analysis track-analysis--ok"><CheckCircle2 size={14} aria-hidden="true" /> {t(`A hang alapján: ${label}, ${percent}%`, `From the audio: ${label}, ${percent}%`)}</div>;
+                  }
+                  return (
+                    <div className="track-analysis track-analysis--differs">
+                      <AlertTriangle size={14} aria-hidden="true" />
+                      <span>{current
+                        ? t(`A lemez szerint ${current}, a hang alapján ${label} (${percent}%).`, `The disc says ${current}, the audio sounds ${label} (${percent}%).`)
+                        : t(`A hang alapján: ${label} (${percent}%).`, `From the audio: ${label} (${percent}%).`)}</span>
+                      <Button variant="ghost" onClick={() => onUpdate(stream.id, { language: detected.code })}>{t("Elfogadás", "Accept")}</Button>
+                    </div>
+                  );
+                })()}
+                {stream.kind === "subtitle" && (() => {
+                  const suggestion = analysis?.subtitles?.[stream.id];
+                  if (!suggestion) return null;
+                  const rate = suggestion.events_per_minute.toLocaleString(locale(), { maximumFractionDigits: 1 });
+                  const evidence = t(`${suggestion.events} esemény ${Math.round(suggestion.sampled_seconds / 60 * 10) / 10} perc mintában, ≈${rate}/perc`, `${suggestion.events} events in ${Math.round(suggestion.sampled_seconds / 60 * 10) / 10} min sampled, ≈${rate}/min`);
+                  if (!suggestion.suggested_kind) {
+                    return <div className="track-analysis">{t(`Nem egyértelmű, hogy teljes vagy forced (${evidence}).`, `Unclear whether full or forced (${evidence}).`)}</div>;
+                  }
+                  const confidence = suggestion.confidence === "high" ? t("magas biztonság", "high confidence") : t("közepes biztonság", "medium confidence");
+                  const accepted = selection.subtitle_kind === suggestion.suggested_kind;
+                  return (
+                    <div className={accepted ? "track-analysis track-analysis--ok" : "track-analysis"}>
+                      {accepted && <CheckCircle2 size={14} aria-hidden="true" />}
+                      <span>{t(`Javaslat: ${subtitleKindLabel(suggestion.suggested_kind)} (${evidence}; ${confidence}).`, `Suggestion: ${subtitleKindLabel(suggestion.suggested_kind)} (${evidence}; ${confidence}).`)}</span>
+                      {!accepted && (
+                        <Button variant="ghost" onClick={() => onUpdate(stream.id, { subtitle_kind: suggestion.suggested_kind as "full" | "forced", forced: suggestion.suggested_kind === "forced" })}>
+                          {t("Javaslat elfogadása", "Accept suggestion")}
+                        </Button>
+                      )}
+                    </div>
+                  );
+                })()}
                 {selection.action !== "omit" && (
                   <div className="track-flags">
                     <label><input type="checkbox" checked={selection.default} onChange={(event) => onUpdate(stream.id, { default: event.target.checked })} /> {t("Alapértelmezett", "Default")}</label>

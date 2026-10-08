@@ -468,6 +468,11 @@ Ha a scan elkészült, a munka oldalán megjelenik a **Te következel** kártya.
 - A tetején választhatsz **tracker-profilt** (Aither vagy nCore). A **Sávterv igazítása** gomb ilyenkor a tracker szabályai szerint rendezi a sávokat, és a **Mi változott** lista megmutatja, mit módosított.
 - Minden hangsávnál kiválaszthatod, mi legyen vele: **Copy** (változatlanul megtartja), **FLAC**, **AC-3**, **E-AC-3**, **DTS** vagy **Kihagyás**. Ha nem tudod, hagyd a javasolt értéken.
 - Minden megtartott feliratnál meg kell adnod, hogy **Teljes felirat** vagy **Forced / signs** (csak a nem magyar/nem angol beszédrészeket feliratozó).
+- **Sávelemzés a lemezből:** a scan végén a program a film néhány rövid részletéből (6 × 30 másodperc) beszédfelismeréssel megállapítja a hangsávok nyelvét, és megszámolja a feliratok eseményeit. A sorokban ezt látod:
+  - hangsávnál „A hang alapján: angol, 95%”; ha ez eltér a lemez jelölésétől, sárga figyelmeztetés és **Elfogadás** gomb jelenik meg;
+  - feliratnál „Javaslat: Teljes felirat (31 esemény 3 perc mintában…)” vagy „Javaslat: Forced / signs”, és **Javaslat elfogadása** gomb. A teljes feliratnak percenként több eseménye van, a forcednak csak néhány az egész filmben.
+
+  A **Minden javaslat elfogadása** gomb egyszerre elfogadja őket. Ezek javaslatok: ha bizonytalan, nézz bele a kész fájlba, vagy hagyd ki a sávot.
 - Ha egy sáv nyelve hiányzik vagy bizonytalan, a program jelzi; ilyenkor válaszd ki kézzel.
 
 **3. Videó** – a kódolás beállításai.
