@@ -1,0 +1,1144 @@
+export type JobState =
+  | "QUEUED"
+  | "SCANNING"
+  | "AWAITING_SELECTION"
+  | "READY"
+  | "ENCODING"
+  | "MUXING"
+  | "QC"
+  | "COMPARISON"
+  | "UPLOADING"
+  | "COMPLETED"
+  | "FAILED"
+  | "CANCELLED"
+  | "NEEDS_REVIEW"
+  | "UPLOAD_FAILED";
+
+export type JobControlState =
+  | "RUNNING"
+  | "PAUSE_REQUESTED"
+  | "PAUSED"
+  | "CANCEL_REQUESTED";
+
+export type JobOperation =
+  | "pause"
+  | "resume"
+  | "cancel"
+  | "retry_failed"
+  | "restart_cancelled"
+  | "cleanup"
+  | "delete"
+  | "prepare_release"
+  | "delete_release";
+
+export type DiscType = "AUTO" | "BD" | "UHD";
+export type ContentType = "FILM" | "CONCERT" | "ANIME" | "SERIES";
+export type DetailLevel = "beginner" | "advanced" | "pro";
+export type TrackAction = "copy" | "flac" | "ac3" | "eac3" | "dts" | "omit";
+export type ImageUploadProvider = "auto" | "imgbb" | "catbox" | "freeimage";
+/** Which comparison pictures are published (HDR titles have native and SDR views). */
+export type UploadImageSet = "all" | "sdr" | "native";
+
+export interface HealthResponse {
+  status: string;
+  database: string;
+  schema_version: number;
+  active_job_id: string | null;
+  blocking_state: JobState | null;
+  preparing_job_id?: string | null;
+  ready_jobs?: number;
+  queued_jobs: number;
+}
+
+export interface CapabilitiesResponse {
+  api_version: string;
+  backend_version: string;
+  job_states: JobState[];
+  terminal_states: JobState[];
+  blocking_states: JobState[];
+  transitions: Record<JobState, JobState[]>;
+  input_video_codecs: string[];
+  output_video_codecs: string[];
+  disc_types: DiscType[];
+  content_types: ContentType[];
+  detail_levels: DetailLevel[];
+  audio_actions: TrackAction[];
+  constraints: {
+    max_active_jobs?: number;
+    max_concurrent_scans?: number;
+    queued_jobs_allowed?: boolean;
+    preparation_during_encode?: boolean;
+    ready_queue_requires_selection?: boolean;
+    cpu_budget_fraction?: number;
+    supports_3d?: boolean;
+    dolby_vision_retention?: boolean;
+    hdr_modes?: string[];
+    comparison_images?: string;
+    [key: string]: unknown;
+  };
+}
+
+export interface RuntimeToolCapability {
+  path?: string | null;
+  version?: string | null;
+  sha256?: string | null;
+  available?: boolean;
+  [key: string]: unknown;
+}
+
+export interface RuntimePathCapability {
+  path?: string;
+  exists?: boolean;
+  readable?: boolean;
+  writable?: boolean;
+  root_writable?: boolean;
+  required_writable_paths?: Record<string, RuntimePathCapability>;
+  free_bytes?: number;
+  total_bytes?: number;
+  ok?: boolean;
+  [key: string]: unknown;
+}
+
+export interface RuntimeVapourSynthCapability {
+  ok?: boolean;
+  plugins?: Record<string, boolean> | unknown[];
+  error?: string | null;
+  [key: string]: unknown;
+}
+
+export interface RuntimeCredentialCapability {
+  configured?: boolean;
+  present?: boolean;
+  runtime_loaded?: boolean | null;
+  encrypted_at_rest?: boolean;
+  source?: "systemd-runtime" | "encrypted-file";
+  consumer_service?: string;
+  service_binding_present?: boolean;
+  service_bound?: boolean;
+  service_active?: boolean | null;
+  ready_for_consumer?: boolean;
+  permissions?: string;
+  permissions_ok?: boolean;
+  owner_ok?: boolean;
+  metadata_ok?: boolean;
+  [key: string]: unknown;
+}
+
+export interface RuntimeCapabilitiesResponse {
+  status?: string;
+  database?: {
+    path?: string;
+    schema_version?: number;
+    active_job?: string | null;
+    [key: string]: unknown;
+  };
+  paths?: {
+    data?: RuntimePathCapability;
+    sources?: RuntimePathCapability[];
+    [key: string]: unknown;
+  };
+  host?: {
+    hostname?: string;
+    platform?: string;
+    machine?: string;
+    python?: string;
+    logical_cpus?: number | null;
+    [key: string]: unknown;
+  };
+  tools?: Record<string, RuntimeToolCapability>;
+  ffmpeg?: {
+    encoders?: string[];
+    filters?: string[];
+    protocols?: string[];
+    bitstream_filters?: string[];
+    [key: string]: unknown;
+  };
+  missing_ffmpeg_capabilities?: {
+    encoders?: string[];
+    filters?: string[];
+    protocols?: string[];
+    bitstream_filters?: string[];
+    [key: string]: unknown;
+  };
+  vapoursynth?: RuntimeVapourSynthCapability;
+  imgbb_credential?: {
+    configured?: boolean;
+    ready_for_consumer?: boolean;
+    consumer_service?: string;
+    service_bound?: boolean;
+    service_active?: boolean | null;
+    runtime_loaded?: boolean | null;
+    encrypted_at_rest?: boolean;
+    permissions?: string;
+    permissions_ok?: boolean;
+    [key: string]: unknown;
+  };
+  image_upload_credentials?: Record<string, RuntimeCredentialCapability>;
+  ai_recommendation?: {
+    provider?: string;
+    model?: string;
+    credential?: RuntimeCredentialCapability;
+    [key: string]: unknown;
+  };
+  worker_gpu?: {
+    devices?: string[];
+    crop_hwaccel?: "auto" | "cuda" | "none" | string;
+    crop_decode?: "gpu_if_available" | "gpu" | "cpu" | string;
+  };
+  worker_cpu_policy?: {
+    requested_percent?: number;
+    logical_cpus?: number | null;
+    systemd_cpu_quota_percent?: number;
+    [key: string]: unknown;
+  };
+  warnings?: string[];
+  [key: string]: unknown;
+}
+
+export interface Job {
+  id: string;
+  name: string;
+  source_path: string;
+  work_path: string | null;
+  output_path: string | null;
+  disc_type: DiscType;
+  content_type: ContentType;
+  state: JobState;
+  priority: number;
+  settings: Record<string, unknown>;
+  selection: Record<string, unknown> | null;
+  requested_by: string | null;
+  progress: number | null;
+  status_message: string | null;
+  error: string | null;
+  resume_state: JobState | null;
+  /** Optional for rolling upgrades from pre-2.1 backends. */
+  control_state?: JobControlState;
+  control_revision?: number;
+  control_requested_at?: string | null;
+  control_message?: string | null;
+  allowed_operations?: Array<JobOperation | string>;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+/** A task running beside the live step (source index, integrity decode). */
+export interface LiveSideTask {
+  label: string;
+  fraction: number | null;
+  done: boolean;
+}
+
+/** Measurements the encode step reports beside its fraction. */
+export interface LiveStepMetrics {
+  fps?: number | null;
+  speed?: number | null;
+  eta_seconds?: number | null;
+  frame?: number | null;
+  output_bytes?: number | null;
+  projected_bytes?: number | null;
+  /** Decimal bytes of the size target, when the job encodes to a size. */
+  target_bytes?: number | null;
+  [key: string]: unknown;
+}
+
+/** The step the worker is running now (``<job>/.live/step.json``). */
+export interface LiveStep {
+  schema_version: number;
+  key: string;
+  label: string;
+  /** 0..1, or null while the step cannot be measured. */
+  fraction: number | null;
+  detail: string | null;
+  /** Server epoch seconds. */
+  started_at: number;
+  updated_at: number;
+  eta_seconds: number | null;
+  metrics: LiveStepMetrics;
+  side: Record<string, LiveSideTask>;
+}
+
+export interface LiveTimelineEntry {
+  key: string;
+  label: string;
+  started_at: number;
+  finished_at: number;
+  seconds: number;
+  outcome: "done" | "failed" | "interrupted" | "review" | string;
+}
+
+export interface JobLive {
+  step: LiveStep | null;
+  timeline: LiveTimelineEntry[];
+  /** Server epoch seconds when the response was built. */
+  now?: number;
+}
+
+/** A retained audio or subtitle track of a language review, with every clue. */
+export interface LanguageReviewTrack {
+  stream_id: string;
+  kind: "audio" | "subtitle" | string;
+  codec: string | null;
+  channels: number | null;
+  title: string | null;
+  /** ISO 639-2 code the disc declares. */
+  declared: string | null;
+  /** Code the audio language detection heard, with its confidence (0..1). */
+  detected: string | null;
+  detected_confidence: number | null;
+  /** Code the worker resolved automatically. */
+  resolved: string | null;
+  /** Code already in the selection. */
+  current: string | null;
+  needs_confirmation: boolean;
+  reason: string | null;
+  suggested: string | null;
+}
+
+export interface UploadReviewInfo {
+  /** Host the checkpoint is locked to (its images are already there). */
+  provider: string | null;
+  uploaded_images: number;
+  largest_image_bytes: number | null;
+  override: { provider: string | null; image_set: string | null; upload_images: boolean | null };
+  hosts: Array<{ provider: string; max_upload_bytes: number }>;
+}
+
+export type JobReviewKind = "language" | "upload" | "upload_failed" | "comparison_timeout" | "other";
+
+export interface JobReview {
+  state: JobState;
+  kind: JobReviewKind | null;
+  message: string | null;
+  details: Record<string, unknown>;
+  resume_state: JobState | null;
+  language: {
+    tracks: LanguageReviewTrack[];
+    languages: Array<{ code: string; bcp47: string | null }>;
+  } | null;
+  upload: UploadReviewInfo | null;
+}
+
+export interface UploadResetRequest {
+  provider?: ImageUploadProvider | null;
+  image_set?: UploadImageSet | null;
+  upload_images?: boolean;
+  expected_version?: number;
+}
+
+/** The worker's CPU share: a day value and an optional night window. */
+export interface CpuPolicy {
+  schema_version: 1;
+  day_percent: number;
+  night: { enabled: boolean; percent: number; start: string; end: string };
+  /** IANA zone of the browser that saved it. */
+  timezone?: string | null;
+}
+
+export interface CpuPolicyView {
+  policy: CpuPolicy;
+  /** False while the installed default is in force. */
+  saved: boolean;
+  /** The share the policy asks for right now. */
+  expected: { percent: number; mode: "day" | "night" };
+  /** What the root helper applied last; null before its first run. */
+  applied: {
+    state?: "applied" | "default" | "invalid" | "failed" | string;
+    mode?: "day" | "night" | string;
+    percent?: number;
+    quota_percent?: number;
+    logical_cpus?: number;
+    applied_at?: string;
+    message?: string;
+  } | null;
+  install_default_percent: number;
+  logical_cpus: number | null;
+  limits: { min_percent: number; max_percent: number };
+}
+
+/** A built-in preset following Aither encoding practice (3.0). */
+export interface AitherPreset {
+  id: string;
+  encoder: "x264" | "x265";
+  content: "grain" | "clean" | "animation" | string;
+  label: string;
+  description: string;
+  crf_hint: string;
+  settings: Record<string, unknown>;
+}
+
+export interface AitherPresetsResponse {
+  encoder: "x264" | "x265";
+  requires_operator_confirmation: boolean;
+  presets: AitherPreset[];
+}
+
+export interface JobStorageCategory {
+  name: string;
+  bytes: number;
+  file_count: number;
+  reclaimable: boolean;
+  present: boolean;
+}
+
+export interface JobStorageReport {
+  workspace_bytes: number;
+  reclaimable_bytes: number;
+  completed_release_bytes: number;
+  categories: JobStorageCategory[];
+  workspace_status?: "AVAILABLE" | "CLEANED" | string;
+  cleanup_allowed?: boolean;
+  release_present?: boolean;
+  bytes_removed?: number;
+}
+
+export interface TrackerReleaseProfile {
+  schema_version?: number;
+  profile_id: string;
+  display_name: string;
+  screenshot_minimum?: number;
+  screenshot_maximum?: number;
+  supports_dupe_check?: boolean;
+  profile_digest?: string;
+  [key: string]: unknown;
+}
+
+export interface ReleaseProfileList {
+  items?: TrackerReleaseProfile[];
+  profiles?: TrackerReleaseProfile[];
+  count?: number;
+  [key: string]: unknown;
+}
+
+export type ReleasePreparationState =
+  | "NOT_PREPARED"
+  | "PREPARING"
+  | "NEEDS_REVIEW"
+  | "READY"
+  | "SEEDING_CHECK"
+  | "SEEDING"
+  | "READY_TO_PUBLISH"
+  | "PUBLISHING"
+  | "PUBLISHED"
+  | "FAILED"
+  | "UNKNOWN";
+
+export interface ReleaseMetadataPayload {
+  schema_version: 1;
+  release_name: string;
+  title: string;
+  year: number;
+  edition: string | null;
+  imdb_id: string | null;
+  tmdb_id: number | null;
+  category: string;
+  source_media: string;
+  resolution: string;
+  video_codec: string;
+  audio_codecs: string[];
+  languages: string[];
+}
+
+/**
+ * Release integrations are deliberately forward compatible: tracker adapters
+ * may add public preview/receipt fields without requiring a frontend release.
+ */
+export interface ReleasePreparation {
+  id?: string;
+  preparation_id?: string;
+  job_id?: string;
+  profile_id?: string;
+  profile_digest?: string;
+  state?: ReleasePreparationState | string;
+  status?: ReleasePreparationState | string;
+  version?: number;
+  metadata?: Partial<ReleaseMetadataPayload> & Record<string, unknown>;
+  payload_path?: string;
+  payload_size?: number;
+  payload_sha256?: string;
+  kit_ready?: boolean;
+  manifest_sha256?: string | null;
+  // The torrent fields and the qBittorrent/publication receipts only appear
+  // on records made before 3.0; BDEncode no longer seeds or uploads.
+  torrent_infohash?: string | null;
+  torrent_sha256?: string | null;
+  receipts?: Record<string, unknown> | unknown[] | null;
+  dupe_receipt?: Record<string, unknown> | null;
+  qbittorrent_receipt?: Record<string, unknown> | null;
+  publication_receipt?: Record<string, unknown> | null;
+  preflight?: unknown;
+  validation?: unknown;
+  preview?: unknown;
+  manifest?: Record<string, unknown> | null;
+  error?: string | null;
+  warnings?: string[];
+  created_at?: string;
+  updated_at?: string;
+  completed_at?: string | null;
+  [key: string]: unknown;
+}
+
+export interface ReleaseValidationResult {
+  valid: boolean;
+  failures: string[];
+  payload: {
+    path: string;
+    size: number;
+    sha256: string;
+  };
+  screenshots: number;
+  profile_digest: string;
+  manifest_sha256: string | null;
+  [key: string]: unknown;
+}
+
+export interface ReleasePreparationList {
+  items?: ReleasePreparation[];
+  preparations?: ReleasePreparation[];
+  [key: string]: unknown;
+}
+
+export interface ListMeta {
+  limit: number;
+  offset: number;
+  count: number;
+}
+
+export interface JobList {
+  items: Job[];
+  meta: ListMeta;
+}
+
+export interface JobCreate {
+  source_path: string;
+  name?: string;
+  disc_type: DiscType;
+  content_type: ContentType;
+  priority: number;
+  settings: Record<string, unknown>;
+}
+
+export interface SourceEntry {
+  name: string;
+  path: string;
+  is_bluray: boolean;
+}
+
+export interface SourceBrowserResponse {
+  roots: string[];
+  path: string | null;
+  entries: SourceEntry[];
+}
+
+export interface LanguageDecision {
+  iso639_2t?: string | null;
+  bcp47?: string | null;
+  display_name?: string | null;
+  confidence?: number | null;
+  needs_review?: boolean;
+  source?: string | null;
+  warnings?: string[];
+  [key: string]: unknown;
+}
+
+export interface VideoProperties {
+  codec: string;
+  width: number | null;
+  height: number | null;
+  frame_rate: string | null;
+  field_order: string | null;
+  bit_depth: number | null;
+  pixel_format: string | null;
+  color_primaries: string | null;
+  color_transfer: string | null;
+  color_matrix: string | null;
+  color_range: string | null;
+  chroma_location: string | null;
+  hdr10: boolean;
+  hdr10_static?: {
+    mastering_display?: string | null;
+    max_cll?: number | null;
+    max_fall?: number | null;
+  };
+  dolby_vision: boolean;
+  dolby_vision_profile?: number | null;
+  hdr10_base_layer: boolean;
+  hdr10_plus: boolean;
+  three_d: boolean;
+}
+
+export interface MediaStream {
+  id: string;
+  index: number;
+  pid: number | null;
+  kind: "video" | "audio" | "subtitle";
+  codec: string;
+  codec_profile: string | null;
+  language: LanguageDecision | null;
+  title: string | null;
+  channels: number | null;
+  channel_layout: string | null;
+  sample_rate: number | null;
+  bit_depth: number | null;
+  default: boolean;
+  forced: boolean;
+  roles: string[];
+  object_audio: boolean;
+  video: VideoProperties | null;
+}
+
+export interface Playlist {
+  playlist_id: string;
+  duration_seconds: number;
+  chapters: number[];
+  segments: Array<Record<string, unknown>>;
+  streams: MediaStream[];
+  angle_count: number;
+  seamless_branching: boolean;
+  edition_group: string | null;
+  edition_label: string | null;
+  episode_number: number | null;
+  recommended: boolean;
+}
+
+export interface DiscScanResult {
+  source: string;
+  disc_kind: "bd" | "uhd";
+  content_kind: "film" | "concert" | "anime" | "series";
+  playlists: Playlist[];
+  capabilities: Record<string, unknown>;
+  fingerprint: string;
+  has_multiple_editions: boolean;
+  has_seamless_branching: boolean;
+  has_three_d: boolean;
+  warnings: string[];
+}
+
+export interface Scan {
+  id: string;
+  job_id: string;
+  source_path: string;
+  status: "PENDING" | "RUNNING" | "AWAITING_SELECTION" | "COMPLETED" | "FAILED";
+  result: DiscScanResult | Record<string, never>;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export interface ScanList {
+  items: Scan[];
+  meta: ListMeta;
+}
+
+export type ArtifactKind =
+  | "LOG"
+  | "MANIFEST"
+  | "MEDIAINFO"
+  | "MKVINFO"
+  | "VIDEO_COMPARISON"
+  | "AUDIO_COMPARISON"
+  | "SPECTROGRAM"
+  | "REPORT"
+  | "BBCODE"
+  | "OUTPUT"
+  | "OTHER";
+
+export interface Artifact {
+  id: string;
+  job_id: string;
+  scan_id: string | null;
+  kind: ArtifactKind;
+  name: string;
+  path: string;
+  mime_type: string | null;
+  sha256: string | null;
+  size_bytes: number | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ArtifactList {
+  items: Artifact[];
+  meta: ListMeta;
+}
+
+export interface EventRecord {
+  id: number;
+  job_id: string | null;
+  scan_id: string | null;
+  kind: string;
+  state_from: JobState | null;
+  state_to: JobState | null;
+  message: string | null;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface EventList {
+  items: EventRecord[];
+  after_id: number;
+}
+
+export interface FieldSpec {
+  name: string;
+  group: string;
+  introduced_at: DetailLevel;
+  required: boolean;
+  default: unknown;
+  value_type: "enum" | "number" | "integer" | "boolean" | "string" | "object";
+  minimum: number | null;
+  maximum: number | null;
+  choices: string[];
+  description: string;
+  /** Unset leaves the encoder preset's own value (3.0 tools). */
+  optional?: boolean;
+}
+
+export interface ProfileSchemaResponse {
+  encoder: "x264" | "x265";
+  detail_level: DetailLevel;
+  fields: FieldSpec[];
+}
+
+export interface ProfileRecommendationResponse {
+  source: string;
+  requires_operator_confirmation: boolean;
+  settings: Record<string, unknown>;
+}
+
+export type AIQualityPriority = "maximum" | "balanced" | "compact";
+
+export type AIProvider = "openai" | "anthropic";
+
+export interface AIProviderStatus {
+  id: AIProvider;
+  label: string;
+  credential: string;
+  configured: boolean;
+  model: string;
+  default_model: string;
+}
+
+export interface AIKeyRequestResult {
+  request_id?: string;
+  credential?: string;
+  action?: string;
+  state?: "applied" | "rejected" | "failed" | string;
+  message?: string;
+  finished_at?: string;
+}
+
+export interface AIRecommendationStatus {
+  /** The provider a request without an explicit choice uses. */
+  provider: AIProvider;
+  configured: boolean;
+  model: string;
+  default_provider?: AIProvider | null;
+  providers?: AIProviderStatus[];
+  key_management?: { available: boolean; results: AIKeyRequestResult[] };
+  structured_output: boolean;
+  requires_operator_confirmation: boolean;
+}
+
+export interface AISettings {
+  default_provider: AIProvider | null;
+  openai_model: string | null;
+  anthropic_model: string | null;
+}
+
+export interface AIKeyRequest {
+  request_id: string;
+  provider: AIProvider;
+  action: "set" | "delete";
+}
+
+export interface AIRecommendationRequest {
+  playlist_id: string;
+  detail_level: DetailLevel;
+  quality_priority: AIQualityPriority;
+  target_size_gib: number | null;
+  genre: string | null;
+  prompt: string;
+  provider?: AIProvider | null;
+}
+
+export interface AIRecommendationResponse {
+  source: "openai_responses_api" | "anthropic_messages_api";
+  provider: AIProvider;
+  model: string;
+  requires_operator_confirmation: boolean;
+  settings: Record<string, unknown>;
+  temporal_filter: string;
+  summary: string;
+  rationale: string[];
+  warnings: string[];
+  confidence: number;
+}
+
+export interface TrackSelection {
+  stream_id: string;
+  action: TrackAction;
+  language: string | null;
+  name: string | null;
+  default: boolean;
+  forced?: boolean | null;
+  subtitle_kind?: "unknown" | "full" | "forced" | null;
+  order: number;
+}
+
+export interface SelectionPayload {
+  schema_version: 2;
+  playlist_id: string;
+  angle: number;
+  output_name: string;
+  video: {
+    detail_level: DetailLevel;
+    temporal_filter: string;
+    crop: { left: number; top: number; right: number; bottom: number };
+    settings: Record<string, unknown>;
+    auto_crf?: AutoCrfConfig;
+    dynamic_hdr?: DynamicHdrMode;
+  };
+  tracks: TrackSelection[];
+  upload_images: boolean;
+  image_upload_provider: ImageUploadProvider;
+  /** Omitted by pre-2.10 pages: the worker then uploads every picture. */
+  upload_image_set?: UploadImageSet;
+  dual_type_match: boolean;
+  /** Whose rules the job follows; omitted means none. */
+  tracker_profile?: "aither" | "ncore";
+}
+
+export interface TrackerFinding {
+  code: string;
+  message: string;
+  severity: "warning" | "info" | string;
+}
+
+export interface SelectionValidation {
+  valid: boolean;
+  playlist_id: string;
+  encoder: "x264" | "x265";
+  settings: Record<string, unknown>;
+  ffmpeg_video_args: string[];
+  crop: { left: number; top: number; right: number; bottom: number };
+  temporal_filter: string;
+  advisory_warnings: string[];
+  tracker_profile?: string;
+  tracker_findings?: TrackerFinding[];
+}
+
+export interface VideoComparisonPair {
+  category: "I" | "P" | "B";
+  presentation_index: number;
+  encoded_pts_seconds: string | number;
+  reference_pts_seconds: string | number;
+  encoded_pict_type: "I" | "P" | "B";
+  source_pict_type: "I" | "P" | "B" | null;
+  dual_type_match: boolean;
+  reference_png: string;
+  encode_png: string;
+  reference_sha256?: string;
+  encode_sha256?: string;
+  reference_sdr_png?: string;
+  encode_sdr_png?: string;
+  [key: string]: unknown;
+}
+
+export interface VideoComparisonManifest {
+  schema_version: number;
+  categorization: string;
+  alignment: string;
+  pairs: VideoComparisonPair[];
+  counts: Record<string, number>;
+  source_bitstream_type_available?: boolean;
+  sampling?: {
+    requested_pair_count?: number;
+    selected_pair_count?: number;
+    full_title_scan?: boolean;
+    [key: string]: unknown;
+  };
+  metrics?: {
+    path?: string;
+    sha256?: string;
+    backend?: string;
+    scope?: string;
+    sample_count?: number;
+    full_title_measurement?: boolean;
+    aggregate?: {
+      ssim_all_mean?: number | null;
+      psnr_average_db_mean?: number | null;
+    };
+  };
+  /** Sampled VMAF of the finished file (2.9+); windows with timecodes from 2.10. */
+  vmaf?: {
+    path?: string;
+    sha256?: string;
+    status?: "measured" | "unavailable" | string;
+    model?: string;
+    frames?: number | null;
+    mean?: number | null;
+    harmonic_mean?: number | null;
+    percentile_1?: number | null;
+    minimum?: number | null;
+    windows?: VmafWindow[] | null;
+  };
+}
+
+export interface VmafWindow {
+  start_frame: number;
+  frame_count: number;
+  start_seconds?: number;
+  end_seconds?: number;
+  mean?: number;
+  minimum?: number;
+}
+
+export interface AudioComparisonTrack {
+  stream_id: string;
+  action: TrackAction;
+  source_spectrum: string;
+  encode_spectrum: string;
+  decoded_pcm_sha256_match: boolean | null;
+  decoded_pcm_sha256_required?: boolean;
+  delay_within_one_sample: boolean;
+  timing_within_tolerance?: boolean;
+  duration_within_tolerance?: boolean;
+  verification_mode?: "lossless_pcm" | "lossy_transcode" | "dts_core_extract";
+  effective_target?: Record<string, unknown>;
+  verification?: Record<string, unknown>;
+  comparison: Record<string, unknown>;
+  source_probe: Record<string, unknown>;
+  encode_probe: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface AudioComparisonManifest {
+  schema_version: number;
+  tracks: AudioComparisonTrack[];
+}
+
+
+// -- Quality options -----------------------------------------------------------------
+
+export type DynamicHdrMode = "discard" | "auto" | "hdr10plus" | "dolby_vision";
+
+export interface AutoCrfConfig {
+  enabled: boolean;
+  target_vmaf: number;
+  min_crf?: number;
+  max_crf?: number;
+  samples?: number;
+  sample_seconds?: number;
+  max_iterations?: number;
+  tolerance?: number;
+  metric?: "mean" | "harmonic_mean" | "percentile_1";
+  probe_preset?: string | null;
+  /** Size target mode: the lowest CRF whose projected video size fits (GB). */
+  target_size_gb?: number | null;
+}
+
+export interface NoiseProfile {
+  id: string;
+  label: string;
+  description: string;
+  settings: Record<string, unknown>;
+}
+
+export interface NoiseProfilesResponse {
+  encoder: "x264" | "x265";
+  requires_operator_confirmation: boolean;
+  profiles: NoiseProfile[];
+}
+
+// -- Profile library -------------------------------------------------------------------
+
+export interface LibraryProfileSelection {
+  detail_level: DetailLevel;
+  settings: Record<string, unknown>;
+  auto_crf?: AutoCrfConfig;
+  dynamic_hdr?: DynamicHdrMode;
+}
+
+export interface LibraryProfileDocument {
+  format?: "bdencode-profile";
+  version?: 1;
+  name: string;
+  description?: string;
+  encoder: "x264" | "x265";
+  detail_level: DetailLevel;
+  settings: Record<string, unknown>;
+  auto_crf?: AutoCrfConfig;
+  dynamic_hdr?: DynamicHdrMode;
+}
+
+export interface LibraryProfile extends LibraryProfileDocument {
+  id: string;
+  created_at: string;
+  updated_at: string;
+  selection: LibraryProfileSelection;
+}
+
+export interface LibraryProfileList {
+  items: LibraryProfile[];
+  count: number;
+}
+
+export interface LibraryImportResult {
+  imported: Array<{ name: string; id: string }>;
+  skipped: Array<{ name: string; id: string }>;
+  errors: Array<{ name: string; code: string; message: string }>;
+}
+
+// -- Statistics ---------------------------------------------------------------------------
+
+export interface JobStatistics {
+  job_id: string;
+  name: string;
+  state: JobState;
+  disc_type: string;
+  content_type: string;
+  finished_at: string | null;
+  encoder: string | null;
+  crf: number | null;
+  preset: string | null;
+  source_bytes: number | null;
+  output_bytes: number | null;
+  saved_bytes: number | null;
+  saved_percent: number | null;
+  media_seconds: number | null;
+  frames: number | null;
+  bitrate_kbps: number | null;
+  encode_seconds: number | null;
+  encode_fps: number | null;
+  realtime_factor: number | null;
+  total_seconds: number | null;
+  quality: {
+    vmaf_sample: number | null;
+    vmaf_target: number | null;
+    vmaf_scope: string | null;
+    ssim_mean: number | null;
+    psnr_mean_db: number | null;
+    comparison_samples: number | null;
+  };
+  auto_crf: {
+    status: string;
+    chosen_crf: number | null;
+    probes: number;
+    mode?: "vmaf" | "size";
+    target_size_gb?: number | null;
+  } | null;
+}
+
+export interface StatisticsSummary {
+  jobs: number;
+  jobs_with_size_evidence: number;
+  source_gib: number;
+  output_gib: number;
+  saved_gib: number;
+  saved_percent: number | null;
+  total_output_gib: number;
+  average_vmaf_sample: number | null;
+  average_ssim: number | null;
+  average_psnr_db: number | null;
+  average_crf: number | null;
+  average_bitrate_kbps: number | null;
+  encode_hours: number;
+  average_encode_fps: number | null;
+  average_realtime_factor: number | null;
+  encoders: Record<string, number>;
+}
+
+export interface StatisticsResponse {
+  summary: StatisticsSummary;
+  jobs: JobStatistics[];
+}
+
+// -- Player ------------------------------------------------------------------------------------
+
+export interface PreviewRecord {
+  name: string;
+  start_seconds: number;
+  duration_seconds: number;
+  height: number;
+  size_bytes: number;
+  created_at: number;
+  created?: boolean;
+}
+
+export interface PlayerInfo {
+  duration_seconds: number | null;
+  video: {
+    codec: string | null;
+    width: number | null;
+    height: number | null;
+    pix_fmt: string | null;
+    hdr: boolean;
+    color_transfer: string | null;
+  } | null;
+  audio: Array<{ codec: string | null; channels: number | null; language: string | null; title: string | null }>;
+  subtitles: number;
+  chapters: Array<{ start_seconds: number; title: string }>;
+  previews: PreviewRecord[];
+  limits: { min_duration_seconds: number; max_duration_seconds: number; heights: number[] };
+}
+
+// -- Release check ---------------------------------------------------------------------------------
+
+export interface ReleaseUpdateStatus {
+  state: string;
+  message: string;
+  checked_at: string;
+  last_successful_check_at?: string;
+  installed_version?: string;
+  latest_version?: string;
+  latest_tag?: string;
+  installed_at?: string;
+  installed_commit?: string;
+  media_updates?: string[];
+}
+
+export interface ReleaseUpdateResponse {
+  available: boolean;
+  status: ReleaseUpdateStatus | null;
+}
+
+// -- Database status and backups ------------------------------------------------------------------
+
+export interface BackupInfo {
+  name: string;
+  label: string;
+  created_at: string;
+  size_bytes: number;
+  sha256: string | null;
+  schema_version: number | null;
+  jobs: number | null;
+  verified: boolean;
+}
+
+export interface DatabaseStatus {
+  path: string;
+  schema_version: number;
+  size_bytes: number | null;
+  integrity: string[];
+  migrations: Array<{
+    id: number;
+    from_version: number | null;
+    to_version: number;
+    kind: "create" | "migrate";
+    applied_at: string;
+    backup_name: string | null;
+    app_version: string | null;
+  }>;
+  backup_count: number;
+  latest_backup: BackupInfo | null;
+}
+
+export interface BackupList {
+  directory: string;
+  items: BackupInfo[];
+}

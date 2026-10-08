@@ -1,0 +1,21 @@
+[Unit]
+Description=Apply the BDEncode worker CPU policy (day and night share)
+After=bdencode-worker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=BDENCODE_DATA_ROOT=@DATA_ROOT@
+ExecStart=/usr/local/libexec/bdencode-cpu-policy apply
+# The helper only reads the policy below the data root, writes its status
+# below /var/lib/bdencode and asks systemd to change one runtime property.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=true
+ProtectHome=read-only
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

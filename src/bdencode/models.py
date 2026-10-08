@@ -1,0 +1,467 @@
+"""Domain models and the durable job state machine.
+
+The worker and the HTTP API deliberately share this module.  Keeping the
+transition table in one place prevents an API request and a restarted worker
+from interpreting a job differently.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from enum import StrEnum
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
+
+
+JsonObject = dict[str, Any]
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+
+class JobState(StrEnum):
+    QUEUED = "QUEUED"
+    SCANNING = "SCANNING"
+    AWAITING_SELECTION = "AWAITING_SELECTION"
+    READY = "READY"
+    ENCODING = "ENCODING"
+    MUXING = "MUXING"
+    QC = "QC"
+    COMPARISON = "COMPARISON"
+    UPLOADING = "UPLOADING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+    UPLOAD_FAILED = "UPLOAD_FAILED"
+
+
+class JobControlState(StrEnum):
+    """Durable operator control, deliberately independent from pipeline state.
+
+    ``RUNNING`` means that the job is not held; it does not imply that a
+    subprocess currently exists.  Requests remain durable until the worker has
+    reached a safe boundary and acknowledged them.
+    """
+
+    RUNNING = "RUNNING"
+    PAUSE_REQUESTED = "PAUSE_REQUESTED"
+    PAUSED = "PAUSED"
+    CANCEL_REQUESTED = "CANCEL_REQUESTED"
+
+
+class JobOperation(StrEnum):
+    PAUSE = "pause"
+    RESUME = "resume"
+    CANCEL = "cancel"
+    RETRY_FAILED = "retry_failed"
+    RESTART_CANCELLED = "restart_cancelled"
+    CLEANUP = "cleanup"
+    DELETE = "delete"
+    PREPARE_RELEASE = "prepare_release"
+    DELETE_RELEASE = "delete_release"
+
+
+TERMINAL_STATES = frozenset({JobState.COMPLETED, JobState.FAILED, JobState.CANCELLED})
+
+# A FAILED job may only be restored into local media stages guarded by durable,
+# content-validated markers. Scanning is excluded because its marker does not
+# fingerprint replaceable source contents; uploading is excluded because a
+# remote success can precede its local checkpoint and is therefore at-least-once.
+RETRYABLE_FAILED_STAGES = frozenset(
+    {
+        JobState.READY,
+        JobState.ENCODING,
+        JobState.MUXING,
+        JobState.QC,
+        JobState.COMPARISON,
+    }
+)
+
+# Scanning is a lightweight preparation lane. It may run beside the one serial
+# encode pipeline, while only one disc is scanned at a time. Jobs waiting for
+# operator selection and fully configured READY jobs own neither lane.
+PREPARATION_ACTIVE_STATES = frozenset({JobState.SCANNING})
+
+# The database partial unique index permits exactly one RUNNING job in this
+# set. A PAUSED control state releases the lane deliberately; resuming later is
+# a guarded operation and returns a conflict while another job owns the lane.
+BLOCKING_STATES = frozenset(
+    {
+        JobState.ENCODING,
+        JobState.MUXING,
+        JobState.QC,
+        JobState.COMPARISON,
+        JobState.UPLOADING,
+        JobState.NEEDS_REVIEW,
+        JobState.UPLOAD_FAILED,
+    }
+)
+
+PIPELINE_STATES = (
+    JobState.QUEUED,
+    JobState.SCANNING,
+    JobState.AWAITING_SELECTION,
+    JobState.READY,
+    JobState.ENCODING,
+    JobState.MUXING,
+    JobState.QC,
+    JobState.COMPARISON,
+    JobState.UPLOADING,
+    JobState.COMPLETED,
+)
+
+
+_NORMAL_TRANSITIONS: dict[JobState, frozenset[JobState]] = {
+    JobState.QUEUED: frozenset({JobState.SCANNING}),
+    JobState.SCANNING: frozenset(
+        {JobState.AWAITING_SELECTION, JobState.READY, JobState.NEEDS_REVIEW}
+    ),
+    JobState.AWAITING_SELECTION: frozenset({JobState.READY}),
+    JobState.READY: frozenset({JobState.ENCODING, JobState.NEEDS_REVIEW}),
+    JobState.ENCODING: frozenset({JobState.MUXING, JobState.NEEDS_REVIEW}),
+    JobState.MUXING: frozenset({JobState.QC, JobState.NEEDS_REVIEW}),
+    JobState.QC: frozenset({JobState.COMPARISON, JobState.NEEDS_REVIEW}),
+    JobState.COMPARISON: frozenset({JobState.UPLOADING, JobState.NEEDS_REVIEW}),
+    JobState.UPLOADING: frozenset(
+        {JobState.COMPLETED, JobState.UPLOAD_FAILED, JobState.NEEDS_REVIEW}
+    ),
+    JobState.UPLOAD_FAILED: frozenset({JobState.UPLOADING, JobState.NEEDS_REVIEW}),
+    JobState.NEEDS_REVIEW: frozenset(),  # resume target is checked dynamically
+    JobState.COMPLETED: frozenset(),
+    JobState.FAILED: frozenset(),
+    JobState.CANCELLED: frozenset(),
+}
+
+
+def allowed_transitions(
+    state: JobState, *, resume_state: JobState | None = None
+) -> frozenset[JobState]:
+    """Return legal targets, including failure/cancellation and review resume."""
+
+    if state in TERMINAL_STATES:
+        return frozenset()
+    targets = set(_NORMAL_TRANSITIONS[state])
+    targets.update({JobState.FAILED, JobState.CANCELLED})
+    if state is JobState.NEEDS_REVIEW and resume_state is not None:
+        targets.add(resume_state)
+        # Replacing material operator choices must replay dependency checks and
+        # invalidate downstream markers from READY. A plain review acknowledgement
+        # may still resume directly at ``resume_state``.
+        targets.add(JobState.READY)
+    return frozenset(targets)
+
+
+def validate_transition(
+    current: JobState,
+    target: JobState,
+    *,
+    resume_state: JobState | None = None,
+) -> None:
+    if target not in allowed_transitions(current, resume_state=resume_state):
+        legal = (
+            ", ".join(
+                sorted(
+                    item.value
+                    for item in allowed_transitions(current, resume_state=resume_state)
+                )
+            )
+            or "none"
+        )
+        raise ValueError(
+            f"illegal job transition {current.value} -> {target.value}; allowed: {legal}"
+        )
+
+
+class DiscType(StrEnum):
+    AUTO = "AUTO"
+    BD = "BD"
+    UHD = "UHD"
+
+
+class ContentType(StrEnum):
+    FILM = "FILM"
+    CONCERT = "CONCERT"
+    ANIME = "ANIME"
+    SERIES = "SERIES"
+
+
+class ScanState(StrEnum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    AWAITING_SELECTION = "AWAITING_SELECTION"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class JobCreate(StrictModel):
+    source_path: str = Field(min_length=1)
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    work_path: str | None = None
+    output_path: str | None = None
+    disc_type: DiscType = DiscType.AUTO
+    content_type: ContentType = ContentType.FILM
+    priority: int = Field(default=0, ge=-1000, le=1000)
+    settings: JsonObject = Field(default_factory=dict)
+    requested_by: str | None = Field(default=None, max_length=255)
+
+    @field_validator("source_path", "work_path", "output_path")
+    @classmethod
+    def reject_nul(cls, value: str | None) -> str | None:
+        if value is not None and "\x00" in value:
+            raise ValueError("paths may not contain NUL bytes")
+        return value
+
+
+class Job(StrictModel):
+    id: str
+    name: str
+    source_path: str
+    work_path: str | None
+    output_path: str | None
+    disc_type: DiscType
+    content_type: ContentType
+    state: JobState
+    priority: int
+    settings: JsonObject
+    selection: JsonObject | None
+    requested_by: str | None
+    progress: float | None = Field(default=None, ge=0, le=1)
+    status_message: str | None
+    error: str | None
+    resume_state: JobState | None
+    control_state: JobControlState = JobControlState.RUNNING
+    control_revision: int = Field(default=1, ge=1)
+    control_requested_at: datetime | None = None
+    control_message: str | None = None
+    version: int = Field(ge=1)
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+    @computed_field
+    @property
+    def allowed_operations(self) -> list[JobOperation]:
+        """Actions that are safe for the current durable state.
+
+        This is intentionally derived by the backend so API clients do not
+        duplicate state-machine rules.  Lane availability is checked again in
+        the transaction when a paused job is resumed.
+        """
+
+        if self.state is JobState.COMPLETED:
+            return [
+                JobOperation.CLEANUP,
+                JobOperation.DELETE,
+                JobOperation.PREPARE_RELEASE,
+                JobOperation.DELETE_RELEASE,
+            ]
+        if self.state is JobState.FAILED:
+            return [
+                JobOperation.RETRY_FAILED,
+                JobOperation.DELETE,
+            ]
+        if self.state is JobState.CANCELLED:
+            return [
+                JobOperation.RESTART_CANCELLED,
+                JobOperation.DELETE,
+            ]
+        if self.control_state is JobControlState.CANCEL_REQUESTED:
+            return []
+        if self.control_state is JobControlState.PAUSE_REQUESTED:
+            return [JobOperation.CANCEL]
+        if self.control_state is JobControlState.PAUSED:
+            return [JobOperation.RESUME, JobOperation.CANCEL]
+        return [JobOperation.PAUSE, JobOperation.CANCEL]
+
+
+class JobTransitionRequest(StrictModel):
+    state: JobState
+    message: str | None = Field(default=None, max_length=4000)
+    details: JsonObject = Field(default_factory=dict)
+    expected_version: int | None = Field(default=None, ge=1)
+
+
+class JobRetryRequest(StrictModel):
+    message: str | None = Field(default=None, max_length=4000)
+    expected_version: int | None = Field(default=None, ge=1)
+
+
+class JobRestartRequest(JobRetryRequest):
+    # Reopen the selection (prefilled with the saved one) instead of queueing
+    # the job with its approved settings.  Valid checkpoints are still reused:
+    # every stage marker is keyed by its own inputs.
+    reconfigure: bool = False
+
+
+class JobSelectionRequest(StrictModel):
+    selection: JsonObject
+    message: str | None = Field(default=None, max_length=4000)
+    expected_version: int | None = Field(default=None, ge=1)
+
+
+class NormalizedCrop(StrictModel):
+    left: int = Field(ge=0)
+    top: int = Field(ge=0)
+    right: int = Field(ge=0)
+    bottom: int = Field(ge=0)
+
+
+class SelectionValidationResponse(StrictModel):
+    valid: bool
+    playlist_id: str
+    encoder: str
+    settings: JsonObject
+    ffmpeg_video_args: list[str]
+    crop: NormalizedCrop
+    temporal_filter: str
+    advisory_warnings: list[str]
+    tracker_profile: str = "none"
+    # Deviations from the chosen tracker's rules, in Hungarian: code, message, severity.
+    tracker_findings: list[dict[str, str]] = Field(default_factory=list)
+
+
+class JobProgressRequest(StrictModel):
+    progress: float = Field(ge=0, le=1)
+    message: str | None = Field(default=None, max_length=4000)
+    details: JsonObject = Field(default_factory=dict)
+    expected_state: JobState | None = None
+    emit_event: bool = True
+
+
+class ScanCreate(StrictModel):
+    job_id: str
+    source_path: str | None = None
+    status: ScanState = ScanState.RUNNING
+    result: JsonObject = Field(default_factory=dict)
+
+
+class ScanUpdate(StrictModel):
+    status: ScanState
+    result: JsonObject | None = None
+    error: str | None = Field(default=None, max_length=16000)
+    message: str | None = Field(default=None, max_length=4000)
+
+
+class Scan(StrictModel):
+    id: str
+    job_id: str
+    source_path: str
+    status: ScanState
+    result: JsonObject
+    error: str | None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None
+
+
+class ArtifactKind(StrEnum):
+    LOG = "LOG"
+    MANIFEST = "MANIFEST"
+    MEDIAINFO = "MEDIAINFO"
+    MKVINFO = "MKVINFO"
+    VIDEO_COMPARISON = "VIDEO_COMPARISON"
+    AUDIO_COMPARISON = "AUDIO_COMPARISON"
+    SPECTROGRAM = "SPECTROGRAM"
+    REPORT = "REPORT"
+    BBCODE = "BBCODE"
+    OUTPUT = "OUTPUT"
+    OTHER = "OTHER"
+
+
+class ArtifactCreate(StrictModel):
+    job_id: str
+    scan_id: str | None = None
+    kind: ArtifactKind = ArtifactKind.OTHER
+    name: str = Field(min_length=1, max_length=255)
+    path: str = Field(min_length=1)
+    mime_type: str | None = Field(default=None, max_length=255)
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
+    size_bytes: int | None = Field(default=None, ge=0)
+    metadata: JsonObject = Field(default_factory=dict)
+
+
+class Artifact(ArtifactCreate):
+    id: str
+    created_at: datetime
+
+
+class EventCreate(StrictModel):
+    job_id: str | None = None
+    scan_id: str | None = None
+    kind: str = Field(min_length=1, max_length=100)
+    message: str | None = Field(default=None, max_length=4000)
+    payload: JsonObject = Field(default_factory=dict)
+
+
+class Event(StrictModel):
+    id: int
+    job_id: str | None
+    scan_id: str | None
+    kind: str
+    state_from: JobState | None
+    state_to: JobState | None
+    message: str | None
+    payload: JsonObject
+    created_at: datetime
+
+
+class HealthResponse(StrictModel):
+    status: str
+    database: str
+    schema_version: int
+    active_job_id: str | None
+    blocking_state: JobState | None
+    preparing_job_id: str | None = None
+    ready_jobs: int = 0
+    queued_jobs: int
+
+
+class CapabilitiesResponse(StrictModel):
+    api_version: str
+    backend_version: str
+    job_states: list[JobState]
+    terminal_states: list[JobState]
+    blocking_states: list[JobState]
+    transitions: dict[str, list[JobState]]
+    input_video_codecs: list[str]
+    output_video_codecs: list[str]
+    disc_types: list[DiscType]
+    content_types: list[ContentType]
+    detail_levels: list[str]
+    audio_actions: list[str]
+    constraints: JsonObject
+
+
+class QueueClaimResponse(StrictModel):
+    job: Job | None
+    blocked_by: Job | None
+
+
+class ListMeta(StrictModel):
+    limit: int
+    offset: int
+    count: int
+
+
+class JobList(StrictModel):
+    items: list[Job]
+    meta: ListMeta
+
+
+class ScanList(StrictModel):
+    items: list[Scan]
+    meta: ListMeta
+
+
+class ArtifactList(StrictModel):
+    items: list[Artifact]
+    meta: ListMeta
+
+
+class EventList(StrictModel):
+    items: list[Event]
+    after_id: int

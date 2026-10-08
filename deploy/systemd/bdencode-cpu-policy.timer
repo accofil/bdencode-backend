@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep the BDEncode CPU policy's day or night share in force
+
+[Timer]
+OnBootSec=30s
+OnCalendar=*:0/5
+AccuracySec=15s
+Unit=bdencode-cpu-policy.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,27 @@
+[Unit]
+Description=Check for a new BDEncode release and install it unattended
+Requires=bdencode-update-recovery.service
+After=network-online.target bdencode-update-recovery.service bdencode-api.service bdencode-worker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+Environment=BDENCODE_CONFIG=/etc/bdencode/config.toml
+Environment=BDENCODE_USER=@USER@
+Environment=BDENCODE_DATA_ROOT=@DATA_ROOT@
+ExecStart=/usr/local/libexec/bdencode-release-update run
+# Recovery runs in a separate oneshot after this stop job has completed. This
+# avoids a stop-ordering deadlock when the recovery starts API/worker again.
+ExecStopPost=/usr/bin/systemctl --no-block start bdencode-install-recovery.service
+# A newer release is installed by its own installer, which builds the tools and
+# runs the test suite; the unit must outlive it. The installer writes below the
+# account's home and below /etc, so neither ProtectHome nor ProtectSystem is set.
+TimeoutStartSec=3h
+TimeoutStopSec=infinity
+Nice=15
+IOSchedulingClass=idle
+CPUAccounting=true
+CPUQuota=@CPU_QUOTA@
+PrivateTmp=true

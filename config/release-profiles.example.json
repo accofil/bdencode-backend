@@ -1,0 +1,21 @@
+{
+  "profiles": [
+    {
+      "network": {
+        "allowed_hosts": [
+          "tracker.example"
+        ],
+        "dupe_check_endpoint": "https://tracker.example/api/bdencode/dupe-check"
+      },
+      "tracker": {
+        "credential_name": "tracker-example-api-token",
+        "display_name": "Example tracker",
+        "profile_id": "example",
+        "schema_version": 1,
+        "screenshot_maximum": 8,
+        "screenshot_minimum": 3
+      }
+    }
+  ],
+  "schema_version": 1
+}

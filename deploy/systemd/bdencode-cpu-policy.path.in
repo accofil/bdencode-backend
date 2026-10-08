@@ -1,0 +1,9 @@
+[Unit]
+Description=Apply the BDEncode CPU policy whenever the web UI saves it
+
+[Path]
+PathChanged=@DATA_ROOT@/state/cpu-policy.json
+Unit=bdencode-cpu-policy.service
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,121 @@
+name: End-to-end
+
+# The whole worker pipeline on a synthetic HDR10 "disc" with the real tools (ffmpeg/x265, VapourSynth +
+# BestSource, the standalone libvmaf, mkvmerge): only the disc scan and the libbluray remux are faked.
+# This is what found the defects the unit tests could not see; run it nightly and on demand.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      size:
+        description: "Picture size of the synthetic master (3840x2160 exercises real UHD resolution)"
+        default: "1280x720"
+      scenes:
+        description: "Two-second scenes (12 is plenty for UHD)"
+        default: "30"
+      dolby_vision:
+        description: "Make the source Dolby Vision profile 8.1 and require the RPUs to come out frame-exactly"
+        type: boolean
+        default: false
+      hdr10plus:
+        description: "Make the source HDR10+ and require the dynamic metadata to come out frame-exactly"
+        type: boolean
+        default: false
+      tracker:
+        description: "Follow a tracker's rules (chapter IDR frames, B-heavy comps, screenshots; nCore: x265 level 5.1)"
+        type: choice
+        options: ["none", "aither", "ncore"]
+        default: "none"
+  pull_request:
+    paths:
+      - ".github/workflows/e2e.yml"
+      - "tools/e2e/**"
+      - "tools/requirements-vapoursynth.lock"
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-disc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        # The nightly run covers every retention path (plain HDR10, Dolby Vision, HDR10+); a manual
+        # run or a pull request runs the one variant that was asked for.
+        variant: ${{ fromJSON(github.event_name == 'schedule' && '["","--dolby-vision","--hdr10plus"]' || format('["{0}"]', inputs.dolby_vision && '--dolby-vision' || inputs.hdr10plus && '--hdr10plus' || '')) }}
+    env:
+      VMAF_COMMIT: 6375a4be62fd2673bba2c356b26867d8af01a685
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Media tools and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg x265 mkvtoolnix mediainfo build-essential meson ninja-build nasm git
+          ffmpeg -hide_banner -version | head -1
+      - name: The project (before the tool runtime is put first in PATH)
+        run: python -m pip install '.[test]'
+      - name: VapourSynth with BestSource (pinned wheels, as the installer does)
+        run: |
+          python -m pip install --upgrade pip 'uv>=0.8,<1'
+          uv venv --python "$(which python)" "$RUNNER_TEMP/tools"
+          uv pip install --python "$RUNNER_TEMP/tools/bin/python" --requirement tools/requirements-vapoursynth.lock
+          mkdir -p "$RUNNER_TEMP/vsconfig"
+          XDG_CONFIG_HOME="$RUNNER_TEMP/vsconfig" "$RUNNER_TEMP/tools/bin/vapoursynth" config
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+          echo "XDG_CONFIG_HOME=$RUNNER_TEMP/vsconfig" >> "$GITHUB_ENV"
+      - name: Cache the standalone libvmaf build
+        id: vmaf-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vmaf-install
+          key: vmaf-${{ env.VMAF_COMMIT }}-${{ runner.os }}
+      - name: Build the standalone libvmaf (pinned commit, as the installer does)
+        if: steps.vmaf-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/Netflix/vmaf.git "$RUNNER_TEMP/vmaf-src"
+          git -C "$RUNNER_TEMP/vmaf-src" checkout --detach "$VMAF_COMMIT"
+          meson setup --buildtype release --default-library=static --prefix "$RUNNER_TEMP/vmaf-install" \
+            "$RUNNER_TEMP/vmaf-src/libvmaf/build" "$RUNNER_TEMP/vmaf-src/libvmaf"
+          ninja -C "$RUNNER_TEMP/vmaf-src/libvmaf/build"
+          ninja -C "$RUNNER_TEMP/vmaf-src/libvmaf/build" install
+      - name: Tool inventory
+        run: |
+          echo "$RUNNER_TEMP/vmaf-install/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/vmaf-install/bin/vmaf" --version
+          vspipe --version
+      - name: dovi_tool (pinned release, checksum verified; only for the Dolby Vision variant)
+        if: ${{ matrix.variant == '--dolby-vision' }}
+        run: |
+          set -eu
+          archive=dovi_tool-2.3.4-x86_64-unknown-linux-musl.tar.gz
+          curl -fsSL -o "$RUNNER_TEMP/$archive" "https://github.com/quietvoid/dovi_tool/releases/download/2.3.4/$archive"
+          echo "1844258e13c26607b32224bf1fa82b595d3b35949f5467405fda560daad32b3f  $RUNNER_TEMP/$archive" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/dovi" && tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/dovi"
+          echo "$RUNNER_TEMP/dovi" >> "$GITHUB_PATH"
+      - name: hdr10plus_tool (pinned release, checksum verified; only for the HDR10+ variant)
+        if: ${{ matrix.variant == '--hdr10plus' }}
+        run: |
+          set -eu
+          archive=hdr10plus_tool-1.7.2-x86_64-unknown-linux-musl.tar.gz
+          curl -fsSL -o "$RUNNER_TEMP/$archive" "https://github.com/quietvoid/hdr10plus_tool/releases/download/1.7.2/$archive"
+          echo "06385f37a639d61ba21d4be3150c863846933bc3b58110e094d8fc8f1c2249f2  $RUNNER_TEMP/$archive" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/hdr10plus" && tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/hdr10plus"
+          echo "$RUNNER_TEMP/hdr10plus" >> "$GITHUB_PATH"
+      - name: Synthetic disc, end to end
+        # The tool runtime's own python is first in PATH; the project lives in the setup-python one.
+        # The inputs reach the script through the environment (never interpolated into the shell).
+        env:
+          E2E_SIZE: ${{ inputs.size || '1280x720' }}
+          E2E_SCENES: ${{ inputs.scenes || '30' }}
+          E2E_VARIANT: ${{ matrix.variant }}
+          E2E_TRACKER: ${{ inputs.tracker || 'none' }}
+        run: |
+          ${{ env.pythonLocation }}/bin/python tools/e2e/synthetic_disc.py --work "$RUNNER_TEMP/e2e" \
+            --size "$E2E_SIZE" --scenes "$E2E_SCENES" --tracker "$E2E_TRACKER" $E2E_VARIANT

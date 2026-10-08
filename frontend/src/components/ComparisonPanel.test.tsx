@@ -1,0 +1,268 @@
+import { fireEvent, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { AudioComparisonManifest, VideoComparisonManifest } from "../api/types";
+import { makeArtifact } from "../test/fixtures";
+import { renderApp } from "../test/render";
+import { ComparisonPanel } from "./ComparisonPanel";
+
+function jsonResponse(payload: unknown): Response {
+  return {
+    ok: true,
+    status: 200,
+    json: vi.fn().mockResolvedValue(payload),
+  } as unknown as Response;
+}
+
+describe("ComparisonPanel", () => {
+  const videoManifest: VideoComparisonManifest = {
+    schema_version: 2,
+    categorization: "dual-decoder",
+    alignment: "presentation-index-and-pts",
+    counts: { I: 1, P: 0, B: 0 },
+    metrics: {
+      backend: "ffmpeg-sampled-ssim-psnr",
+      scope: "selected_ipb_native_png_pairs",
+      sample_count: 5,
+      full_title_measurement: false,
+      aggregate: {
+        ssim_all_mean: 0.9987654,
+        psnr_average_db_mean: 42.345,
+      },
+    },
+    pairs: [
+      {
+        category: "I",
+        presentation_index: 12,
+        encoded_pts_seconds: "0.500",
+        reference_pts_seconds: "0.500",
+        encoded_pict_type: "I",
+        source_pict_type: "I",
+        dual_type_match: true,
+        reference_png: "i-source.png",
+        encode_png: "i-encode.png",
+      },
+    ],
+  };
+  const audioManifest: AudioComparisonManifest = {
+    schema_version: 1,
+    tracks: [
+      {
+        stream_id: "audio:4352",
+        action: "flac",
+        source_spectrum: "audio-source.png",
+        encode_spectrum: "audio-encode.png",
+        decoded_pcm_sha256_match: true,
+        delay_within_one_sample: true,
+        comparison: { sample_count_delta: 0 },
+        source_probe: {},
+        encode_probe: {},
+      },
+    ],
+  };
+
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        return Promise.resolve(
+          jsonResponse(url.includes("audio-manifest") ? audioManifest : videoManifest),
+        );
+      }),
+    );
+  });
+
+  it("renders aligned frame controls and registered audio spectrograms", async () => {
+    const artifacts = [
+      makeArtifact({ id: "video-manifest", kind: "VIDEO_COMPARISON", name: "video-comparison.json", mime_type: "application/json" }),
+      makeArtifact({ id: "audio-manifest", kind: "AUDIO_COMPARISON", name: "audio-comparison.json", mime_type: "application/json" }),
+      makeArtifact({ id: "i-source", kind: "VIDEO_COMPARISON", name: "i-source.png", mime_type: "image/png" }),
+      makeArtifact({ id: "i-encode", kind: "VIDEO_COMPARISON", name: "i-encode.png", mime_type: "image/png" }),
+      makeArtifact({ id: "audio-source", kind: "SPECTROGRAM", name: "audio-source.png", mime_type: "image/png" }),
+      makeArtifact({ id: "audio-encode", kind: "SPECTROGRAM", name: "audio-encode.png", mime_type: "image/png" }),
+    ];
+    const user = userEvent.setup();
+
+    renderApp(<ComparisonPanel artifacts={artifacts} />);
+
+    expect(await screen.findByText("I-frame")).toBeInTheDocument();
+    expect(screen.getByText("Mintavételezett képmetrikák")).toBeInTheDocument();
+    expect(screen.getByText("SSIM: 0.998765")).toBeInTheDocument();
+    expect(screen.getByText("PSNR: 42.34 dB")).toBeInTheDocument();
+    expect(await screen.findByText("PCM egyezik")).toBeInTheDocument();
+    expect(screen.getByText("Időzítés rendben")).toBeInTheDocument();
+    expect(screen.getByAltText("audio:4352 source spektrum")).toHaveAttribute(
+      "src",
+      "/encoder/api/v1/artifacts/audio-source/content",
+    );
+    expect(screen.getByAltText("audio:4352 encode spektrum")).toHaveAttribute(
+      "src",
+      "/encoder/api/v1/artifacts/audio-encode/content",
+    );
+
+    const slider = screen.getByRole("slider", { name: "Source és encode elválasztása" });
+    fireEvent.change(slider, { target: { value: "72" } });
+    expect(screen.getByAltText("I-frame forrás")).toHaveStyle({
+      clipPath: "inset(0 28% 0 0)",
+    });
+
+    await user.click(screen.getByRole("button", { name: "A/B" }));
+    expect(screen.getByAltText("I-frame forrás")).toBeInTheDocument();
+    expect(screen.getByAltText("I-frame encode")).toBeInTheDocument();
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  });
+
+  it("shows a real warning instead of broken images when a frame artifact is absent", async () => {
+    renderApp(
+      <ComparisonPanel
+        artifacts={[
+          makeArtifact({ id: "video-manifest", kind: "VIDEO_COMPARISON", name: "video-comparison.json", mime_type: "application/json" }),
+        ]}
+      />,
+    );
+
+    expect(
+      await screen.findByText(/I-frame egyik PNG melléklete hiányzik/),
+    ).toBeInTheDocument();
+  });
+
+  it("labels lossy audio as intentional instead of reporting a PCM integrity error", async () => {
+    const lossyManifest: AudioComparisonManifest = {
+      schema_version: 2,
+      tracks: [{
+        ...audioManifest.tracks[0],
+        action: "eac3",
+        decoded_pcm_sha256_match: null,
+        decoded_pcm_sha256_required: false,
+        timing_within_tolerance: true,
+        verification_mode: "lossy_transcode",
+      }],
+    };
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse(lossyManifest))));
+
+    renderApp(
+      <ComparisonPanel
+        artifacts={[
+          makeArtifact({ id: "audio-manifest", kind: "AUDIO_COMPARISON", name: "audio-comparison.json", mime_type: "application/json" }),
+        ]}
+      />,
+    );
+
+    expect(await screen.findByText("E-AC-3 konverzió")).toBeInTheDocument();
+    expect(screen.getByText("Veszteséges cél · PCM hash nem elvárt")).toBeInTheDocument();
+    expect(screen.queryByText("PCM eltérés")).not.toBeInTheDocument();
+  });
+
+  it("shows a neutral same-frame label when source picture type is not applicable", async () => {
+    const transformedManifest: VideoComparisonManifest = {
+      ...videoManifest,
+      pairs: [{
+        ...videoManifest.pairs[0],
+        source_pict_type: null,
+        dual_type_match: false,
+      }],
+    };
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse(transformedManifest))));
+
+    renderApp(
+      <ComparisonPanel
+        artifacts={[
+          makeArtifact({ id: "video-manifest", kind: "VIDEO_COMPARISON", name: "video-comparison.json", mime_type: "application/json" }),
+          makeArtifact({ id: "i-source", kind: "VIDEO_COMPARISON", name: "i-source.png", mime_type: "image/png" }),
+          makeArtifact({ id: "i-encode", kind: "VIDEO_COMPARISON", name: "i-encode.png", mime_type: "image/png" }),
+        ]}
+      />,
+    );
+
+    expect(await screen.findByText("Source képtípus nem értelmezhető · azonos frame")).toBeInTheDocument();
+    expect(screen.queryByText(/eltérő típus/)).not.toBeInTheDocument();
+  });
+
+  it("lists the sampled VMAF windows from the weakest up and marks the pairs near them", async () => {
+    const window = (start: number, mean: number) => ({
+      start_frame: start * 24,
+      frame_count: 48,
+      start_seconds: start,
+      end_seconds: start + 2,
+      mean,
+      minimum: mean - 3,
+    });
+    const scored: VideoComparisonManifest = {
+      ...videoManifest,
+      vmaf: {
+        status: "measured",
+        model: "vmaf_4k_v0.6.1",
+        frames: 240,
+        mean: 94.1,
+        harmonic_mean: 93.8,
+        percentile_1: 86.2,
+        windows: [window(600, 96.5), window(1200, 88.4), window(1800, 97.1), window(2400, 91.0), window(3000, 95.0)],
+      },
+      // Twenty seconds after the weakest window.
+      pairs: [{ ...videoManifest.pairs[0], reference_pts_seconds: "1222.000" }],
+    };
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(jsonResponse(scored))));
+
+    renderApp(
+      <ComparisonPanel
+        artifacts={[
+          makeArtifact({ id: "video-manifest", kind: "VIDEO_COMPARISON", name: "video-comparison.json", mime_type: "application/json" }),
+          makeArtifact({ id: "i-source", kind: "VIDEO_COMPARISON", name: "i-source.png", mime_type: "image/png" }),
+          makeArtifact({ id: "i-encode", kind: "VIDEO_COMPARISON", name: "i-encode.png", mime_type: "image/png" }),
+        ]}
+      />,
+    );
+
+    expect(await screen.findByText("VMAF a kész fájlon")).toBeInTheDocument();
+    expect(screen.getByText("1% low: 86.20")).toBeInTheDocument();
+    const rows = screen.getAllByRole("listitem");
+    expect(rows.map((row) => row.querySelector("strong")?.textContent)).toEqual(["88.40", "91.00", "95.00", "96.50", "97.10"]);
+    expect(rows[0]).toHaveTextContent("20:00–20:02");
+    expect(rows.slice(0, 3).every((row) => row.classList.contains("vmaf-window--weak"))).toBe(true);
+    expect(rows[3]).not.toHaveClass("vmaf-window--weak");
+    expect(screen.getByText("Gyenge VMAF-szakasz közelében · 20:00–20:02")).toBeInTheDocument();
+  });
+
+  it("opens a pixel-level inspector for a frame pair and steps between pairs", async () => {
+    const user = userEvent.setup();
+    const twoPairs: VideoComparisonManifest = {
+      ...videoManifest,
+      counts: { I: 1, P: 1, B: 0 },
+      pairs: [
+        videoManifest.pairs[0],
+        { ...videoManifest.pairs[0], category: "P", presentation_index: 48, encoded_pict_type: "P", source_pict_type: "P", reference_png: "p-source.png", encode_png: "p-encode.png" },
+      ],
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(jsonResponse(twoPairs))),
+    );
+    const artifacts = [
+      makeArtifact({ id: "video-manifest", kind: "VIDEO_COMPARISON", name: "video-comparison.json", mime_type: "application/json" }),
+      ...["i-source", "i-encode", "p-source", "p-encode"].map((id) =>
+        makeArtifact({ id, kind: "VIDEO_COMPARISON", name: `${id}.png`, mime_type: "image/png" }),
+      ),
+    ];
+
+    renderApp(<ComparisonPanel artifacts={artifacts} />);
+
+    const openers = await screen.findAllByRole("button", { name: /Nagyítás és pixelnézet/ });
+    expect(openers).toHaveLength(2);
+    await user.click(openers[0]);
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("I-frame #12 — pixelnézet");
+    expect(screen.getByAltText("Forrás")).toHaveAttribute("src", expect.stringContaining("/artifacts/i-source/content"));
+    expect(screen.getByAltText("Encode")).toHaveAttribute("src", expect.stringContaining("/artifacts/i-encode/content"));
+    expect(screen.getByRole("button", { name: "Előző" })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "Következő" }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("P-frame #48 — pixelnézet");
+    expect(screen.getByAltText("Forrás")).toHaveAttribute("src", expect.stringContaining("/artifacts/p-source/content"));
+    expect(screen.getByRole("button", { name: "Következő" })).toBeDisabled();
+
+    await user.click(screen.getAllByRole("button", { name: "Bezárás" }).at(-1)!);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+});
