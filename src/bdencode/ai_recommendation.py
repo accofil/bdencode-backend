@@ -33,6 +33,7 @@ from .ai_settings import (
     AIProvider,
     load_preferences,
 )
+from .i18n import t
 from .media.profiles import (
     DetailLevel,
     EncoderSettings,
@@ -83,9 +84,16 @@ _BASE_INSTRUCTIONS = (
     "base should remain unchanged, and never emit a command line. "
     "Respect every hard constraint. CRF cannot guarantee an exact file "
     "size, so describe target-size uncertainty in warnings. Prefer "
-    "conservative archival quality and source-faithful texture. Answer "
-    "summary, rationale, and warnings in Hungarian."
+    "conservative archival quality and source-faithful texture."
 )
+
+
+def _instructions() -> str:
+    """The adviser's instructions, asking for prose in the interface language."""
+
+    language = t("Hungarian", "English")
+    return f"{_BASE_INSTRUCTIONS} Answer summary, rationale, and warnings in {language}."
+
 _ANTHROPIC_FORMAT = (
     " The settings array lists only the fields you change from the "
     "deterministic base; omit a field to keep the base value. Each value is "
@@ -93,6 +101,13 @@ _ANTHROPIC_FORMAT = (
     "boolean fields, one of the listed choices for enum fields. Stay inside "
     "each field's minimum and maximum."
 )
+
+
+def _no_usable_answer() -> str:
+    return t(
+        "Az AI szolgáltatás nem adott használható választ; próbáld újra később.",
+        "The AI service gave no usable answer; try again later.",
+    )
 
 
 class AIRecommendationUnavailable(RuntimeError):
@@ -338,13 +353,25 @@ def _bounded_text(value: Any, limit: int = 1000) -> str:
 def _rejected_key_message(provider: AIProvider, status_code: int | None) -> str | None:
     label = PROVIDER_LABELS[provider]
     if status_code == 401:
-        return f"A(z) {label} elutasította az API-kulcsot. Add meg újra a Rendszer oldalon."
+        return t(
+            f"A(z) {label} elutasította az API-kulcsot. Add meg újra a Rendszer oldalon.",
+            f"{label} rejected the API key. Enter it again on the System page.",
+        )
     if status_code == 403:
-        return f"A(z) {label} API-kulcsnak nincs jogosultsága ehhez a modellhez."
+        return t(
+            f"A(z) {label} API-kulcsnak nincs jogosultsága ehhez a modellhez.",
+            f"The {label} API key has no access to this model.",
+        )
     if status_code == 404:
-        return f"A beállított {label}-modell nem érhető el ezzel a kulccsal. Ellenőrizd a modellnevet a Rendszer oldalon."
+        return t(
+            f"A beállított {label}-modell nem érhető el ezzel a kulccsal. Ellenőrizd a modellnevet a Rendszer oldalon.",
+            f"The configured {label} model is not available with this key. Check the model name on the System page.",
+        )
     if status_code == 429:
-        return f"A(z) {label} korlátozza a kéréseket, vagy elfogyott a keret. Próbáld újra később."
+        return t(
+            f"A(z) {label} korlátozza a kéréseket, vagy elfogyott a keret. Próbáld újra később.",
+            f"{label} is rate-limiting requests or the quota is used up. Try again later.",
+        )
     return None
 
 
@@ -353,7 +380,10 @@ def default_anthropic_client(api_key: str, timeout_seconds: float) -> Any:
         import anthropic
     except ImportError as exc:  # pragma: no cover - the package is a dependency
         raise AIRecommendationUnavailable(
-            "Az anthropic Python-csomag hiányzik a szerverről; futtasd újra a telepítőt."
+            t(
+                "Az anthropic Python-csomag hiányzik a szerverről; futtasd újra a telepítőt.",
+                "The anthropic Python package is missing on the server; run the installer again.",
+            )
         ) from exc
     return anthropic.Anthropic(api_key=api_key, timeout=timeout_seconds, max_retries=1)
 
@@ -440,8 +470,12 @@ class AIRecommendationService:
         api_key = self._api_key(chosen)
         if not api_key:
             raise AIRecommendationUnavailable(
-                f"A(z) {PROVIDER_LABELS[chosen]} API-kulcs nincs beállítva a szerveren. "
-                "A Rendszer oldal AI-tanácsadó kártyáján adhatod meg."
+                t(
+                    f"A(z) {PROVIDER_LABELS[chosen]} API-kulcs nincs beállítva a szerveren. "
+                    "A Rendszer oldal AI-tanácsadó kártyáján adhatod meg.",
+                    f"The {PROVIDER_LABELS[chosen]} API key is not set on the server. "
+                    "You can enter it on the AI adviser card of the System page.",
+                )
             )
         model = self.model_for(chosen, preferences)
         input_document = {
@@ -508,7 +542,10 @@ class AIRecommendationService:
             )
         except (TypeError, ValueError) as exc:
             raise AIRecommendationError(
-                "Az AI-javaslatot a helyi x264/x265 validátor elutasította."
+                t(
+                    "Az AI-javaslatot a helyi x264/x265 validátor elutasította.",
+                    "The local x264/x265 validator rejected the AI recommendation.",
+                )
             ) from exc
 
         temporal = document.get("temporal_filter")
@@ -521,7 +558,7 @@ class AIRecommendationService:
             settings=validated.to_dict(),
             temporal_filter=str(temporal),
             summary=_bounded_text(
-                document.get("summary") or "AI-beállítási javaslat"
+                document.get("summary") or t("AI-beállítási javaslat", "AI settings recommendation")
             ),
             rationale=[_bounded_text(item) for item in rationale][:12],
             warnings=[*warnings_extra, *(_bounded_text(item) for item in warnings)][:12],
@@ -541,7 +578,7 @@ class AIRecommendationService:
         request_body = {
             "model": model,
             "store": False,
-            "instructions": _BASE_INSTRUCTIONS,
+            "instructions": _instructions(),
             "input": json.dumps(
                 {**input_document, "allowed_override_fields": list(accepted_names)},
                 ensure_ascii=False,
@@ -576,12 +613,10 @@ class AIRecommendationService:
             message = _rejected_key_message("openai", exc.response.status_code)
             raise AIRecommendationError(
                 message
-                or "Az AI szolgáltatás nem adott használható választ; próbáld újra később."
+                or _no_usable_answer()
             ) from exc
         except (httpx.HTTPError, ValueError) as exc:
-            raise AIRecommendationError(
-                "Az AI szolgáltatás nem adott használható választ; próbáld újra később."
-            ) from exc
+            raise AIRecommendationError(_no_usable_answer()) from exc
         if not isinstance(provider_payload, Mapping):
             raise AIRecommendationError("the AI provider returned an invalid document")
         try:
@@ -624,7 +659,7 @@ class AIRecommendationService:
                 model=model,
                 max_tokens=ANTHROPIC_MAX_TOKENS,
                 betas=[ANTHROPIC_FALLBACK_BETA],
-                system=_BASE_INSTRUCTIONS + _ANTHROPIC_FORMAT,
+                system=_instructions() + _ANTHROPIC_FORMAT,
                 messages=[{"role": "user", "content": model_input}],
                 output_config={
                     "effort": "high",
@@ -641,13 +676,24 @@ class AIRecommendationService:
             )
             raise AIRecommendationError(
                 message_text
-                or "A Claude API nem adott használható választ; próbáld újra később."
+                or t(
+                    "A Claude API nem adott használható választ; próbáld újra később.",
+                    "The Claude API gave no usable answer; try again later.",
+                )
             ) from exc
         if message.stop_reason == "refusal":
-            raise AIRecommendationError("A Claude nem adott javaslatot erre a kérésre.")
+            raise AIRecommendationError(
+                t(
+                    "A Claude nem adott javaslatot erre a kérésre.",
+                    "Claude gave no recommendation for this request.",
+                )
+            )
         if message.stop_reason == "max_tokens":
             raise AIRecommendationError(
-                "A Claude válasza túl hosszú lett és megszakadt; próbáld újra."
+                t(
+                    "A Claude válasza túl hosszú lett és megszakadt; próbáld újra.",
+                    "Claude's answer grew too long and was cut off; try again.",
+                )
             )
         text = next(
             (block.text for block in message.content if getattr(block, "type", None) == "text"),
@@ -680,8 +726,12 @@ class AIRecommendationService:
                 overrides[name] = convert_text_value(field, text_value)
             except ValueError:
                 dropped.append(
-                    f"A(z) {name} mezőre javasolt „{_bounded_text(text_value, 40)}” "
-                    "értéket a helyi ellenőrzés elvetette; az alapérték maradt."
+                    t(
+                        f"A(z) {name} mezőre javasolt „{_bounded_text(text_value, 40)}” "
+                        "értéket a helyi ellenőrzés elvetette; az alapérték maradt.",
+                        f"The local check rejected the value “{_bounded_text(text_value, 40)}” "
+                        f"suggested for {name}; the base value was kept.",
+                    )
                 )
         return document, overrides, dropped, getattr(message, "model", None)
 

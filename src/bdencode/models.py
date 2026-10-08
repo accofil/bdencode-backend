@@ -320,7 +320,7 @@ class SelectionValidationResponse(StrictModel):
     temporal_filter: str
     advisory_warnings: list[str]
     tracker_profile: str = "none"
-    # Deviations from the chosen tracker's rules, in Hungarian: code, message, severity.
+    # Deviations from the chosen tracker's rules, in the interface language: code, message, severity.
     tracker_findings: list[dict[str, str]] = Field(default_factory=list)
 
 

@@ -18,6 +18,7 @@ import { BackupsPanel } from "../components/BackupsPanel";
 import { cpuShareInForce, CpuPolicyPanel, useCpuPolicy } from "../components/CpuPolicyPanel";
 import { ReleaseUpdatePanel } from "../components/ReleaseUpdatePanel";
 import { Badge, Button, Card, LoadingPanel, Notice, PageHeader, ProgressBar } from "../components/ui";
+import { t } from "../i18n";
 import { formatBytes, humanize } from "../utils";
 
 function finiteNumber(value: unknown): number | null {
@@ -25,9 +26,9 @@ function finiteNumber(value: unknown): number | null {
 }
 
 function booleanLabel(value: boolean | undefined): string {
-  if (value === true) return "Igen";
-  if (value === false) return "Nem";
-  return "Ismeretlen";
+  if (value === true) return t("Igen", "Yes");
+  if (value === false) return t("Nem", "No");
+  return t("Ismeretlen", "Unknown");
 }
 
 const imageCredentialLabels: Record<string, string> = {
@@ -50,8 +51,11 @@ export function SystemPage() {
     ? Math.max(0, Math.min(1, 1 - free / total))
     : 0;
   const storageLabel = hasStorageUsage
-    ? `${formatBytes(Math.max(0, total - free))} használatban · ${formatBytes(total)} összesen`
-    : "Tárhelyadatok: Ismeretlen";
+    ? t(
+      `${formatBytes(Math.max(0, total - free))} használatban · ${formatBytes(total)} összesen`,
+      `${formatBytes(Math.max(0, total - free))} in use · ${formatBytes(total)} total`,
+    )
+    : t("Tárhelyadatok: Ismeretlen", "Storage data: Unknown");
   const vapourSynthOk = typeof runtime.data?.vapoursynth?.ok === "boolean"
     ? runtime.data.vapoursynth.ok
     : null;
@@ -62,10 +66,15 @@ export function SystemPage() {
   const cpuPercent = cpuInForce?.percent ?? cpuPercentFromRuntime ?? (cpuFraction === null ? null : cpuFraction * 100);
   const workerGpu = runtime.data?.worker_gpu;
   const gpuLabel = !workerGpu
-    ? "GPU: Ismeretlen"
+    ? t("GPU: Ismeretlen", "GPU: Unknown")
     : workerGpu.crop_decode === "cpu"
-      ? workerGpu.crop_hwaccel === "none" ? "GPU kikapcsolva: a crop-keresés CPU-n fut" : "Nincs GPU: a crop-keresés CPU-n fut"
-      : `GPU a crop-kereséshez (${(workerGpu.devices ?? []).join(", ") || "beállítva"})`;
+      ? workerGpu.crop_hwaccel === "none"
+        ? t("GPU kikapcsolva: a crop-keresés CPU-n fut", "GPU turned off: the crop scan runs on the CPU")
+        : t("Nincs GPU: a crop-keresés CPU-n fut", "No GPU: the crop scan runs on the CPU")
+      : t(
+        `GPU a crop-kereséshez (${(workerGpu.devices ?? []).join(", ") || "beállítva"})`,
+        `GPU for the crop scan (${(workerGpu.devices ?? []).join(", ") || "configured"})`,
+      );
   const imageCredentials = runtime.data?.image_upload_credentials ?? {};
 
   function refresh() {
@@ -75,31 +84,31 @@ export function SystemPage() {
   return (
     <div className="page">
       <PageHeader
-        eyebrow="Rendszer"
-        title="Szerver és képességek"
-        description="A telepített eszközök, a backend biztonsági korlátai és az adatbázis mentései."
-        actions={<Button variant="secondary" icon={<RefreshCw size={17} />} onClick={refresh} loading={health.isFetching || runtime.isFetching}>Frissítés</Button>}
+        eyebrow={t("Rendszer", "System")}
+        title={t("Szerver és képességek", "Server and capabilities")}
+        description={t("A telepített eszközök, a backend biztonsági korlátai és az adatbázis mentései.", "The installed tools, the backend's safety limits and the database backups.")}
+        actions={<Button variant="secondary" icon={<RefreshCw size={17} />} onClick={refresh} loading={health.isFetching || runtime.isFetching}>{t("Frissítés", "Refresh")}</Button>}
       />
-      {(health.isLoading || runtime.isLoading) ? <LoadingPanel label="Rendszeradatok betöltése…" /> : health.isError || runtime.isError ? <Notice tone="danger" title="A rendszerállapot nem olvasható">Az API vagy a runtime-capabilities endpoint nem elérhető.</Notice> : (
+      {(health.isLoading || runtime.isLoading) ? <LoadingPanel label={t("Rendszeradatok betöltése…", "Loading system data…")} /> : health.isError || runtime.isError ? <Notice tone="danger" title={t("A rendszerállapot nem olvasható", "The system state cannot be read")}>{t("Az API vagy a runtime-capabilities endpoint nem elérhető.", "The API or the runtime-capabilities endpoint is not available.")}</Notice> : (
         <>
           <div className="system-overview-grid">
-            <Card className="status-stat-card"><span className="status-stat-card__icon status-stat-card__icon--green"><Server size={22} /></span><div><small>Backend</small><strong>{health.data?.status === "ok" ? "Online" : "Hiba"}</strong><span>BDEncode {capabilities.data?.backend_version ?? "—"} · API v{capabilities.data?.api_version ?? "—"}</span></div><CheckCircle2 size={18} className="success-icon" /></Card>
-            <Card className="status-stat-card"><span className="status-stat-card__icon"><Cpu size={22} /></span><div><small>Processzor</small><strong>{host?.logical_cpus ?? "Ismeretlen"} logikai CPU</strong><span>{cpuPercent === null ? "CPU-keret: Ismeretlen" : `${Math.round(cpuPercent)}% teljes keret`}</span><span>{gpuLabel}</span></div><ShieldCheck size={18} /></Card>
-            <Card className="status-stat-card"><span className="status-stat-card__icon"><Database size={22} /></span><div><small>Adatbázis</small><strong>Schema {health.data?.schema_version ?? "—"}</strong><span>{health.data?.active_job_id ? "1 aktív encode" : `${health.data?.ready_jobs ?? 0} kódolásra kész`}{health.data?.preparing_job_id ? " · scan fut" : ""}</span></div><Gauge size={18} /></Card>
-            <Card className="status-stat-card"><span className="status-stat-card__icon"><HardDrive size={22} /></span><div><small>Tárhely</small><strong>{free === null ? "Ismeretlen" : `${formatBytes(free)} szabad`}</strong><span>{dataPath?.path || "Ismeretlen"}</span></div><HardDrive size={18} /></Card>
+            <Card className="status-stat-card"><span className="status-stat-card__icon status-stat-card__icon--green"><Server size={22} /></span><div><small>Backend</small><strong>{health.data?.status === "ok" ? "Online" : t("Hiba", "Error")}</strong><span>BDEncode {capabilities.data?.backend_version ?? "—"} · API v{capabilities.data?.api_version ?? "—"}</span></div><CheckCircle2 size={18} className="success-icon" /></Card>
+            <Card className="status-stat-card"><span className="status-stat-card__icon"><Cpu size={22} /></span><div><small>{t("Processzor", "Processor")}</small><strong>{host?.logical_cpus ?? t("Ismeretlen", "Unknown")} {t("logikai CPU", "logical CPUs")}</strong><span>{cpuPercent === null ? t("CPU-keret: Ismeretlen", "CPU share: Unknown") : t(`${Math.round(cpuPercent)}% teljes keret`, `${Math.round(cpuPercent)}% total share`)}</span><span>{gpuLabel}</span></div><ShieldCheck size={18} /></Card>
+            <Card className="status-stat-card"><span className="status-stat-card__icon"><Database size={22} /></span><div><small>{t("Adatbázis", "Database")}</small><strong>Schema {health.data?.schema_version ?? "—"}</strong><span>{health.data?.active_job_id ? t("1 aktív encode", "1 active encode") : t(`${health.data?.ready_jobs ?? 0} kódolásra kész`, `${health.data?.ready_jobs ?? 0} ready to encode`)}{health.data?.preparing_job_id ? t(" · scan fut", " · scan running") : ""}</span></div><Gauge size={18} /></Card>
+            <Card className="status-stat-card"><span className="status-stat-card__icon"><HardDrive size={22} /></span><div><small>{t("Tárhely", "Storage")}</small><strong>{free === null ? t("Ismeretlen", "Unknown") : t(`${formatBytes(free)} szabad`, `${formatBytes(free)} free`)}</strong><span>{dataPath?.path || t("Ismeretlen", "Unknown")}</span></div><HardDrive size={18} /></Card>
           </div>
 
           <div className="system-content-grid">
             <Card className="tools-card">
-              <div className="section-heading"><div><span className="section-heading__icon"><Wrench size={19} /></span><div><h2>Telepített programok</h2><p>Az encode és QC tényleges végrehajtói</p></div></div><Badge tone={vapourSynthOk === null ? "neutral" : vapourSynthOk ? "success" : "danger"}>VapourSynth {vapourSynthOk === null ? "Ismeretlen" : vapourSynthOk ? "OK" : "hiba"}</Badge></div>
+              <div className="section-heading"><div><span className="section-heading__icon"><Wrench size={19} /></span><div><h2>{t("Telepített programok", "Installed programs")}</h2><p>{t("Az encode és QC tényleges végrehajtói", "The programs that actually run the encode and QC")}</p></div></div><Badge tone={vapourSynthOk === null ? "neutral" : vapourSynthOk ? "success" : "danger"}>VapourSynth {vapourSynthOk === null ? t("Ismeretlen", "Unknown") : vapourSynthOk ? "OK" : t("hiba", "error")}</Badge></div>
               <div className="tool-table">
                 {Object.entries(tools).map(([name, tool]) => {
                   const available = typeof tool.available === "boolean" ? tool.available : null;
                   return (
                     <div key={name} className="tool-row">
                       <span className={available === null ? "tool-row__status" : available ? "tool-row__status tool-row__status--ok" : "tool-row__status tool-row__status--error"}>{available === null ? <CircleHelp size={16} /> : available ? <CheckCircle2 size={16} /> : <XCircle size={16} />}</span>
-                      <span><strong>{name}</strong><small>{String(tool.version ?? "Nincs verzióadat")}</small></span>
-                      <Badge tone={available === null ? "neutral" : available ? "success" : "danger"}>{available === null ? "Ismeretlen" : available ? "Elérhető" : "Hiányzik"}</Badge>
+                      <span><strong>{name}</strong><small>{String(tool.version ?? t("Nincs verzióadat", "No version data"))}</small></span>
+                      <Badge tone={available === null ? "neutral" : available ? "success" : "danger"}>{available === null ? t("Ismeretlen", "Unknown") : available ? t("Elérhető", "Available") : t("Hiányzik", "Missing")}</Badge>
                     </div>
                   );
                 })}
@@ -108,40 +117,42 @@ export function SystemPage() {
 
             <div className="system-side-stack">
               <Card>
-                <span className="eyebrow">Tárhely</span><h2>Encode munkaterület</h2>
+                <span className="eyebrow">{t("Tárhely", "Storage")}</span><h2>{t("Encode munkaterület", "Encode workspace")}</h2>
                 <ProgressBar value={usedFraction} label={storageLabel} />
-                <dl className="summary-list summary-list--stacked"><div><dt>Útvonal</dt><dd>{dataPath?.path || "Ismeretlen"}</dd></div><div><dt>Olvasható</dt><dd>{booleanLabel(dataPath?.readable)}</dd></div><div><dt>Írható</dt><dd>{booleanLabel(dataPath?.writable)}</dd></div></dl>
+                <dl className="summary-list summary-list--stacked"><div><dt>{t("Útvonal", "Path")}</dt><dd>{dataPath?.path || t("Ismeretlen", "Unknown")}</dd></div><div><dt>{t("Olvasható", "Readable")}</dt><dd>{booleanLabel(dataPath?.readable)}</dd></div><div><dt>{t("Írható", "Writable")}</dt><dd>{booleanLabel(dataPath?.writable)}</dd></div></dl>
               </Card>
               <Card>
-                <span className="eyebrow">Biztonsági politika</span><h2>Rögzített korlátok</h2>
+                <span className="eyebrow">{t("Biztonsági politika", "Safety policy")}</span><h2>{t("Rögzített korlátok", "Fixed limits")}</h2>
                 <ul className="policy-list">
-                  <li><CheckCircle2 size={16} /> Egyszerre legfeljebb egy aktív encode</li>
-                  <li><CheckCircle2 size={16} /> Scan és beállítás a futó encode mellett is</li>
-                  <li><CheckCircle2 size={16} /> {cpuPercent === null ? "Korlátozott CPU-keret" : `CPU-kapacitás legfeljebb ${Math.round(cpuPercent)}%-a`}</li>
-                  <li><CheckCircle2 size={16} /> 3D kimenet tiltva</li>
-                  <li><CheckCircle2 size={16} /> Alapból csak statikus HDR10; a dinamikus HDR megtartása opcionális és ellenőrzött</li>
-                  <li><CheckCircle2 size={16} /> Comparison képek veszteségmentes PNG-ben</li>
+                  <li><CheckCircle2 size={16} /> {t("Egyszerre legfeljebb egy aktív encode", "At most one active encode at a time")}</li>
+                  <li><CheckCircle2 size={16} /> {t("Scan és beállítás a futó encode mellett is", "Scan and setup even while an encode is running")}</li>
+                  <li><CheckCircle2 size={16} /> {cpuPercent === null ? t("Korlátozott CPU-keret", "Limited CPU share") : t(`CPU-kapacitás legfeljebb ${Math.round(cpuPercent)}%-a`, `At most ${Math.round(cpuPercent)}% of CPU capacity`)}</li>
+                  <li><CheckCircle2 size={16} /> {t("3D kimenet tiltva", "3D output disabled")}</li>
+                  <li><CheckCircle2 size={16} /> {t("Alapból csak statikus HDR10; a dinamikus HDR megtartása opcionális és ellenőrzött", "Static HDR10 only by default; keeping dynamic HDR is optional and verified")}</li>
+                  <li><CheckCircle2 size={16} /> {t("Comparison képek veszteségmentes PNG-ben", "Comparison images as lossless PNG")}</li>
                 </ul>
               </Card>
               <Card>
-                <span className="eyebrow">Képfeltöltés</span><h2>Worker credentialök</h2>
+                <span className="eyebrow">{t("Képfeltöltés", "Image upload")}</span><h2>{t("Worker credentialök", "Worker credentials")}</h2>
                 <div className="tool-table">
                   {Object.entries(imageCredentialLabels).map(([name, label]) => {
                     const credential = imageCredentials[name];
                     const active = credential?.service_active;
-                    let state = "Ismeretlen";
+                    let state = t("Ismeretlen", "Unknown");
                     let tone: "neutral" | "info" | "success" | "warning" | "danger" = "neutral";
                     if (credential?.configured === false) {
-                      state = "Nincs beállítva";
+                      state = t("Nincs beállítva", "Not configured");
                       tone = "danger";
                     } else if (credential?.configured === true && credential.ready_for_consumer === false) {
-                      state = "Nincs a workerhez kötve";
+                      state = t("Nincs a workerhez kötve", "Not bound to the worker");
                       tone = "danger";
                     } else if (credential?.configured === true && credential.ready_for_consumer === true) {
-                      state = active === false ? "Bekötve, a worker áll" : active === true ? "Használatra kész" : "A workerhez kötve";
+                      state = active === false
+                        ? t("Bekötve, a worker áll", "Bound, the worker is stopped")
+                        : active === true ? t("Használatra kész", "Ready to use") : t("A workerhez kötve", "Bound to the worker");
                       tone = active === false ? "warning" : "success";
                     } else if (credential?.configured === true) {
-                      state = "Beállítva, workerállapot nélkül";
+                      state = t("Beállítva, workerállapot nélkül", "Configured, no worker state");
                       tone = "info";
                     }
                     const statusClass = tone === "neutral"
@@ -167,7 +178,7 @@ export function SystemPage() {
           <ReleaseUpdatePanel />
           <BackupsPanel />
 
-          {runtime.data?.warnings && runtime.data.warnings.length > 0 && <Notice tone="warning" title="Runtime figyelmeztetések"><ul>{runtime.data.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></Notice>}
+          {runtime.data?.warnings && runtime.data.warnings.length > 0 && <Notice tone="warning" title={t("Runtime figyelmeztetések", "Runtime warnings")}><ul>{runtime.data.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></Notice>}
           <details className="runtime-raw"><summary>{humanize("runtime_capabilities")} JSON</summary><pre>{JSON.stringify(runtime.data, null, 2)}</pre></details>
         </>
       )}

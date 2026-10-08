@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from ..i18n import t
 from .profiles import VideoEncoder, recommended_profile
 
 
@@ -26,19 +27,21 @@ class AitherPreset:
     id: str
     encoder: VideoEncoder
     content: str  # grain | clean | animation
-    label: str
-    description: str
-    crf_hint: str
+    label: tuple[str, str]  # (hungarian, english)
+    description: tuple[str, str]  # (hungarian, english)
+    crf_hint: tuple[str, str]  # (hungarian, english)
     settings: Mapping[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
+        """The preset for the API, its texts in the request's language."""
+
         return {
             "id": self.id,
             "encoder": self.encoder.value,
             "content": self.content,
-            "label": self.label,
-            "description": self.description,
-            "crf_hint": self.crf_hint,
+            "label": t(*self.label),
+            "description": t(*self.description),
+            "crf_hint": t(*self.crf_hint),
             "settings": dict(self.settings),
         }
 
@@ -99,11 +102,19 @@ _PRESETS: tuple[AitherPreset, ...] = (
         "aither_uhd_grain",
         VideoEncoder.X265,
         "grain",
-        "Aither UHD – szemcsés film",
-        "Filmre forgatott, szemcsés UHD-hoz: SAO és erős intra simítás ki, "
-        "cutree ki, psy-rd 2,0 / psy-rdoq 1,0, deblock -3:-3, aq-mode 2. "
-        "A szemcse megmarad, de a fájl nagyobb és a kódolás lassabb.",
-        "CRF 16–18; méretcéllal a remux 40–80%-a.",
+        ("Aither UHD – szemcsés film", "Aither UHD – grainy film"),
+        (
+            "Filmre forgatott, szemcsés UHD-hoz: SAO és erős intra simítás ki, "
+            "cutree ki, psy-rd 2,0 / psy-rdoq 1,0, deblock -3:-3, aq-mode 2. "
+            "A szemcse megmarad, de a fájl nagyobb és a kódolás lassabb.",
+            "For grainy UHD shot on film: SAO and strong intra smoothing off, "
+            "cutree off, psy-rd 2.0 / psy-rdoq 1.0, deblock -3:-3, aq-mode 2. "
+            "The grain is kept, but the file is larger and the encode slower.",
+        ),
+        (
+            "CRF 16–18; méretcéllal a remux 40–80%-a.",
+            "CRF 16–18; with a size target, 40–80% of the remux.",
+        ),
         {
             **_X265_COMMON,
             "crf": 17.0,
@@ -122,11 +133,18 @@ _PRESETS: tuple[AitherPreset, ...] = (
         "aither_uhd_clean",
         VideoEncoder.X265,
         "clean",
-        "Aither UHD – tiszta, digitális film",
-        "Modern, kevéssé zajos UHD-hoz: cutree be, aq-mode 3 0,9-es "
-        "erősséggel a sávosodás ellen, psy-rd 1,5 / psy-rdoq 0,8, deblock -2:-2, "
-        "SAO ki.",
-        "CRF 18–20; méretcéllal a remux 30–50%-a.",
+        ("Aither UHD – tiszta, digitális film", "Aither UHD – clean, digital film"),
+        (
+            "Modern, kevéssé zajos UHD-hoz: cutree be, aq-mode 3 0,9-es "
+            "erősséggel a sávosodás ellen, psy-rd 1,5 / psy-rdoq 0,8, deblock -2:-2, "
+            "SAO ki.",
+            "For modern, low-noise UHD: cutree on, aq-mode 3 at strength 0.9 "
+            "against banding, psy-rd 1.5 / psy-rdoq 0.8, deblock -2:-2, SAO off.",
+        ),
+        (
+            "CRF 18–20; méretcéllal a remux 30–50%-a.",
+            "CRF 18–20; with a size target, 30–50% of the remux.",
+        ),
         {
             **_X265_COMMON,
             "crf": 18.5,
@@ -145,10 +163,14 @@ _PRESETS: tuple[AitherPreset, ...] = (
         "aither_uhd_animation",
         VideoEncoder.X265,
         "animation",
-        "Aither UHD – animáció",
-        "Animációhoz: alacsonyabb psy (kontúrok gyűrődése ellen), deblock "
-        "-1:-1, aq-mode 3 0,7-es erősséggel, 16 B-frame, cutree be.",
-        "CRF 17–19.",
+        ("Aither UHD – animáció", "Aither UHD – animation"),
+        (
+            "Animációhoz: alacsonyabb psy (kontúrok gyűrődése ellen), deblock "
+            "-1:-1, aq-mode 3 0,7-es erősséggel, 16 B-frame, cutree be.",
+            "For animation: lower psy (against rippling line art), deblock "
+            "-1:-1, aq-mode 3 at strength 0.7, 16 B-frames, cutree on.",
+        ),
+        ("CRF 17–19.", "CRF 17–19."),
         {
             **_X265_COMMON,
             "crf": 18.0,
@@ -170,11 +192,19 @@ _PRESETS: tuple[AitherPreset, ...] = (
         "aither_bd_quality_grain",
         VideoEncoder.X264,
         "grain",
-        "Aither 1080p Quality – szemcsés film",
-        "Az Aither Quality slotjába: veryslow, mbtree ki (qcomp 0,6), "
-        "deblock -3:-3, aq-mode 3 0,8, psy-rd 1,0:0, 16 B-frame, ref 4, "
-        "no-fast-pskip, no-dct-decimate, zárt GOP.",
-        "CRF 15–17; jellemzően a remux 45–60%-a.",
+        ("Aither 1080p Quality – szemcsés film", "Aither 1080p Quality – grainy film"),
+        (
+            "Az Aither Quality slotjába: veryslow, mbtree ki (qcomp 0,6), "
+            "deblock -3:-3, aq-mode 3 0,8, psy-rd 1,0:0, 16 B-frame, ref 4, "
+            "no-fast-pskip, no-dct-decimate, zárt GOP.",
+            "For Aither's Quality slot: veryslow, mbtree off (qcomp 0.6), "
+            "deblock -3:-3, aq-mode 3 0.8, psy-rd 1.0:0, 16 B-frames, ref 4, "
+            "no-fast-pskip, no-dct-decimate, closed GOP.",
+        ),
+        (
+            "CRF 15–17; jellemzően a remux 45–60%-a.",
+            "CRF 15–17; typically 45–60% of the remux.",
+        ),
         {
             **_X264_COMMON,
             "crf": 16.5,
@@ -191,10 +221,14 @@ _PRESETS: tuple[AitherPreset, ...] = (
         "aither_bd_quality_clean",
         VideoEncoder.X264,
         "clean",
-        "Aither 1080p Quality – tiszta film",
-        "Tiszta, digitális 1080p-hez: mbtree be (qcomp 0,75, előretekintés "
-        "250), deblock -2:-2, aq-mode 3 0,8, psy-rd 1,0:0, 16 B-frame.",
-        "CRF 16–18.",
+        ("Aither 1080p Quality – tiszta film", "Aither 1080p Quality – clean film"),
+        (
+            "Tiszta, digitális 1080p-hez: mbtree be (qcomp 0,75, előretekintés "
+            "250), deblock -2:-2, aq-mode 3 0,8, psy-rd 1,0:0, 16 B-frame.",
+            "For clean, digital 1080p: mbtree on (qcomp 0.75, lookahead "
+            "250), deblock -2:-2, aq-mode 3 0.8, psy-rd 1.0:0, 16 B-frames.",
+        ),
+        ("CRF 16–18.", "CRF 16–18."),
         {
             **_X264_COMMON,
             "crf": 17.0,
@@ -211,10 +245,14 @@ _PRESETS: tuple[AitherPreset, ...] = (
         "aither_bd_quality_animation",
         VideoEncoder.X264,
         "animation",
-        "Aither 1080p Quality – animáció",
-        "Animációhoz: mbtree be (qcomp 0,75), psy-rd 0,8:0, aq-mode 3 0,65, "
-        "deblock -1:-1, 16 B-frame.",
-        "CRF 15–17.",
+        ("Aither 1080p Quality – animáció", "Aither 1080p Quality – animation"),
+        (
+            "Animációhoz: mbtree be (qcomp 0,75), psy-rd 0,8:0, aq-mode 3 0,65, "
+            "deblock -1:-1, 16 B-frame.",
+            "For animation: mbtree on (qcomp 0.75), psy-rd 0.8:0, aq-mode 3 0.65, "
+            "deblock -1:-1, 16 B-frames.",
+        ),
+        ("CRF 15–17.", "CRF 15–17."),
         {
             **_X264_COMMON,
             "crf": 16.0,

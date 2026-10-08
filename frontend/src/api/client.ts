@@ -1,3 +1,4 @@
+import { getLanguage, t } from "../i18n";
 import type {
   AIKeyRequest,
   AIProvider,
@@ -72,7 +73,7 @@ export class ApiError extends Error {
 async function responseError(response: Response): Promise<ApiError> {
   const raw = await response.text();
   let payload: unknown = raw || null;
-  let detail = `A kérés sikertelen (${response.status})`;
+  let detail = t(`A kérés sikertelen (${response.status})`, `The request failed (${response.status})`);
   if (raw) {
     try {
       payload = JSON.parse(raw) as unknown;
@@ -101,6 +102,8 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: {
       Accept: "application/json",
+      // The backend answers its messages in the interface language.
+      "Accept-Language": getLanguage(),
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
       ...init?.headers,
     },
@@ -360,7 +363,7 @@ export async function fetchArtifactText(id: string): Promise<string> {
   const response = await fetch(artifactContentUrl(id), {
     credentials: "same-origin",
   });
-  if (!response.ok) throw new ApiError(response.status, "A melléklet nem olvasható", null);
+  if (!response.ok) throw new ApiError(response.status, t("A melléklet nem olvasható", "The attachment cannot be read"), null);
   return response.text();
 }
 
@@ -368,6 +371,6 @@ export async function fetchArtifactJson<T>(id: string): Promise<T> {
   const response = await fetch(artifactContentUrl(id), {
     credentials: "same-origin",
   });
-  if (!response.ok) throw new ApiError(response.status, "A melléklet nem olvasható", null);
+  if (!response.ok) throw new ApiError(response.status, t("A melléklet nem olvasható", "The attachment cannot be read"), null);
   return response.json() as Promise<T>;
 }

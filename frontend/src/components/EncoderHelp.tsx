@@ -2,18 +2,24 @@ import { CircleHelp } from "lucide-react";
 import { useState } from "react";
 import { encoderHelp } from "../encoderHelp";
 import type { EncoderHelpEntry, HelpEncoder } from "../encoderHelp";
+import { t } from "../i18n";
 import { Badge, Modal } from "./ui";
 
-const ROWS: Array<{ key: keyof EncoderHelpEntry; label: string }> = [
-  { key: "effect", label: "Hatás" },
-  { key: "values", label: "Szokásos értékek" },
-  { key: "grain", label: "Szemcsés film" },
-  { key: "clean", label: "Tiszta, digitális film" },
-  { key: "animation", label: "Animáció" },
-  { key: "aither", label: "Aither-gyakorlat" },
-  { key: "ncore", label: "nCore / magyar szabvány" },
-  { key: "caution", label: "Figyelem" },
-];
+type HelpRowKey = "effect" | "values" | "grain" | "clean" | "animation" | "aither" | "ncore" | "caution";
+
+/** The labelled rows under a setting's description, in display order. */
+function helpRows(): Array<{ key: HelpRowKey; label: string }> {
+  return [
+    { key: "effect", label: t("Hatás", "Effect") },
+    { key: "values", label: t("Szokásos értékek", "Typical values") },
+    { key: "grain", label: t("Szemcsés film", "Grainy film") },
+    { key: "clean", label: t("Tiszta, digitális film", "Clean, digital film") },
+    { key: "animation", label: t("Animáció", "Animation") },
+    { key: "aither", label: t("Aither-gyakorlat", "Aither practice") },
+    { key: "ncore", label: t("nCore / magyar szabvány", "nCore / Hungarian standard") },
+    { key: "caution", label: t("Figyelem", "Caution") },
+  ];
+}
 
 /** One setting's full help: what it does, its effect and the usual values. */
 export function HelpEntryView({ entry, encoder }: { entry: EncoderHelpEntry; encoder?: HelpEncoder }) {
@@ -26,9 +32,9 @@ export function HelpEntryView({ entry, encoder }: { entry: EncoderHelpEntry; enc
       </header>
       <p>{entry.what}</p>
       <dl>
-        {ROWS.map(({ key, label }) => {
+        {helpRows().map(({ key, label }) => {
           const text = entry[key];
-          return typeof text === "string" && text ? <div key={key}><dt>{label}</dt><dd>{text}</dd></div> : null;
+          return text ? <div key={key}><dt>{label}</dt><dd>{text}</dd></div> : null;
         })}
       </dl>
     </article>
@@ -45,8 +51,8 @@ export function FieldHelpButton({ field, encoder }: { field: string; encoder?: H
       <button
         type="button"
         className="field-help-button"
-        aria-label={`${entry.title}: súgó`}
-        title="Súgó"
+        aria-label={t(`${entry.title}: súgó`, `${entry.title}: help`)}
+        title={t("Súgó", "Help")}
         onClick={(event) => {
           // The button sits inside the field's <label>: do not toggle the control.
           event.preventDefault();
@@ -56,7 +62,7 @@ export function FieldHelpButton({ field, encoder }: { field: string; encoder?: H
       >
         <CircleHelp size={15} aria-hidden="true" />
       </button>
-      <Modal open={open} title={`Súgó: ${entry.title}`} onClose={() => setOpen(false)}>
+      <Modal open={open} title={t(`Súgó: ${entry.title}`, `Help: ${entry.title}`)} onClose={() => setOpen(false)}>
         <HelpEntryView entry={entry} encoder={encoder} />
       </Modal>
     </>

@@ -277,8 +277,10 @@ from .qc.integrity import (
     video_stream_hash_command,
 )
 from .queue import JobQueue
+from .i18n import t
 from .live_progress import (
     LiveProgress,
+    LiveText,
     media_seconds_in_tail,
     percent_in_tail,
     time_fraction,
@@ -1836,8 +1838,12 @@ def _derive_color(
             }
             suggestion_reason = "HD SDR Blu-ray source profile"
         raise ReviewRequired(
-            "A forr\u00e1s sz\u00ednmetaadata hi\u00e1nyos. Ellen\u0151rizd \u00e9s er\u0151s\u00edtsd meg "
-            "a sz\u00ednteret a vide\u00f3be\u00e1ll\u00edt\u00e1sokn\u00e1l.",
+            t(
+                "A forr\u00e1s sz\u00ednmetaadata hi\u00e1nyos. Ellen\u0151rizd \u00e9s er\u0151s\u00edtsd meg "
+                "a sz\u00ednteret a vide\u00f3be\u00e1ll\u00edt\u00e1sokn\u00e1l.",
+                "The source colour metadata is incomplete. Check and confirm "
+                "the colour space in the video settings.",
+            ),
             details={
                 "code": "source_color_confirmation_required",
                 "playlist_id": playlist.playlist_id,
@@ -1870,7 +1876,10 @@ def _derive_color(
             missing_confirmation = sorted(expected_fields - set(confirmation))
             unknown_confirmation = sorted(set(confirmation) - expected_fields)
             raise ReviewRequired(
-                "A sz\u00ednmetaadat meger\u0151s\u00edt\u00e9se nem teljes.",
+                t(
+                    "A sz\u00ednmetaadat meger\u0151s\u00edt\u00e9se nem teljes.",
+                    "The colour metadata confirmation is incomplete.",
+                ),
                 details={
                     "code": "invalid_source_color_confirmation",
                     "playlist_id": playlist.playlist_id,
@@ -1895,7 +1904,10 @@ def _derive_color(
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ReviewRequired(
-                f"A sz\u00ednmetaadat meger\u0151s\u00edt\u00e9se \u00e9rv\u00e9nytelen: {exc}",
+                t(
+                    f"A sz\u00ednmetaadat meger\u0151s\u00edt\u00e9se \u00e9rv\u00e9nytelen: {exc}",
+                    f"The colour metadata confirmation is invalid: {exc}",
+                ),
                 details={
                     "code": "invalid_source_color_confirmation",
                     "playlist_id": playlist.playlist_id,
@@ -2592,9 +2604,18 @@ class PipelineWorker:
 
     @contextlib.contextmanager
     def _step(
-        self, paths: JobPaths, key: str, label: str, *, detail: str | None = None
+        self,
+        paths: JobPaths,
+        key: str,
+        label: LiveText,
+        *,
+        detail: LiveText | None = None,
     ) -> Iterator[LiveProgress]:
-        """Report one step of the pipeline to the UI while its body runs."""
+        """Report one step of the pipeline to the UI while its body runs.
+
+        ``label`` and ``detail`` are ``(hungarian, english)`` pairs: the API
+        serves them in the interface language of the request.
+        """
 
         live = self._live(paths)
         live.start(key, label, detail=detail)
@@ -2732,7 +2753,7 @@ class PipelineWorker:
         if controlled is not None:
             return controlled
         if job.state is JobState.SCANNING:
-            with self._step(paths, "scan", "Lemez beolvasása"):
+            with self._step(paths, "scan", ("Lemez beolvasása", "Reading the disc")):
                 self._scan(job, paths)
         elif job.state is JobState.READY:
             self._prepare(job, paths)
@@ -2741,16 +2762,16 @@ class PipelineWorker:
                 self._prepare(job, paths, advance=False)
             self._encode(job, paths)
         elif job.state is JobState.MUXING:
-            with self._step(paths, "mux", "Muxolás"):
+            with self._step(paths, "mux", ("Muxolás", "Muxing")):
                 self._mux(job, paths)
         elif job.state is JobState.QC:
-            with self._step(paths, "qc", "Minőségellenőrzés (QC)"):
+            with self._step(paths, "qc", ("Minőségellenőrzés (QC)", "Quality check (QC)")):
                 self._qc(job, paths)
         elif job.state is JobState.COMPARISON:
-            with self._step(paths, "comparison", "Összehasonlítás"):
+            with self._step(paths, "comparison", ("Összehasonlítás", "Comparison")):
                 self._comparison(job, paths)
         elif job.state is JobState.UPLOADING:
-            with self._step(paths, "upload", "Képfeltöltés és lezárás"):
+            with self._step(paths, "upload", ("Képfeltöltés és lezárás", "Image upload and finalization")):
                 self._upload_and_finalize(job, paths)
         return self.database.get_job(job.id)
 
@@ -3362,7 +3383,7 @@ class PipelineWorker:
         started = time.monotonic()
         try:
             planned = sum(item.size for item in plan_files(scan.source, clips))
-            with self._step(paths, "staging", "Lemezfájlok helyi másolata") as step:
+            with self._step(paths, "staging", ("Lemezfájlok helyi másolata", "Local copy of the disc files")) as step:
                 staged = stage_disc(
                     scan.source,
                     cache_root,
@@ -3451,7 +3472,7 @@ class PipelineWorker:
         atomic_write_text(plan.script_path, content)
         live = self._live(paths)
         index_log = paths.logs / "source-index.log"
-        label = "Forrásindex"
+        label = ("Forrásindex", "Source index")
 
         def build(cancelled: Callable[[], bool]) -> None:
             runner.run(
@@ -3526,7 +3547,7 @@ class PipelineWorker:
                 paths.reference, duration_seconds, hwaccel=hwaccel
             )
             try:
-                with self._step(paths, "crop-scan", "Crop-keresés (GPU)") as step:
+                with self._step(paths, "crop-scan", ("Crop-keresés (GPU)", "Crop scan (GPU)")) as step:
                     self._run_reported(
                         paths,
                         command,
@@ -3555,7 +3576,11 @@ class PipelineWorker:
             paths.logs / f"crop-detect-keyframes-{index:02d}.log"
             for index in range(len(plan))
         ]
-        label = "Crop-keresés (CPU)" if segments == 1 else f"Crop-keresés (CPU, {segments} szál)"
+        label = (
+            ("Crop-keresés (CPU)", "Crop scan (CPU)")
+            if segments == 1
+            else (f"Crop-keresés (CPU, {segments} szál)", f"Crop scan (CPU, {segments} threads)")
+        )
         with self._step(paths, "crop-scan", label) as step:
 
             def probe() -> None:
@@ -3604,7 +3629,7 @@ class PipelineWorker:
         if hwaccel is not None:
             try:
                 with self._step(
-                    paths, "crop-scan", "Teljes crop-keresés (GPU)"
+                    paths, "crop-scan", ("Teljes crop-keresés (GPU)", "Full crop scan (GPU)")
                 ) as step:
                     self._run_reported(
                         paths,
@@ -3620,7 +3645,7 @@ class PipelineWorker:
                     paths.root.name,
                     hwaccel,
                 )
-        with self._step(paths, "crop-scan", "Teljes crop-keresés (CPU)") as step:
+        with self._step(paths, "crop-scan", ("Teljes crop-keresés (CPU)", "Full crop scan (CPU)")) as step:
             self._run_reported(
                 paths,
                 full_title_cropdetect_command(paths.reference),
@@ -3760,7 +3785,7 @@ class PipelineWorker:
                 {} if cancelled is None else {"interrupt_requested": cancelled}
             )
             live = self._live(paths)
-            label = "Forrás-integritás ellenőrzése"
+            label = ("Forrás-integritás ellenőrzése", "Source integrity check")
             failure: ProcessFailure | None = None
             try:
                 self._run_reported(
@@ -3985,7 +4010,7 @@ class PipelineWorker:
             return
         failed: list[float] = []
         runner = self._runner(paths)
-        with self._step(paths, "clip-joins", "Klipillesztések ellenőrzése") as step:
+        with self._step(paths, "clip-joins", ("Klipillesztések ellenőrzése", "Checking clip joins")) as step:
             for number, moment in enumerate(joins, start=1):
                 try:
                     runner.run(
@@ -4115,7 +4140,7 @@ class PipelineWorker:
                 )
             )
             remux_log = paths.logs / "reference-remux.log"
-            with self._step(paths, "remux", "Referencia-remux") as step:
+            with self._step(paths, "remux", ("Referencia-remux", "Reference remux")) as step:
                 self._run_reported(
                     paths,
                     command,
@@ -4129,7 +4154,7 @@ class PipelineWorker:
             if disc_root != scan.source:
                 remove_stage(self.settings.cache_root, scan.source)
 
-        with self._step(paths, "reference-hash", "Referencia ellenőrzőösszege"):
+        with self._step(paths, "reference-hash", ("Referencia ellenőrzőösszege", "Reference checksum")):
             reference_sha256 = sha256_file(paths.reference)
         source_video = playlist.video_streams[0].video
         assert source_video is not None
@@ -4269,14 +4294,14 @@ class PipelineWorker:
             # Resolve uncertain retained audio tracks now: this avoids discovering
             # a language problem only after a multi-hour video encode. Manual track
             # language choices remain authoritative and skip content inference.
-            with self._step(paths, "language", "Hangsávok nyelvének ellenőrzése"):
+            with self._step(paths, "language", ("Hangsávok nyelvének ellenőrzése", "Checking audio track languages")):
                 selection = self._resolve_selected_languages(job, scan, selection, paths)
         except BaseException:
             if index_build is not None:
                 index_build.cancel()
             raise
         if index_build is not None:
-            with self._step(paths, "source-index", "Forrásindex befejezése"):
+            with self._step(paths, "source-index", ("Forrásindex befejezése", "Finishing the source index")):
                 self._finish_source_index(paths, index_build)
         try:
             dynamic_plan = resolve_selection_dynamic_hdr(scan, selection)
@@ -4345,7 +4370,7 @@ class PipelineWorker:
         prepared_outputs = [paths.reference, paths.script, paths.plan_json]
         final_dynamic = dynamic_plan
         if selection.dynamic_hdr is not DynamicHdrMode.DISCARD:
-            with self._step(paths, "dynamic-hdr", "Dinamikus HDR-metaadat kinyerése"):
+            with self._step(paths, "dynamic-hdr", ("Dinamikus HDR-metaadat kinyerése", "Extracting dynamic HDR metadata")):
                 final_dynamic = self._dynamic_hdr(job, paths, scan, selection, dynamic_plan)
             selection = replace(
                 selection,
@@ -4353,7 +4378,7 @@ class PipelineWorker:
             )
             prepared_outputs.append(paths.analysis / "dynamic-hdr.json")
         if selection.auto_crf.enabled:
-            with self._step(paths, "auto-crf", "Automatikus CRF-keresés"):
+            with self._step(paths, "auto-crf", ("Automatikus CRF-keresés", "Automatic CRF search")):
                 outcome = self._auto_crf(job, paths, scan, selection)
             if outcome.chosen_crf is not None:
                 selection = replace(
@@ -4718,7 +4743,10 @@ class PipelineWorker:
             done_probes = len(search.probes)
             live.update(
                 done_probes / config.max_iterations,
-                detail=f"{done_probes + 1}. próba: CRF {crf:g}",
+                detail=(
+                    f"{done_probes + 1}. próba: CRF {crf:g}",
+                    f"Probe {done_probes + 1}: CRF {crf:g}",
+                ),
                 force=True,
             )
             if not _valid_stage(probe_marker, probe_inputs, [evidence]):
@@ -5060,7 +5088,7 @@ class PipelineWorker:
                     )
 
                 reporter: EncodeProgressReporter | None = None
-                live.start("encode", "Videókódolás")
+                live.start("encode", ("Videókódolás", "Video encoding"))
                 try:
                     reporter = EncodeProgressReporter(
                         playlist.duration_seconds,
@@ -5102,7 +5130,7 @@ class PipelineWorker:
                         raise ProcessInterrupted()
                     if to_inject is not None:
                         with self._step(
-                            paths, "dynamic-hdr-inject", "HDR-metaadat beillesztése"
+                            paths, "dynamic-hdr-inject", ("HDR-metaadat beillesztése", "Injecting HDR metadata")
                         ):
                             self._inject_dynamic_hdr(
                                 paths, *to_inject, temporary_video, interrupted
@@ -5120,7 +5148,7 @@ class PipelineWorker:
                 if isinstance(error, ReviewRequired):
                     raise error from None
             raise
-        with self._step(paths, "integrity", "Forrás-integritás ellenőrzése"):
+        with self._step(paths, "integrity", ("Forrás-integritás ellenőrzése", "Source integrity check")):
             if check is not None:
                 check.wait()
             else:
@@ -5820,7 +5848,7 @@ class PipelineWorker:
                     effective_command,
                     probe=lambda: live.update(
                         time_fraction(decode_progress, title_seconds),
-                        detail="a kész fájl teljes dekódolása",
+                        detail=("a kész fájl teljes dekódolása", "full decode of the finished file"),
                     ),
                     cwd=paths.work,
                     stdout_path=decode_progress,
@@ -6528,7 +6556,10 @@ class PipelineWorker:
         for final_audio_ordinal, (number, item, stream) in enumerate(retained):
             self._live(paths).update(
                 final_audio_ordinal / max(1, len(retained)),
-                detail=f"hangsáv {final_audio_ordinal + 1} / {len(retained)} ellenőrzése",
+                detail=(
+                    f"hangsáv {final_audio_ordinal + 1} / {len(retained)} ellenőrzése",
+                    f"checking audio track {final_audio_ordinal + 1} / {len(retained)}",
+                ),
                 force=True,
             )
             audio_policy = effective_audio_policy(
@@ -7681,7 +7712,12 @@ class PipelineWorker:
             # The two sampled decodes read different files (UHD: 18 + 12 min
             # one after the other).
             self._live(paths).update(
-                0.05, detail="képtípusok vizsgálata a mintaszakaszokon", force=True
+                0.05,
+                detail=(
+                    "képtípusok vizsgálata a mintaszakaszokon",
+                    "checking frame types in the sample sections",
+                ),
+                force=True,
             )
             self._run_independent(paths, [probe_encoded_frames, probe_source_frames])
             encoded = parse_encoded_sample()
@@ -7801,7 +7837,7 @@ class PipelineWorker:
         for number, pair in enumerate(pairs, start=1):
             self._live(paths).update(
                 0.2 + 0.6 * (number - 1) / max(1, len(pairs)),
-                detail=f"képpár {number} / {len(pairs)}",
+                detail=(f"képpár {number} / {len(pairs)}", f"image pair {number} / {len(pairs)}"),
                 force=True,
             )
             label = f"{number:02d}-{pair.category}-f{pair.presentation_index:09d}"
@@ -8242,7 +8278,9 @@ class PipelineWorker:
             else comparison_base.height - selection.crop.top - selection.crop.bottom
         )
         self._live(paths).update(
-            0.85, detail="mintavett VMAF a kész fájlon", force=True
+            0.85,
+            detail=("mintavett VMAF a kész fájlon", "sampled VMAF on the finished file"),
+            force=True,
         )
         vmaf_report = self._sampled_final_vmaf(
             job,
@@ -8713,7 +8751,10 @@ class PipelineWorker:
                                     done = sum(1 for item in to_upload if item.name in uploaded)
                                     live.update(
                                         done / len(to_upload),
-                                        detail=f"{done} / {len(to_upload)} kép feltöltve",
+                                        detail=(
+                                            f"{done} / {len(to_upload)} kép feltöltve",
+                                            f"{done} / {len(to_upload)} images uploaded",
+                                        ),
                                     )
                                 self._stop_at_operator_boundary(job.id)
 

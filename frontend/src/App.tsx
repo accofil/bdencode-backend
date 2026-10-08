@@ -8,8 +8,11 @@ import { ComparisonsPage } from "./pages/ComparisonsPage";
 import { HelpPage } from "./pages/HelpPage";
 import { StatisticsPage } from "./pages/StatisticsPage";
 import { SystemPage } from "./pages/SystemPage";
+import { useLanguage } from "./i18n";
 
 export function App() {
+  // Subscribing here re-renders the whole tree when the language changes.
+  useLanguage();
   return (
     <Routes>
       <Route element={<Layout />}>

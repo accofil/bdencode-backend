@@ -1,6 +1,7 @@
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
+import { setLanguage } from "../i18n";
 import type { AIRecommendationStatus, CapabilitiesResponse, RuntimeCapabilitiesResponse } from "../api/types";
 import { renderApp } from "../test/render";
 import { SystemPage } from "./SystemPage";
@@ -278,5 +279,54 @@ describe("SystemPage runtime capabilities", () => {
     expect(screen.getByText("Bekötve, a worker áll")).toBeInTheDocument();
     expect(screen.getByText("Nincs a workerhez kötve")).toBeInTheDocument();
     expect(screen.getAllByText("bdencode-worker.service")).toHaveLength(3);
+  });
+
+  it("renders the System page in English", async () => {
+    setLanguage("en", { persist: false });
+    mockRuntime({
+      paths: {
+        data: {
+          path: "/home/encoder/encode",
+          exists: true,
+          readable: true,
+          writable: true,
+          free_bytes: 2 * 1024 ** 3,
+          total_bytes: 8 * 1024 ** 3,
+          ok: true,
+        },
+        sources: [],
+      },
+      host: { logical_cpus: 16 },
+      tools: { vspipe: { path: "/usr/bin/vspipe", version: "R70", available: true } },
+      image_upload_credentials: {
+        imgbb: {
+          configured: true,
+          runtime_loaded: null,
+          consumer_service: "bdencode-worker.service",
+          service_bound: true,
+          service_active: true,
+          ready_for_consumer: true,
+        },
+      },
+      worker_cpu_policy: { requested_percent: 75, logical_cpus: 16, systemd_cpu_quota_percent: 1200 },
+    });
+
+    renderApp(<SystemPage />, "/settings");
+
+    expect(await screen.findByRole("heading", { name: "Installed programs" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 1, name: "Server and capabilities" })).toBeInTheDocument();
+    expect(screen.getByText("System")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
+    expect(screen.getByText("Available")).toBeInTheDocument();
+    expect(screen.getByText("Processor")).toBeInTheDocument();
+    expect(screen.getAllByText("Storage").length).toBeGreaterThan(0);
+    expect(screen.getByText("2.00 GiB free")).toBeInTheDocument();
+    expect(screen.getByText("Ready to use")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "CPU share" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "AI adviser" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Save key" })).toHaveLength(2);
+    expect(screen.getByRole("heading", { name: "Release check and update" })).toBeInTheDocument();
+    expect(screen.getByText("Readable").nextElementSibling).toHaveTextContent("Yes");
+    expect(screen.queryByText("Telepített programok")).not.toBeInTheDocument();
   });
 });

@@ -29,13 +29,13 @@ def test_the_final_size_is_projected_from_ten_percent_on() -> None:
     assert early is not None
     assert early.output_bytes == 1_000_000_000
     assert early.projected_bytes is None  # 5 %: too early to say
-    assert "várható" not in encode_status_message(early)
+    assert "projected" not in encode_status_message(early)
 
     later = _block(parser, out_time_us=250_000_000, total_size=4_700_000_000, progress="continue")
     assert later is not None
     assert later.projected_bytes == 18_800_000_000
     assert later.details()["projected_bytes"] == 18_800_000_000
-    assert "várható videóméret ~18.8 GB" in encode_status_message(later)
+    assert "projected video size ~18.8 GB" in encode_status_message(later)
 
     unknown = _block(parser, out_time_us=300_000_000, total_size="N/A", progress="continue")
     assert unknown is not None
@@ -137,7 +137,7 @@ def test_reporter_throttles_database_updates_and_keeps_jsonl(
     assert len(records) == 3
     assert records[0][0] == pipeline_progress_baseline(JobState.ENCODING)
     assert records[-1][0] == pytest.approx(encoding_overall_progress(0.3))
-    assert "Videó kódolása: 30.0%" in records[-1][1]
+    assert "Encoding video: 30.0%" in records[-1][1]
     assert "fps" in records[1][1]
     assert "ETA" in records[1][1]
     assert records[0][2]["milestone_percent"] == 0

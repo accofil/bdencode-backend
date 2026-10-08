@@ -2,6 +2,7 @@ import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { Job } from "../api/types";
+import { setLanguage } from "../i18n";
 import { makeJob } from "../test/fixtures";
 import { renderApp } from "../test/render";
 import { JobCard, PipelineSteps } from "./JobCard";
@@ -112,5 +113,26 @@ describe("JobCard", () => {
     const pipeline = screen.getByRole("list", { name: "Kódolási folyamat" });
     expect(pipeline.querySelectorAll(".pipeline__step--complete")).toHaveLength(8);
     expect(screen.getByText("Kész")).toBeInTheDocument();
+  });
+
+  it("labels the controls, menu and pipeline in English", async () => {
+    setLanguage("en", { persist: false });
+    const user = userEvent.setup();
+    const job = {
+      ...makeJob({ state: "ENCODING" }),
+      control_state: "RUNNING",
+      allowed_operations: ["pause", "cancel", "delete"],
+    } as Job & { control_state: string; allowed_operations: string[] };
+
+    renderApp(<><JobCard job={job} onAction={vi.fn()} /><PipelineSteps job={job} /></>);
+
+    expect(screen.getByRole("link", { name: "Mintafilm details" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Mintafilm: pause" })).toHaveAttribute("title", "Pause");
+    await user.click(screen.getByRole("button", { name: "Mintafilm: more actions" }));
+    expect(screen.getByRole("menu", { name: "Mintafilm actions" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Cancel" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Delete" })).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "Encoding pipeline" })).toBeInTheDocument();
+    expect(screen.getByText("Encode")).toBeInTheDocument();
   });
 });

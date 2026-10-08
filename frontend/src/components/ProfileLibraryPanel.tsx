@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { BookMarked, Download, Save, Trash2, Upload } from "lucide-react";
 import { useRef, useState } from "react";
 import { api, ApiError } from "../api/client";
+import { t } from "../i18n";
 import type {
   AutoCrfConfig,
   DetailLevel,
@@ -39,13 +40,13 @@ function readText(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result ?? ""));
-    reader.onerror = () => reject(new Error("A fájl nem olvasható."));
+    reader.onerror = () => reject(new Error(t("A fájl nem olvasható.", "The file cannot be read.")));
     reader.readAsText(file);
   });
 }
 
 function message(error: unknown): string {
-  return error instanceof ApiError ? error.detail : error instanceof Error ? error.message : "Ismeretlen hiba";
+  return error instanceof ApiError ? error.detail : error instanceof Error ? error.message : t("Ismeretlen hiba", "Unknown error");
 }
 
 export function ProfileLibraryPanel({
@@ -134,11 +135,11 @@ export function ProfileLibraryPanel({
     try {
       const parsed: unknown = JSON.parse(await readText(file));
       if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new Error("A fájl nem BDEncode profil vagy profilcsomag.");
+        throw new Error(t("A fájl nem BDEncode profil vagy profilcsomag.", "The file is not a BDEncode profile or profile bundle."));
       }
       importer.mutate(parsed as Record<string, unknown>);
     } catch (error) {
-      setLocalError(error instanceof SyntaxError ? "A fájl nem érvényes JSON." : message(error));
+      setLocalError(error instanceof SyntaxError ? t("A fájl nem érvényes JSON.", "The file is not valid JSON.") : message(error));
     } finally {
       if (fileInput.current) fileInput.current.value = "";
     }
@@ -153,15 +154,15 @@ export function ProfileLibraryPanel({
       <div className="section-heading">
         <div>
           <span className="section-heading__icon"><BookMarked size={19} /></span>
-          <div><h3>Profilkönyvtár</h3><p>Mentett és megosztható kódolási profilok · csak hordozható beállítások</p></div>
+          <div><h3>{t("Profilkönyvtár", "Profile library")}</h3><p>{t("Mentett és megosztható kódolási profilok · csak hordozható beállítások", "Saved, shareable encoding profiles · portable settings only")}</p></div>
         </div>
         <div className="profile-library__tools">
-          <Button variant="ghost" icon={<Download size={16} />} onClick={() => void exportAll()} disabled={items.length === 0}>Teljes export</Button>
-          <Button variant="ghost" icon={<Upload size={16} />} loading={importer.isPending} onClick={() => fileInput.current?.click()}>Import</Button>
-          <select value={importMode} onChange={(event) => setImportMode(event.target.value as typeof importMode)} aria-label="Név ütközése importnál">
-            <option value="rename">Ütközés: átnevezés</option>
-            <option value="skip">Ütközés: kihagyás</option>
-            <option value="overwrite">Ütközés: felülírás</option>
+          <Button variant="ghost" icon={<Download size={16} />} onClick={() => void exportAll()} disabled={items.length === 0}>{t("Teljes export", "Export all")}</Button>
+          <Button variant="ghost" icon={<Upload size={16} />} loading={importer.isPending} onClick={() => fileInput.current?.click()}>{t("Import", "Import")}</Button>
+          <select value={importMode} onChange={(event) => setImportMode(event.target.value as typeof importMode)} aria-label={t("Név ütközése importnál", "Name conflict on import")}>
+            <option value="rename">{t("Ütközés: átnevezés", "Conflict: rename")}</option>
+            <option value="skip">{t("Ütközés: kihagyás", "Conflict: skip")}</option>
+            <option value="overwrite">{t("Ütközés: felülírás", "Conflict: overwrite")}</option>
           </select>
           <input
             ref={fileInput}
@@ -174,10 +175,10 @@ export function ProfileLibraryPanel({
         </div>
       </div>
 
-      {library.isLoading ? <LoadingPanel label="Profilok betöltése…" /> : library.isError ? (
-        <Notice tone="warning">A profilkönyvtár nem érhető el: {message(library.error)}</Notice>
+      {library.isLoading ? <LoadingPanel label={t("Profilok betöltése…", "Loading profiles…")} /> : library.isError ? (
+        <Notice tone="warning">{t("A profilkönyvtár nem érhető el:", "The profile library is not available:")} {message(library.error)}</Notice>
       ) : matching.length === 0 ? (
-        <p className="muted">Még nincs mentett {encoder} profil. Állítsd be a kódolást, majd mentsd el lentebb.</p>
+        <p className="muted">{t(`Még nincs mentett ${encoder} profil. Állítsd be a kódolást, majd mentsd el lentebb.`, `No saved ${encoder} profile yet. Set up the encode, then save it below.`)}</p>
       ) : (
         <ul className="profile-library__list">
           {matching.map((profile) => (
@@ -198,12 +199,12 @@ export function ProfileLibraryPanel({
                     onApply(profile.selection, profile);
                     setApplied(profile.name);
                   }}
-                  aria-label={`${profile.name} alkalmazása`}
+                  aria-label={t(`${profile.name} alkalmazása`, `Apply ${profile.name}`)}
                 >
-                  Alkalmaz
+                  {t("Alkalmaz", "Apply")}
                 </Button>
-                <Button variant="ghost" icon={<Download size={15} />} onClick={() => void exportOne(profile)} aria-label={`${profile.name} exportálása`}>Export</Button>
-                <button type="button" className="icon-button" aria-label={`${profile.name} törlése`} onClick={() => { remove.reset(); setDeleteTarget(profile); }}>
+                <Button variant="ghost" icon={<Download size={15} />} onClick={() => void exportOne(profile)} aria-label={t(`${profile.name} exportálása`, `Export ${profile.name}`)}>{t("Export", "Export")}</Button>
+                <button type="button" className="icon-button" aria-label={t(`${profile.name} törlése`, `Delete ${profile.name}`)} onClick={() => { remove.reset(); setDeleteTarget(profile); }}>
                   <Trash2 size={15} aria-hidden="true" />
                 </button>
               </div>
@@ -211,13 +212,16 @@ export function ProfileLibraryPanel({
           ))}
         </ul>
       )}
-      {hidden > 0 && <p className="muted">{hidden} másik kodekhez tartozó profil rejtve.</p>}
-      {applied && <Notice tone="success">A(z) „{applied}” profil bekerült a szerkeszthető mezőkbe. A végleges ellenőrzés továbbra is a Terv ellenőrzése lépésben történik.</Notice>}
+      {hidden > 0 && <p className="muted">{t(`${hidden} másik kodekhez tartozó profil rejtve.`, `${hidden} profile(s) for another codec hidden.`)}</p>}
+      {applied && <Notice tone="success">{t(`A(z) „${applied}” profil bekerült a szerkeszthető mezőkbe. A végleges ellenőrzés továbbra is a Terv ellenőrzése lépésben történik.`, `The “${applied}” profile was loaded into the editable fields. The final check still happens at the Check plan step.`)}</Notice>}
       {localError && <Notice tone="danger">{localError}</Notice>}
-      {importer.isError && <Notice tone="danger" title="Az import sikertelen">{message(importer.error)}</Notice>}
+      {importer.isError && <Notice tone="danger" title={t("Az import sikertelen", "Import failed")}>{message(importer.error)}</Notice>}
       {importResult && (
-        <Notice tone={importResult.errors.length ? "warning" : "success"} title="Import eredménye">
-          {importResult.imported.length} importálva, {importResult.skipped.length} kihagyva, {importResult.errors.length} hibás.
+        <Notice tone={importResult.errors.length ? "warning" : "success"} title={t("Import eredménye", "Import result")}>
+          {t(
+            `${importResult.imported.length} importálva, ${importResult.skipped.length} kihagyva, ${importResult.errors.length} hibás.`,
+            `${importResult.imported.length} imported, ${importResult.skipped.length} skipped, ${importResult.errors.length} failed.`,
+          )}
           {importResult.errors.length > 0 && (
             <ul>{importResult.errors.map((item, index) => <li key={index}>{item.name}: {item.message}</li>)}</ul>
           )}
@@ -232,36 +236,36 @@ export function ProfileLibraryPanel({
         }}
       >
         <label className="field">
-          <span>Aktuális beállítások mentése profilként</span>
-          <input value={name} onChange={(event) => { setName(event.target.value); setConflict(false); }} placeholder="Profil neve" maxLength={80} aria-label="Profil neve" />
+          <span>{t("Aktuális beállítások mentése profilként", "Save the current settings as a profile")}</span>
+          <input value={name} onChange={(event) => { setName(event.target.value); setConflict(false); }} placeholder={t("Profil neve", "Profile name")} maxLength={80} aria-label={t("Profil neve", "Profile name")} />
         </label>
         <label className="field">
-          <span>Leírás (nem kötelező)</span>
-          <input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Mire való?" maxLength={500} aria-label="Profil leírása" />
+          <span>{t("Leírás (nem kötelező)", "Description (optional)")}</span>
+          <input value={description} onChange={(event) => setDescription(event.target.value)} placeholder={t("Mire való?", "What is it for?")} maxLength={500} aria-label={t("Profil leírása", "Profile description")} />
         </label>
-        <Button type="submit" icon={<Save size={16} />} loading={save.isPending} disabled={!name.trim()}>Mentés</Button>
+        <Button type="submit" icon={<Save size={16} />} loading={save.isPending} disabled={!name.trim()}>{t("Mentés", "Save")}</Button>
       </form>
-      {save.isError && !conflict && <Notice tone="danger" title="A profil nem menthető">{message(save.error)}</Notice>}
-      {save.isSuccess && <Notice tone="success">A profil elmentve.</Notice>}
+      {save.isError && !conflict && <Notice tone="danger" title={t("A profil nem menthető", "The profile cannot be saved")}>{message(save.error)}</Notice>}
+      {save.isSuccess && <Notice tone="success">{t("A profil elmentve.", "Profile saved.")}</Notice>}
       {conflict && (
-        <Notice tone="warning" title="Már van ilyen nevű profil">
-          <Button variant="secondary" onClick={() => save.mutate(true)} loading={save.isPending}>Felülírás</Button>
+        <Notice tone="warning" title={t("Már van ilyen nevű profil", "A profile with this name already exists")}>
+          <Button variant="secondary" onClick={() => save.mutate(true)} loading={save.isPending}>{t("Felülírás", "Overwrite")}</Button>
         </Notice>
       )}
 
       <Modal
         open={deleteTarget !== null}
-        title="Törlöd a profilt?"
+        title={t("Törlöd a profilt?", "Delete the profile?")}
         busy={remove.isPending}
         onClose={() => { if (!remove.isPending) setDeleteTarget(null); }}
         footer={
           <>
-            <Button variant="ghost" disabled={remove.isPending} onClick={() => setDeleteTarget(null)}>Mégse</Button>
-            <Button variant="danger" loading={remove.isPending} onClick={() => deleteTarget && remove.mutate(deleteTarget.id)}>Törlés</Button>
+            <Button variant="ghost" disabled={remove.isPending} onClick={() => setDeleteTarget(null)}>{t("Mégse", "Cancel")}</Button>
+            <Button variant="danger" loading={remove.isPending} onClick={() => deleteTarget && remove.mutate(deleteTarget.id)}>{t("Törlés", "Delete")}</Button>
           </>
         }
       >
-        <p>A(z) „{deleteTarget?.name}” profil végleg törlődik a könyvtárból. A már elmentett munkák beállításait ez nem érinti.</p>
+        <p>{t(`A(z) „${deleteTarget?.name ?? ""}” profil végleg törlődik a könyvtárból. A már elmentett munkák beállításait ez nem érinti.`, `The “${deleteTarget?.name ?? ""}” profile is permanently deleted from the library. Settings of jobs already saved are not affected.`)}</p>
         {remove.isError && <Notice tone="danger">{message(remove.error)}</Notice>}
       </Modal>
     </Card>

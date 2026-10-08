@@ -3,13 +3,14 @@ import { Clapperboard, Film, Trash2, Volume2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, ApiError, previewUrl } from "../api/client";
 import type { PreviewRecord } from "../api/types";
+import { t } from "../i18n";
 import { formatBytes, formatDuration } from "../utils";
 import { Badge, Button, Card, EmptyState, LoadingPanel, Notice } from "./ui";
 
 const DURATION_CHOICES = [10, 20, 30];
 
 function errorText(error: unknown): string {
-  return error instanceof ApiError ? error.detail : error instanceof Error ? error.message : "Ismeretlen hiba";
+  return error instanceof ApiError ? error.detail : error instanceof Error ? error.message : t("Ismeretlen hiba", "Unknown error");
 }
 
 /**
@@ -52,18 +53,18 @@ export function PlayerPanel({ jobId }: { jobId: string }) {
     if (data && !heights.includes(height)) setHeight(heights[heights.length - 1]);
   }, [data, heights, height]);
 
-  if (info.isLoading) return <LoadingPanel label="A lejátszó adatainak betöltése…" />;
+  if (info.isLoading) return <LoadingPanel label={t("A lejátszó adatainak betöltése…", "Loading player data…")} />;
   if (info.isError || !data) {
     const error = info.error;
     const unavailable = error instanceof ApiError && error.status === 503;
     return (
       <EmptyState
         icon={<Clapperboard size={30} />}
-        title={unavailable ? "A lejátszó ezen a szerveren nem érhető el" : "A lejátszó még nem használható"}
+        title={unavailable ? t("A lejátszó ezen a szerveren nem érhető el", "The player is not available on this server") : t("A lejátszó még nem használható", "The player is not usable yet")}
         description={
           unavailable
-            ? "A kivonatok készítéséhez az ffmpeg és az ffprobe szükséges."
-            : `${errorText(error)}. A lejátszó a kész MKV elkészülte után nyílik meg.`
+            ? t("A kivonatok készítéséhez az ffmpeg és az ffprobe szükséges.", "Making excerpts needs ffmpeg and ffprobe.")
+            : `${errorText(error)}. ${t("A lejátszó a kész MKV elkészülte után nyílik meg.", "The player opens once the finished MKV exists.")}`
         }
       />
     );
@@ -80,8 +81,8 @@ export function PlayerPanel({ jobId }: { jobId: string }) {
           <div>
             <span className="section-heading__icon"><Film size={19} /></span>
             <div>
-              <h2>Beépített lejátszó</h2>
-              <p>Böngészőbarát H.264/AAC kivonat a kész MKV-ból · nem része a kiadásnak</p>
+              <h2>{t("Beépített lejátszó", "Built-in player")}</h2>
+              <p>{t("Böngészőbarát H.264/AAC kivonat a kész MKV-ból · nem része a kiadásnak", "Browser-friendly H.264/AAC excerpt of the finished MKV · not part of the release")}</p>
             </div>
           </div>
         </div>
@@ -95,19 +96,19 @@ export function PlayerPanel({ jobId }: { jobId: string }) {
               playsInline
               preload="metadata"
               src={previewUrl(jobId, active)}
-              aria-label="A kész MKV kivonata"
+              aria-label={t("A kész MKV kivonata", "Excerpt of the finished MKV")}
             />
           ) : (
             <div className="player-placeholder">
               <Clapperboard size={34} aria-hidden="true" />
-              <p>Válassz kezdőpontot, és készíts kivonatot a lejátszáshoz.</p>
+              <p>{t("Válassz kezdőpontot, és készíts kivonatot a lejátszáshoz.", "Pick a start point and make an excerpt to play.")}</p>
             </div>
           )}
         </div>
 
         <div className="player-controls">
           <label className="field player-start">
-            <span>Kezdőpont: {formatDuration(start)} / {formatDuration(total)}</span>
+            <span>{t("Kezdőpont", "Start")}: {formatDuration(start)} / {formatDuration(total)}</span>
             <input
               type="range"
               min={0}
@@ -115,42 +116,42 @@ export function PlayerPanel({ jobId }: { jobId: string }) {
               step={1}
               value={Math.min(start, maxStart)}
               onChange={(event) => setStart(Number(event.target.value))}
-              aria-label="Kivonat kezdőpontja"
+              aria-label={t("Kivonat kezdőpontja", "Excerpt start point")}
             />
           </label>
-          <div className="player-nudge" role="group" aria-label="Kezdőpont léptetése">
-            <Button variant="ghost" onClick={() => setStart((value) => Math.max(0, value - 60))}>−1 perc</Button>
-            <Button variant="ghost" onClick={() => setStart((value) => Math.min(maxStart, value + 60))}>+1 perc</Button>
+          <div className="player-nudge" role="group" aria-label={t("Kezdőpont léptetése", "Step the start point")}>
+            <Button variant="ghost" onClick={() => setStart((value) => Math.max(0, value - 60))}>{t("−1 perc", "−1 min")}</Button>
+            <Button variant="ghost" onClick={() => setStart((value) => Math.min(maxStart, value + 60))}>{t("+1 perc", "+1 min")}</Button>
           </div>
           <label className="field">
-            <span>Hossz</span>
-            <select value={duration} onChange={(event) => setDuration(Number(event.target.value))} aria-label="Kivonat hossza">
+            <span>{t("Hossz", "Length")}</span>
+            <select value={duration} onChange={(event) => setDuration(Number(event.target.value))} aria-label={t("Kivonat hossza", "Excerpt length")}>
               {DURATION_CHOICES.filter((value) => value >= data.limits.min_duration_seconds && value <= data.limits.max_duration_seconds).map((value) => (
-                <option key={value} value={value}>{value} másodperc</option>
+                <option key={value} value={value}>{value} {t("másodperc", "seconds")}</option>
               ))}
             </select>
           </label>
           <label className="field">
-            <span>Felbontás</span>
-            <select value={height} onChange={(event) => setHeight(Number(event.target.value))} aria-label="Kivonat felbontása">
+            <span>{t("Felbontás", "Resolution")}</span>
+            <select value={height} onChange={(event) => setHeight(Number(event.target.value))} aria-label={t("Kivonat felbontása", "Excerpt resolution")}>
               {heights.map((value) => <option key={value} value={value}>{value}p</option>)}
             </select>
           </label>
           <Button icon={<Clapperboard size={17} />} loading={create.isPending} onClick={() => create.mutate()}>
-            Kivonat készítése
+            {t("Kivonat készítése", "Make excerpt")}
           </Button>
         </div>
-        {create.isPending && <p className="muted">A kivonat készül; UHD forrásnál ez akár fél percig is tarthat…</p>}
-        {create.isError && <Notice tone="danger" title="A kivonat nem készült el">{errorText(create.error)}</Notice>}
+        {create.isPending && <p className="muted">{t("A kivonat készül; UHD forrásnál ez akár fél percig is tarthat…", "Making the excerpt; with a UHD source this can take up to half a minute…")}</p>}
+        {create.isError && <Notice tone="danger" title={t("A kivonat nem készült el", "The excerpt was not made")}>{errorText(create.error)}</Notice>}
         {remove.isError && <Notice tone="danger">{errorText(remove.error)}</Notice>}
         {video?.hdr && (
-          <Notice tone="info">HDR forrás: a kivonat SDR-re tone-map-elt, ezért a színek eltérnek a valódi HDR megjelenéstől.</Notice>
+          <Notice tone="info">{t("HDR forrás: a kivonat SDR-re tone-map-elt, ezért a színek eltérnek a valódi HDR megjelenéstől.", "HDR source: the excerpt is tone-mapped to SDR, so its colours differ from the real HDR look.")}</Notice>
         )}
       </Card>
 
       {data.chapters.length > 0 && (
         <Card>
-          <span className="eyebrow">Fejezetek</span>
+          <span className="eyebrow">{t("Fejezetek", "Chapters")}</span>
           <ul className="player-chapters">
             {data.chapters.map((chapter, index) => (
               <li key={`${chapter.start_seconds}-${index}`}>
@@ -164,9 +165,9 @@ export function PlayerPanel({ jobId }: { jobId: string }) {
       )}
 
       <Card>
-        <span className="eyebrow">Elkészült kivonatok</span>
+        <span className="eyebrow">{t("Elkészült kivonatok", "Finished excerpts")}</span>
         {data.previews.length === 0 ? (
-          <p className="muted">Még nincs kivonat ehhez a munkához.</p>
+          <p className="muted">{t("Még nincs kivonat ehhez a munkához.", "No excerpt for this job yet.")}</p>
         ) : (
           <ul className="preview-list">
             {data.previews.map((preview: PreviewRecord) => (
@@ -178,7 +179,7 @@ export function PlayerPanel({ jobId }: { jobId: string }) {
                 <button
                   type="button"
                   className="icon-button"
-                  aria-label={`Kivonat törlése (${formatDuration(preview.start_seconds)})`}
+                  aria-label={`${t("Kivonat törlése", "Delete excerpt")} (${formatDuration(preview.start_seconds)})`}
                   disabled={remove.isPending}
                   onClick={() => remove.mutate(preview.name)}
                 >
@@ -191,12 +192,12 @@ export function PlayerPanel({ jobId }: { jobId: string }) {
       </Card>
 
       <Card>
-        <span className="eyebrow">Az MKV adatai</span>
+        <span className="eyebrow">{t("Az MKV adatai", "MKV details")}</span>
         <dl className="summary-list summary-list--stacked">
-          <div><dt>Hossz</dt><dd>{formatDuration(data.duration_seconds)}</dd></div>
+          <div><dt>{t("Hossz", "Length")}</dt><dd>{formatDuration(data.duration_seconds)}</dd></div>
           {video && (
             <div>
-              <dt>Videó</dt>
+              <dt>{t("Videó", "Video")}</dt>
               <dd>
                 {(video.codec ?? "?").toUpperCase()} · {video.width}×{video.height}
                 {video.hdr && <> <Badge tone="info">HDR</Badge></>}
@@ -204,7 +205,7 @@ export function PlayerPanel({ jobId }: { jobId: string }) {
             </div>
           )}
           <div>
-            <dt><Volume2 size={13} aria-hidden="true" /> Hangsávok</dt>
+            <dt><Volume2 size={13} aria-hidden="true" /> {t("Hangsávok", "Audio tracks")}</dt>
             <dd>
               {data.audio.length === 0
                 ? "—"
@@ -215,7 +216,7 @@ export function PlayerPanel({ jobId }: { jobId: string }) {
                 ))}
             </dd>
           </div>
-          <div><dt>Feliratok</dt><dd>{data.subtitles}</dd></div>
+          <div><dt>{t("Feliratok", "Subtitles")}</dt><dd>{data.subtitles}</dd></div>
         </dl>
       </Card>
     </div>

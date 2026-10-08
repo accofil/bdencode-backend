@@ -353,3 +353,9 @@ input:checked + .toggle::after { left: 19px; background: white; }
   .ai-provider-list { grid-template-columns: 1fr; }
   .ai-adviser-panel .section-heading { display: grid; }
 }
+
+/* Interface language switch in the sidebar. */
+.language-switch { display: flex; gap: 4px; margin-top: 10px; }
+.language-switch__option { flex: 1; min-height: 30px; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); background: transparent; font: inherit; font-size: 12px; font-weight: 700; letter-spacing: .04em; cursor: pointer; }
+.language-switch__option:hover { color: var(--text); }
+.language-switch__option--active { color: var(--text); border-color: rgba(101, 214, 179, .45); background: rgba(101, 214, 179, .1); }

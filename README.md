@@ -344,7 +344,7 @@ Bal oldalon a menü:
 | **Rendszer** | a szerver állapota és beállításai |
 | **Súgó** | magyar nyelvű súgó minden kódolási beállításhoz |
 
-A menü tetején, a BDEncode felirat alatt látszik a telepített verzió.
+A menü tetején, a BDEncode felirat alatt látszik a telepített verzió. A menü alján a **HU / EN** gombbal válthatsz nyelvet (magyar vagy angol); első alkalommal a böngésződ nyelvét használja.
 
 ### 7.2. A Rendszer oldal ellenőrzése
 

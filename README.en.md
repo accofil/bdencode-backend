@@ -8,7 +8,7 @@ BDEncode turns a disc folder (the disc's `BDMV` folder) into a finished MKV file
 > BDEncode is in **testing (beta)**. Try it first on a shorter or less important disc, and always watch the finished MKV in a player.
 
 > [!NOTE]
-> **The web interface is in Hungarian.** This guide gives every button and menu item with its Hungarian label first and an English translation in brackets, for example **Új kódolás** (New encode), so you can find it on the page.
+> **The web interface speaks English and Hungarian.** Switch with the **HU / EN** buttons at the bottom of the menu; on the first visit it follows your browser's language. This guide uses the English names of buttons and menu items.
 
 *Magyar változat: [README.md](README.md). The detailed technical reference (in Hungarian): [docs/REFERENCE.md](docs/REFERENCE.md).*
 
@@ -338,31 +338,31 @@ The menu on the left:
 
 | Menu item | What for? |
 |---|---|
-| **Áttekintés** (Overview) | summary of the running job and the queue |
-| **Új kódolás** (New encode) | add a new disc |
-| **Várólista** (Queue) | all jobs and their states |
-| **Elkészült munkák** (Finished jobs) | the finished films |
-| **Összehasonlítások** (Comparisons) | the comparison screenshots |
-| **Statisztika** (Statistics) | sizes, quality, speed |
-| **Rendszer** (System) | server status and settings |
-| **Súgó** (Help) | help for every encoding setting (Hungarian) |
+| **Overview** | summary of the running job and the queue |
+| **New encode** | add a new disc |
+| **Queue** | all jobs and their states |
+| **Finished jobs** | the finished films |
+| **Comparisons** | the comparison screenshots |
+| **Statistics** | sizes, quality, speed |
+| **System** | server status and settings |
+| **Help** | help for every encoding setting |
 
-The installed version is shown at the top of the menu, under the BDEncode title.
+The installed version is shown at the top of the menu, under the BDEncode title. The **HU / EN** buttons at the bottom of the menu switch the language.
 
 ### 7.2. Check the System page
 
-Open **Rendszer** (System) and look at:
+Open **System** and look at:
 
 - **Backend: Online** – the program runs;
-- **Telepített programok** (Installed programs): **Elérhető** (Available) next to each, and **VapourSynth OK** in the card's header;
-- **Tárhely** (Storage): enough free space?
-- **Processzor** (Processor): the number of logical CPUs, the CPU share, and whether there is a GPU for the crop search (no GPU is fine).
+- **Installed programs**: **Available** next to each, and **VapourSynth OK** in the card's header;
+- **Storage**: enough free space?
+- **Processor**: the number of logical CPUs, the CPU share, and whether there is a GPU for the crop search (no GPU is fine).
 
 If anything is red, see [section 13](#13-when-something-goes-wrong).
 
 ### 7.3. Set the CPU share
 
-On **Rendszer** (System), the **CPU-keret** (CPU share) card sets the largest share of the CPU the encoder may use. You can set a separate night value too (for example 100% at night, 60% during the day) if other things run on the machine by day. The change takes effect within seconds, even for a running encode.
+On **System**, the **CPU-keret** (CPU share) card sets the largest share of the CPU the encoder may use. You can set a separate night value too (for example 100% at night, 60% during the day) if other things run on the machine by day. The change takes effect within seconds, even for a running encode.
 
 ---
 
@@ -430,15 +430,15 @@ install_bdencode_secret freeimage-api-key
   cd ~/bdencode-backend && bash install/install.sh
   ```
 
-Check: on **Rendszer** (System), the image hosts show **Használatra kész** (Ready to use).
+Check: on **System**, the image hosts show **Ready to use**.
 
 ## 9. AI adviser (optional)
 
 An AI (OpenAI or Claude) can suggest encoding settings from the disc's technical data and the goal you describe. You need your own API key (the provider may charge for it). Everything else works without a key.
 
-1. Open **Rendszer** (System) and find the **AI tanácsadó** (AI adviser) card.
-2. In the row of the provider you want, enter the key and click **Kulcs mentése** (Save key).
-3. After a few seconds the row shows **Kulcs beállítva** (Key set).
+1. Open **System** and find the **AI adviser** card.
+2. In the row of the provider you want, enter the key and click **Save key**.
+3. After a few seconds the row shows **Key set**.
 
 The AI never receives the film, images or file names, only a short technical summary. Its suggestion only fills in the fields; you still approve them.
 
@@ -448,100 +448,100 @@ The AI never receives the film, images or file names, only a short technical sum
 
 ### 10.1. Create a job
 
-1. Click **Új kódolás** (New encode).
-2. **Forrás** (Source): click the disc's folder. Folders containing `BDMV` are marked **Blu-ray forrás** (Blu-ray source). If you do not see your disc, click **Frissítés** (Refresh).
-3. Click **Tovább** (Next).
-4. **Tartalom** (Content): enter a job name (for example the film's title), check the disc type (BD or UHD), and choose what is on the disc: **Film**, **Koncert** (Concert), **Anime** or **Sorozatlemez** (Series disc).
-5. **Munkamód** (Mode): the first time, choose **Kezdő** (Beginner). Here you can also switch **Comparison képek feltöltése** (Upload comparison images) on or off.
-6. Click **Munka létrehozása és scan** (Create job and scan).
+1. Click **New encode**.
+2. **Source**: click the disc's folder. Folders containing `BDMV` are marked **Blu-ray source**. If you do not see your disc, click **Refresh**.
+3. Click **Next**.
+4. **Content**: enter a job name (for example the film's title), check the disc type (BD or UHD), and choose what is on the disc: **Film**, **Concert**, **Anime** or **Series disc**.
+5. **Mode**: the first time, choose **Beginner**. Here you can also switch **Upload comparison images** on or off.
+6. Click **Create job and scan**.
 
 The scan maps the disc in a few minutes. This is not the encode yet.
 
 ### 10.2. The settings wizard
 
-When the scan is done, the job page shows the **Te következel** (Your turn) card. Open the **Beállítások** (Settings) tab. The wizard has four steps:
+When the scan is done, the job page shows the **Your turn** card. Open the **Settings** tab. The wizard has four steps:
 
 **1. Playlist** – the film versions on the disc. Usually the longest one is the film, but take care:
 
 - if several have a similar length, they can be the theatrical cut, the director's cut or another edit: compare the length, the number of chapters and audio tracks;
 - some discs contain fake "trap" playlists; the program marks them.
 
-**2. Sávok** (Tracks) – audio and subtitle tracks.
+**2. Tracks** – audio and subtitle tracks.
 
-- At the top you can choose a **tracker profile** (Aither or nCore). The **Sávterv igazítása** (Arrange tracks) button then orders the tracks by the tracker's rules, and the **Mi változott** (What changed) list shows what it changed.
-- For each audio track choose what happens to it: **Copy** (kept unchanged), **FLAC**, **AC-3**, **E-AC-3**, **DTS** or **Kihagyás** (Omit). If unsure, keep the suggested value.
+- At the top you can choose a **tracker profile** (Aither or nCore). The **Arrange tracks** button then orders the tracks by the tracker's rules, and the **What changed** list shows what it changed.
+- For each audio track choose what happens to it: **Copy** (kept unchanged), **FLAC**, **AC-3**, **E-AC-3**, **DTS** or **Omit**. If unsure, keep the suggested value.
 - For each kept subtitle you must choose **Teljes felirat** (Full subtitle) or **Forced / signs**.
 - If a track's language is missing or uncertain, the program tells you; choose it by hand.
 
-**3. Videó** (Video) – the encoding settings.
+**3. Video** – the encoding settings.
 
 - In Beginner mode the program gives safe defaults; just keep them.
-- The **?** button next to every setting opens an explanation (in Hungarian).
-- If you set up the AI adviser, you can ask it here (**AI-javaslat kérése**, Ask for an AI suggestion).
+- The **?** button next to every setting opens an explanation.
+- If you set up the AI adviser, you can ask it here (**Ask for an AI suggestion**).
 - Cropping the black bars is automatic.
 
-**4. Ellenőrzés** (Check)
+**4. Check**
 
-1. Enter the output name. With a tracker profile, **Név javaslata** (Suggest name) builds a name that follows the rules (your browser remembers your release tag).
-2. Click **Terv ellenőrzése** (Check plan). The program checks all settings.
+1. Enter the output name. With a tracker profile, **Suggest name** builds a name that follows the rules (your browser remembers your release tag).
+2. Click **Check plan**. The program checks all settings.
 3. Fix anything shown in red. Read the yellow warnings.
-4. Click **Jóváhagyás és automatikus indítás** (Approve and start automatically).
+4. Click **Approve and start automatically**.
 
-The job is now **Kódolásra vár** (Waiting to encode), and if no other encode is running, it starts.
+The job is now **Waiting to encode**, and if no other encode is running, it starts.
 
 ### 10.3. Follow the job
 
 On the job page, the **Most fut** (Running now) panel shows what the program is doing (for example reference remux, crop search, encoding, quality check), how much is left, and while encoding the speed and the expected file size. You can close the page: the job keeps running in the background.
 
-The job's states in order (the queue and the job page show these): **Scanre vár** (Waiting for scan) → **Lemez elemzése** (Analysing disc) → **Beállításra vár** (Waiting for settings – your turn) → **Kódolásra vár** (Waiting to encode) → **Videó kódolása** (Encoding video; with the preparation, this is the longest) → **MKV összeállítása** (Building MKV) → **Minőség-ellenőrzés** (Quality check) → **Kép-összehasonlítás** (Comparison) → **Képek feltöltése** (Uploading images, if requested) → **Elkészült** (Finished).
+The job's states in order (the queue and the job page show these): **Waiting for scan** → **Analysing disc** → **Waiting for settings** (your turn) → **Waiting to encode** → **Encoding video** (with the preparation, this is the longest) → **Building MKV** → **Quality check** → **Comparison** → **Uploading images** (if requested) → **Finished**.
 
 ### 10.4. The finished film
 
-When the job is **Elkészült** (Finished):
+When the job is **Finished**:
 
 - **On Windows**, the desktop shortcut **BDEncode elkészült filmek** opens the folder of finished files.
 - **On a server**, finished films are here: `~/encode/completed/<film-name>/`.
 
-The folder holds the MKV and next to it the MediaInfo, the BBCode and the comparison images. On **Elkészült munkák** (Finished jobs), click the job to see the quality results, images and logs, and even peek into the film with the built-in player.
+The folder holds the MKV and next to it the MediaInfo, the BBCode and the comparison images. On **Finished jobs**, click the job to see the quality results, images and logs, and even peek into the film with the built-in player.
 
 **Always watch the finished film in a player:** the start, the end, a chapter change, and switch between the audio and subtitle tracks.
 
 ### 10.5. Release kit (optional)
 
-On the finished job's page, the **Release előkészítése** (Prepare release) panel assembles what you need for uploading: NFO, BBCode description, MediaInfo, verified images, checksums. You make the torrent from the finished MKV according to your tracker's rules and upload it yourself.
+On the finished job's page, the **Prepare release** panel assembles what you need for uploading: NFO, BBCode description, MediaInfo, verified images, checksums. You make the torrent from the finished MKV according to your tracker's rules and upload it yourself.
 
 ---
 
 ## 11. Everyday use
 
-**One encode runs at a time**, but meanwhile you can add and set up new discs: they wait as **Kódolásra vár** (Waiting to encode) and start automatically in turn.
+**One encode runs at a time**, but meanwhile you can add and set up new discs: they wait as **Waiting to encode** and start automatically in turn.
 
-**When the program asks you something** (the job is **Ellenőrzést kér**, Needs review), a card on the job page shows what to do. Common cases:
+**When the program asks you something** (the job shows **Needs review**), a card on the job page shows what to do. Common cases:
 
-- **language:** a track's language is unclear – choose it and click **Nyelvek megerősítése és folytatás** (Confirm languages and continue);
+- **language:** a track's language is unclear – choose it and click **Confirm languages and continue**;
 - **image upload:** the upload failed – retry, choose another host, or finish without images (none of these re-encodes the video).
 
-**Pause, cancel, restart** – in the job page's **Műveletek** (Actions) menu:
+**Pause, cancel, restart** – in the job page's **Actions** menu:
 
 | Action | What for? |
 |---|---|
-| **Szüneteltetés** / **Folytatás** (Pause / Resume) | stops the job for a while; finished steps are kept |
-| **Megszakítás** (Cancel) | stops the job |
-| **Újraindítás** (Restart, for a cancelled job) | **Újraindítás ugyanígy** (Restart unchanged): back to the queue with the same settings; **Beállítások módosítása** (Change settings): the wizard opens with the previous settings filled in and you can change anything |
-| **Folytatás a hibától** (Continue from the error, for a failed job) | continues where the error happened |
-| **Munka törlése** (Delete job) | deletes the job and its temporary files; the finished film and the original disc stay |
+| **Pause** / **Resume** | stops the job for a while; finished steps are kept |
+| **Cancel** | stops the job |
+| **Restart** (for a cancelled job) | **Restart unchanged**: back to the queue with the same settings; **Change settings**: the wizard opens with the previous settings filled in and you can change anything |
+| **Continue from the error** (for a failed job) | continues where the error happened |
+| **Delete job** | deletes the job and its temporary files; the finished film and the original disc stay |
 
 On restart the program keeps what the change does not affect (for example the disc read and the crop search) and redoes only what it must.
 
-**Free up space:** a finished job's temporary files can be removed with **Takarítás** (Clean up) on its page; the finished film stays. Never delete files by hand under a running job.
+**Free up space:** a finished job's temporary files can be removed with **Clean up** on its page; the finished film stays. Never delete files by hand under a running job.
 
 ---
 
 ## 12. Updates
 
-**Automatically:** once a day the program checks for a new release and, if no job is running, updates itself (on a server this needs [5.7](#57-allow-automatic-updates-recommended-optional)). If something goes wrong, the old version stays. The **Kiadáskeresés és frissítés** (Release check and update) card on **Rendszer** (System) shows the state.
+**Automatically:** once a day the program checks for a new release and, if no job is running, updates itself (on a server this needs [5.7](#57-allow-automatic-updates-recommended-optional)). If something goes wrong, the old version stays. The **Release check and update** card on **System** shows the state.
 
-If a browser tab left open still shows the old interface, the menu shows an **Oldal frissítése** (Reload page) button.
+If a browser tab left open still shows the old interface, the menu shows an **Reload page** button.
 
 **By hand, on Windows:** download the ZIP again ([4.2](#42-download)), unpack it over the old one and run `windows-install.cmd` as administrator. Your settings and jobs are kept.
 
@@ -562,13 +562,13 @@ Wait for a running encode to finish before updating.
 | **Windows:** `localhost:8787` does not open | Wait half a minute and reload. If it still fails, open PowerShell as administrator and run `Start-ScheduledTask -TaskName "BDEncode WSL"`, then `wsl -d Debian -- sudo systemctl restart bdencode-api bdencode-worker nginx` |
 | **Server:** `localhost:8787` does not open | Is the SSH tunnel window open ([5.8](#58-open-the-page-through-an-ssh-tunnel))? If yes, on the server: `sudo systemctl restart bdencode-api bdencode-worker nginx` |
 | **Swizzin:** `/encoder/` shows an error | On the server: `sudo systemctl restart bdencode-api bdencode-worker` and `sudo systemctl reload nginx` |
-| The disc does not show under **Új kódolás** | Did you give the right folder at installation? `BDMV` must be directly inside the disc's folder. Click **Frissítés** (Refresh). |
+| The disc does not show under **New encode** | Did you give the right folder at installation? `BDMV` must be directly inside the disc's folder. Click **Refresh**. |
 | The laptop went to sleep and encoding stopped | After waking up the job continues. Set the laptop not to sleep while plugged in. |
-| Out of space | Remove old finished jobs' temporary files (**Takarítás**) or unneeded jobs (**Munka törlése**). One job needs the space given in [section 2](#2-what-you-need). |
-| **Ellenőrzést kér** (Needs review) | Open the job: the card says what to do ([section 11](#11-everyday-use)). |
-| **Feltöltési hiba** (Upload failed) | On the job page: retry, another host, or finish without images. Check the image host keys ([section 8](#8-image-uploads-optional)). |
-| **Hibás** (Failed) | Read the error on the job page. **Folytatás a hibától** continues where it stopped. |
-| Encoding is very slow | Check the CPU share on **Rendszer** ([7.3](#73-set-the-cpu-share)). Slower settings (for example the `slower` preset) take much longer. |
+| Out of space | Remove old finished jobs' temporary files (**Clean up**) or unneeded jobs (**Delete job**). One job needs the space given in [section 2](#2-what-you-need). |
+| **Needs review** | Open the job: the card says what to do ([section 11](#11-everyday-use)). |
+| **Upload failed** | On the job page: retry, another host, or finish without images. Check the image host keys ([section 8](#8-image-uploads-optional)). |
+| **Failed** | Read the error on the job page. **Continue from the error** continues where it stopped. |
+| Encoding is very slow | Check the CPU share on **System** ([7.3](#73-set-the-cpu-share)). Slower settings (for example the `slower` preset) take much longer. |
 
 **Logs** (needed if you ask for help):
 

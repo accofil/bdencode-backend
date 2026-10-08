@@ -22,6 +22,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from .i18n import t
+
 AIProvider = Literal["openai", "anthropic"]
 AI_PROVIDERS: tuple[AIProvider, ...] = ("openai", "anthropic")
 PROVIDER_LABELS: dict[str, str] = {"openai": "OpenAI", "anthropic": "Claude (Anthropic)"}
@@ -63,7 +65,12 @@ class AIPreferences(BaseModel):
         if not value:
             return None
         if len(value) > 100 or MODEL_RE.fullmatch(value) is None:
-            raise ValueError("a modellnév csak betűt, számot és ._:- jelet tartalmazhat")
+            raise ValueError(
+                t(
+                    "a modellnév csak betűt, számot és ._:- jelet tartalmazhat",
+                    "the model name may contain only letters, digits and ._:-",
+                )
+            )
         return value
 
 
@@ -103,13 +110,27 @@ def validate_api_key(provider: AIProvider, value: str) -> str:
     key = value.strip()
     if API_KEY_RE.fullmatch(key) is None:
         raise ValueError(
-            "Az API-kulcs 20–400 karakter hosszú lehet, és csak betűt, számot, "
-            "kötőjelet és aláhúzást tartalmazhat."
+            t(
+                "Az API-kulcs 20–400 karakter hosszú lehet, és csak betűt, számot, "
+                "kötőjelet és aláhúzást tartalmazhat.",
+                "The API key must be 20–400 characters long and contain only letters, "
+                "digits, hyphens and underscores.",
+            )
         )
     if provider == "anthropic" and not key.startswith("sk-ant-"):
-        raise ValueError("Ez nem Claude-kulcsnak tűnik: az Anthropic API-kulcsa sk-ant- előtaggal kezdődik.")
+        raise ValueError(
+            t(
+                "Ez nem Claude-kulcsnak tűnik: az Anthropic API-kulcsa sk-ant- előtaggal kezdődik.",
+                "This does not look like a Claude key: Anthropic API keys start with sk-ant-.",
+            )
+        )
     if provider == "openai" and (not key.startswith("sk-") or key.startswith("sk-ant-")):
-        raise ValueError("Ez nem OpenAI-kulcsnak tűnik: az OpenAI API-kulcsa sk- előtaggal kezdődik.")
+        raise ValueError(
+            t(
+                "Ez nem OpenAI-kulcsnak tűnik: az OpenAI API-kulcsa sk- előtaggal kezdődik.",
+                "This does not look like an OpenAI key: OpenAI API keys start with sk-.",
+            )
+        )
     return key
 
 
