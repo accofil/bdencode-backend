@@ -184,3 +184,140 @@ def test_audio_frame_integer_evidence_is_strict(invalid_count: object) -> None:
 
     with pytest.raises(ValueError, match="integer audio-frame evidence|malformed"):
         parse_audio_frame_continuity(document)
+
+
+def _clip_track(
+    *,
+    jump_seconds: str = "0",
+    jump_at_frame: int = 100,
+    frames: int = 200,
+) -> tuple[str, ...]:
+    """A 1536-sample track whose timestamps jump once (a clip join)."""
+
+    jump = Decimal(jump_seconds)
+    return tuple(
+        str(
+            Decimal("10.000")
+            + Decimal("0.032") * index
+            + (jump if index >= jump_at_frame else Decimal(0))
+        )
+        for index in range(frames)
+    )
+
+
+def _eac3_policy():
+    return effective_audio_policy(
+        "eac3",
+        source_codec="truehd",
+        source_channels=8,
+        source_sample_rate=48_000,
+    )
+
+
+# Frame 100 starts 3.2 s after the first frame: the playlist's clip join.
+_JOIN = (Decimal("3.2"),)
+
+
+@pytest.mark.parametrize("jump", ("0.010", "-0.012", "0.200"))
+def test_gap_or_overlap_at_a_clip_join_is_recorded_not_failed(jump: str) -> None:
+    source = parse_audio_frame_continuity(
+        _frame_document(_clip_track(jump_seconds=jump))
+    )
+    encoded = parse_audio_frame_continuity(
+        _frame_document(_clip_track(jump_seconds=jump))
+    )
+
+    verdict = compare_audio_frame_continuity(
+        source, encoded, _eac3_policy(), join_seconds=_JOIN
+    )
+
+    assert not source.continuous
+    assert len(source.discontinuities) == 1
+    assert source.discontinuities[0].delta_samples == int(Decimal(jump) * 48_000)
+    assert verdict.passed
+    assert verdict.source_unexcused_discontinuities == 0
+    assert verdict.encoded_unexcused_discontinuities == 0
+    assert verdict.excused_join_discontinuities == 2
+    assert verdict.total_sample_delta == 0
+
+
+def test_an_encode_that_closes_a_join_gap_keeps_its_samples_and_passes() -> None:
+    source = parse_audio_frame_continuity(
+        _frame_document(_clip_track(jump_seconds="0.200"))
+    )
+    closed = parse_audio_frame_continuity(_frame_document(_clip_track()))
+
+    verdict = compare_audio_frame_continuity(
+        source, closed, _eac3_policy(), join_seconds=_JOIN
+    )
+
+    assert closed.continuous
+    assert verdict.normalized_end_delta_seconds == Decimal("-0.200")
+    assert verdict.join_slack_seconds == Decimal("0.2")
+    assert verdict.normalized_end_within_tolerance
+    assert verdict.passed
+    # Without the join the same endpoint difference is a failure.
+    assert not compare_audio_frame_continuity(source, closed, _eac3_policy()).passed
+
+
+def test_a_gap_away_from_every_clip_join_still_fails() -> None:
+    source = parse_audio_frame_continuity(
+        _frame_document(_clip_track(jump_seconds="0.010"))
+    )
+
+    verdict = compare_audio_frame_continuity(
+        source, source, _eac3_policy(), join_seconds=(Decimal("1.5"),)
+    )
+
+    assert not verdict.passed
+    assert verdict.source_unexcused_discontinuities == 1
+    assert verdict.excused_join_discontinuities == 0
+
+
+def test_a_join_gap_beyond_half_a_second_still_fails() -> None:
+    source = parse_audio_frame_continuity(
+        _frame_document(_clip_track(jump_seconds="0.600"))
+    )
+
+    verdict = compare_audio_frame_continuity(
+        source, source, _eac3_policy(), join_seconds=_JOIN
+    )
+
+    assert not verdict.passed
+    assert verdict.source_unexcused_discontinuities == 1
+
+
+def test_lost_sound_at_a_join_fails_on_the_total_sample_count() -> None:
+    source = parse_audio_frame_continuity(
+        _frame_document(_clip_track(jump_seconds="0.010"))
+    )
+    # The encode dropped three frames at the join and kept the timeline.
+    shortened = _clip_track(jump_seconds="0.010")
+    shortened = shortened[:100] + shortened[103:]
+    encoded = parse_audio_frame_continuity(_frame_document(shortened))
+
+    verdict = compare_audio_frame_continuity(
+        source, encoded, _eac3_policy(), join_seconds=_JOIN
+    )
+
+    assert verdict.total_sample_delta == -3 * 1536
+    assert not verdict.total_samples_within_tolerance
+    assert not verdict.passed
+
+
+def test_join_evidence_is_manifest_serializable() -> None:
+    source = parse_audio_frame_continuity(
+        _frame_document(_clip_track(jump_seconds="0.010"))
+    )
+    verdict = compare_audio_frame_continuity(
+        source, source, _eac3_policy(), join_seconds=_JOIN
+    )
+
+    assert source.to_dict()["discontinuities"] == [
+        {"position_seconds": "3.210", "delta_samples": 480}
+    ]
+    value = verdict.to_dict()
+    assert value["join_seconds"] == ["3.2"]
+    assert value["excused_join_discontinuities"] == 2
+    assert value["join_slack_seconds"] == "0.02"
+    assert value["passed"] is True

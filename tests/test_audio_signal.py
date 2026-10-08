@@ -185,24 +185,26 @@ def test_lossless_clipping_without_pcm_proof_still_fails(
     assert any("clipped/full-scale" in item for item in result.failures)
 
 
-def test_lossy_transcode_rejects_true_peak_overshoot_without_pcm_clipping() -> None:
+def test_lossy_transcode_reports_true_peak_overshoot_as_a_warning() -> None:
     source = parse_audio_analysis(_analysis_log(true_peak="-0.5"))
     encode = parse_audio_analysis(_analysis_log(true_peak="0.2", sample_peak="-0.1"))
 
     result = verify_audio_signal(source, encode, _policy("eac3"))
 
-    assert not result.passed
+    assert result.passed
     assert result.lossy_transcode
     assert result.true_peak_increase_db == Decimal("0.7")
-    assert any("above 0 dBTP" in item for item in result.failures)
+    assert result.failures == ()
+    assert any("above 0 dBTP" in item for item in result.warnings)
+    assert any("increased near-ceiling true peak" in item for item in result.warnings)
 
 
 @pytest.mark.parametrize(
-    ("encode_peak", "passed"),
-    (("-0.5", True), ("-0.4", False)),
+    ("encode_peak", "warned"),
+    (("-0.5", False), ("-0.4", True)),
 )
-def test_lossy_near_ceiling_true_peak_increase_has_point_three_db_limit(
-    encode_peak: str, passed: bool
+def test_lossy_near_ceiling_true_peak_increase_over_point_three_db_is_a_warning(
+    encode_peak: str, warned: bool
 ) -> None:
     source = parse_audio_analysis(_analysis_log(true_peak="-0.8"))
     encode = parse_audio_analysis(
@@ -211,11 +213,124 @@ def test_lossy_near_ceiling_true_peak_increase_has_point_three_db_limit(
 
     result = verify_audio_signal(source, encode, _policy())
 
+    assert result.passed
+    assert (
+        any("increased near-ceiling true peak" in item for item in result.warnings)
+        is warned
+    )
+
+
+@pytest.mark.parametrize("action", ("ac3", "eac3", "dts"))
+def test_loud_master_with_full_scale_source_samples_passes_a_lossy_encode(
+    action: str,
+) -> None:
+    """A loud Blu-ray master touches full scale; its lossy encode overshoots."""
+
+    source = parse_audio_analysis(
+        _analysis_log(true_peak="0.4", sample_peak="0.0", peak_count="37")
+    )
+    encode = parse_audio_analysis(
+        _analysis_log(
+            integrated="-18.4",
+            true_peak="0.9",
+            sample_peak="0.3",
+            peak_count="2",
+        )
+    )
+
+    result = verify_audio_signal(source, encode, _policy(action))
+
+    assert result.passed, result.failures
+    assert any(
+        "source audio contains 37 clipped/full-scale samples" in item
+        for item in result.warnings
+    )
+    assert any(
+        "encode audio contains 2 clipped/full-scale samples" in item
+        for item in result.warnings
+    )
+    assert any("encode true peak is 0.9 dBTP" in item for item in result.warnings)
+
+
+def test_dts_core_extraction_reports_source_clipping_as_a_warning() -> None:
+    source = parse_audio_analysis(_analysis_log(sample_peak="0.0", peak_count="12"))
+    encode = parse_audio_analysis(_analysis_log(sample_peak="0.0", peak_count="9"))
+    policy = effective_audio_policy(
+        "dts",
+        source_codec="dts",
+        source_profile="DTS-HD MA",
+        source_channels=8,
+        source_sample_rate=48_000,
+    )
+
+    result = verify_audio_signal(source, encode, policy)
+
+    assert result.passed
+    assert any("12 clipped/full-scale" in item for item in result.warnings)
+
+
+@pytest.mark.parametrize(
+    ("source_count", "encode_count", "passed"),
+    (
+        ("0", "1000", True),
+        ("0", "1001", False),
+        ("500", "5000", True),
+        ("500", "5001", False),
+    ),
+)
+def test_lossy_encode_fails_only_on_far_more_clipping_than_the_source(
+    source_count: str, encode_count: str, passed: bool
+) -> None:
+    source = parse_audio_analysis(
+        _analysis_log(
+            sample_peak="0.0" if source_count != "0" else "-0.5",
+            peak_count=source_count,
+        )
+    )
+    encode = parse_audio_analysis(
+        _analysis_log(sample_peak="0.0", peak_count=encode_count)
+    )
+
+    result = verify_audio_signal(source, encode, _policy())
+
     assert result.passed is passed
     if not passed:
-        assert any(
-            "increased near-ceiling true peak" in item for item in result.failures
+        assert any("far above the source's" in item for item in result.failures)
+
+
+@pytest.mark.parametrize(
+    ("encode_loudness", "passed"),
+    (("-15.2", True), ("-21.2", True), ("-15.1", False), ("-21.3", False)),
+)
+def test_lossy_encode_fails_on_a_large_integrated_loudness_shift(
+    encode_loudness: str, passed: bool
+) -> None:
+    source = parse_audio_analysis(_analysis_log(integrated="-18.2"))
+    encode = parse_audio_analysis(_analysis_log(integrated=encode_loudness))
+
+    result = verify_audio_signal(source, encode, _policy())
+
+    assert result.passed is passed
+    if not passed:
+        assert any("integrated loudness differs" in item for item in result.failures)
+
+
+def test_lossy_encode_of_an_audible_source_must_not_be_silent() -> None:
+    source = parse_audio_analysis(_analysis_log(integrated="-24.0"))
+    silent = parse_audio_analysis(
+        _analysis_log(
+            integrated="-inf",
+            loudness_range="0.0",
+            true_peak="-inf",
+            sample_peak="-inf",
+            peak_count="0",
         )
+    )
+
+    result = verify_audio_signal(source, silent, _policy())
+
+    assert not result.passed
+    assert "encode audio is silent while the source is audible" in result.failures
 
 
 def test_lossless_and_core_extraction_report_intersample_peak_without_false_failure() -> (
