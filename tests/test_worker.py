@@ -3071,19 +3071,32 @@ def test_mux_omits_chapter_option_when_playlist_has_none(context):
     assert "--chapters" not in mux_command
 
 
-def test_mkvmerge_warning_never_creates_a_resumable_success_marker(context):
-    database, settings, scan, scanner, _runner, _worker = context
+def _warning_runner(mux_output: str | None = None, identify_warnings: list[str] | None = None):
+    """A runner whose mkvmerge mux or identify finishes with warnings (exit 1)."""
 
-    class WarningMuxRunner(FakeRunner):
+    class WarningRunner(FakeRunner):
         def run(self, argv, **kwargs):
             super().run(argv, **kwargs)
             command = tuple(os.fspath(item) for item in argv)
-            return subprocess.CompletedProcess(
-                command,
-                1 if command[0] == "mkvmerge" and "--output" in command else 0,
+            muxing = command[0] == "mkvmerge" and "--output" in command
+            identifying = command[0] == "mkvmerge" and "--identify" in command
+            if muxing and mux_output is not None:
+                self._write(kwargs["stdout_path"], mux_output)
+            if identifying and identify_warnings is not None:
+                path = kwargs["stdout_path"]
+                document = json.loads(path.read_text(encoding="utf-8"))
+                document["warnings"] = identify_warnings
+                self._write(path, json.dumps(document))
+            warned = (muxing and mux_output is not None) or (
+                identifying and identify_warnings is not None
             )
+            return subprocess.CompletedProcess(command, 1 if warned else 0)
 
-    runner = WarningMuxRunner()
+    return WarningRunner()
+
+
+def _warning_worker(context, runner):
+    database, settings, scan, scanner, _runner, _worker = context
     worker = PipelineWorker(
         database,
         settings,
@@ -3094,12 +3107,82 @@ def test_mkvmerge_warning_never_creates_a_resumable_success_marker(context):
     claimed = JobQueue(database).claim_next()
     assert claimed is not None
     worker.process_one_stage(claimed)
-    ready = database.set_selection(job.id, _selection())
+    return worker, job, database.set_selection(job.id, _selection())
+
+
+HARMLESS_MUX_OUTPUT = (
+    "mkvmerge v74.0.0 ('You Oughta Know') 64-bit\n"
+    "'/srv/encode/jobs/x/work/audio-01.mka': Using the demultiplexer for the format 'Matroska'.\n"
+    "Warning: '/srv/encode/jobs/x/work/audio-01.mka' track 0: This AC-3 track does not "
+    "start with a valid AC-3 header. The first 1536 bytes will be skipped.\n"
+    "Progress: 100%\r\n"
+    "Warning: '/srv/encode/jobs/x/work/subtitle-01.mks' track 0: A timestamp gap of 2.5s "
+    "was found.\n"
+    "Multiplexing took 2 minutes 3 seconds.\n"
+)
+
+
+def test_a_harmless_mkvmerge_warning_is_recorded_and_the_job_continues(context):
+    database, settings, *_rest = context
+    runner = _warning_runner(mux_output=HARMLESS_MUX_OUTPUT)
+    worker, job, ready = _warning_worker(context, runner)
+
+    result = worker.process_job(ready)
+
+    assert result.state is JobState.COMPLETED
+    paths = JobPaths.create(settings, job.id)
+    report = json.loads(
+        (paths.analysis / "mkvmerge-mux-warnings.json").read_text(encoding="utf-8")
+    )
+    assert report["status"] == "passed_with_warnings"
+    assert [item["code"] for item in report["warnings"]] == [
+        "stream_starts_mid_frame",
+        "timestamps",
+    ]
+    # Only the file name of a quoted path is kept.
+    assert "/srv/encode" not in json.dumps(report)
+    assert "'audio-01.mka' track 0" in report["warnings"][0]["message"]
+    events = [
+        event
+        for event in database.list_events(job_id=job.id)
+        if event.kind == "worker.mkvmerge-warning"
+    ]
+    assert len(events) == 1
+    assert events[0].message == (
+        "mkvmerge finished the mux with warnings that do not affect the media; the job continues"
+    )
+    assert events[0].payload["stage"] == "mux"
+
+
+def test_an_mkvmerge_warning_without_text_is_an_unknown_warning(context):
+    database, *_rest = context
+    runner = _warning_runner(mux_output="Progress: 100%\n")
+    worker, job, ready = _warning_worker(context, runner)
+
+    assert worker.process_job(ready).state is JobState.COMPLETED
+    (event,) = [
+        event
+        for event in database.list_events(job_id=job.id)
+        if event.kind == "worker.mkvmerge-warning"
+    ]
+    assert event.payload["warnings"][0]["code"] == "unknown"
+
+
+def test_an_mkvmerge_data_loss_warning_never_creates_a_resumable_success_marker(context):
+    _database, settings, *_rest = context
+    runner = _warning_runner(
+        mux_output=(
+            "Warning: '/srv/encode/jobs/x/work/audio-01.mka' track 0: The file is "
+            "truncated; the last 3 frames were dropped.\n"
+        )
+    )
+    worker, job, ready = _warning_worker(context, runner)
 
     first = worker.process_job(ready)
     paths = JobPaths.create(settings, job.id)
     assert first.state is JobState.NEEDS_REVIEW
     assert first.resume_state is JobState.MUXING
+    assert "mkvmerge reported lost or damaged data" in (first.status_message or "")
     assert not (paths.stages / "mux.json").exists()
 
     resumed = worker.queue.resume_review(job.id)
@@ -3117,30 +3200,34 @@ def test_mkvmerge_warning_never_creates_a_resumable_success_marker(context):
     )
 
 
-def test_mkvmerge_identify_warning_blocks_every_qc_resume(context):
-    database, settings, scan, scanner, _runner, _worker = context
-
-    class WarningIdentifyRunner(FakeRunner):
-        def run(self, argv, **kwargs):
-            super().run(argv, **kwargs)
-            command = tuple(os.fspath(item) for item in argv)
-            return subprocess.CompletedProcess(
-                command,
-                1 if command[0] == "mkvmerge" and "--identify" in command else 0,
-            )
-
-    runner = WarningIdentifyRunner()
-    worker = PipelineWorker(
-        database,
-        settings,
-        scanner_factory=lambda _settings: scanner,
-        runner_factory=lambda _paths: runner,
+def test_a_harmless_mkvmerge_identify_warning_lets_qc_continue(context):
+    database, settings, *_rest = context
+    runner = _warning_runner(
+        identify_warnings=["The track 2 has an unknown element at 0x1234 which is ignored."]
     )
-    job = _enqueue(database, scan.source)
-    claimed = JobQueue(database).claim_next()
-    assert claimed is not None
-    worker.process_one_stage(claimed)
-    ready = database.set_selection(job.id, _selection())
+    worker, job, ready = _warning_worker(context, runner)
+
+    assert worker.process_job(ready).state is JobState.COMPLETED
+    paths = JobPaths.create(settings, job.id)
+    report = json.loads(
+        (paths.analysis / "mkvmerge-identify-warnings.json").read_text(encoding="utf-8")
+    )
+    assert report["warnings"][0]["code"] == "ignored_metadata"
+    assert [
+        event.message
+        for event in database.list_events(job_id=job.id)
+        if event.kind == "worker.mkvmerge-warning"
+    ] == [
+        "mkvmerge identify reported warnings that do not affect the media; the job continues"
+    ]
+
+
+def test_an_mkvmerge_identify_data_loss_warning_blocks_every_qc_resume(context):
+    _database, settings, *_rest = context
+    runner = _warning_runner(
+        identify_warnings=["The file is truncated or damaged; the end of a cluster is missing."]
+    )
+    worker, job, ready = _warning_worker(context, runner)
 
     first = worker.process_job(ready)
     paths = JobPaths.create(settings, job.id)

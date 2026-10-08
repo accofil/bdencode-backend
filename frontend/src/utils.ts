@@ -133,6 +133,9 @@ function eventKindLabel(kind: string): string | undefined {
     "worker.dynamic-hdr": ["Dinamikus HDR", "Dynamic HDR"],
     "worker.variable-aspect": ["Változó képarány", "Variable aspect ratio"],
     "worker.final-vmaf": ["Mintavett VMAF a kész fájlon", "Sampled VMAF of the final file"],
+    "worker.clip-joins-verified": ["Klipillesztések ellenőrizve", "Clip joins verified"],
+    "worker.mkvmerge-warning": ["mkvmerge-figyelmeztetés", "mkvmerge warning"],
+    "worker.full-decode-warning": ["Teljes dekódolás: figyelmeztetés", "Full decode: warning"],
     "job.upload-reset": ["Képfeltöltés elölről", "Image upload restarted"],
   };
   const pair = labels[kind];
@@ -156,6 +159,14 @@ function eventMessageLabel(message: string): string | undefined {
     "image upload reset by operator": ["A képfeltöltés elölről indul", "Image upload starts over"],
     "image upload restarted after a reset": ["A képfeltöltés újraindult", "Image upload restarted"],
     "finishing without image upload": ["Befejezés képfeltöltés nélkül", "Finishing without image upload"],
+    "mkvmerge finished the mux with warnings that do not affect the media; the job continues": ["Az mkvmerge figyelmeztetéssel zárta az MKV összeállítását, de ez a sávok tartalmát nem érinti; a job folytatódik (részletek az mkvmerge-mux-warnings.json-ban)", "mkvmerge finished the MKV mux with warnings that do not affect the tracks; the job continues (details in mkvmerge-mux-warnings.json)"],
+    "mkvmerge identify reported warnings that do not affect the media; the job continues": ["Az mkvmerge a kész fájl vizsgálatakor figyelmeztetett, de ez a tartalmat nem érinti; a job folytatódik (részletek az mkvmerge-identify-warnings.json-ban)", "mkvmerge warned while inspecting the finished file, but the content is not affected; the job continues (details in mkvmerge-identify-warnings.json)"],
+    "mkvmerge reported lost or damaged data during the mux; inspect mkvmerge-output.log before resuming": ["Az mkvmerge az MKV összeállításakor elveszett vagy sérült adatot jelzett; folytatás előtt nézd meg az mkvmerge-output.log-ot", "mkvmerge reported lost or damaged data during the MKV mux; check mkvmerge-output.log before continuing"],
+    "mkvmerge identify reported lost or damaged data in the final file": ["Az mkvmerge elveszett vagy sérült adatot talált a kész fájlban; ellenőrzés szükséges", "mkvmerge found lost or damaged data in the finished file; please review"],
+    "mkvmerge completed with warnings; inspect mkvmerge.log before resuming": ["Az mkvmerge figyelmeztetéssel zárta az MKV összeállítását; folytatás előtt nézd meg az mkvmerge.log-ot", "mkvmerge finished the MKV mux with warnings; check mkvmerge.log before continuing"],
+    "mkvmerge identify completed with warnings; inspect its stderr before resuming": ["Az mkvmerge a kész fájl vizsgálatakor figyelmeztetett; folytatás előtt nézd meg a naplóját", "mkvmerge warned while inspecting the finished file; check its log before continuing"],
+    "the full decode of the final file logged messages that are not decode errors; the job continues": ["A kész fájl teljes dekódolása üzeneteket írt a naplóba, de dekódolási hiba nem volt; a job folytatódik (részletek a full-decode-diagnostics.json-ban)", "The full decode of the finished file logged messages, but no decode error; the job continues (details in full-decode-diagnostics.json)"],
+    "full decode emitted an error-level diagnostic; final media is not accepted": ["A kész fájl teljes dekódolása hibát jelzett, ezért a fájl nem fogadható el; ellenőrzés szükséges (részletek a full-decode-diagnostics.json-ban)", "The full decode of the finished file reported an error, so the file is not accepted; please review (details in full-decode-diagnostics.json)"],
   };
   const pair = labels[message];
   return pair ? t(pair[0], pair[1]) : undefined;
@@ -235,6 +246,12 @@ export function formatStatusMessage(message: string | null, fallback: string): s
   if (reducedI) return t(`Az összehasonlítás ${reducedI[1]} I-képpárt használ: a mintaablakokban kevés helyen esik egybe a forrás és a kódolás I-képkockája (a hiányzó helyekre P- és B-párok kerültek).`, `The comparison uses ${reducedI[1]} I pairs: few source and encode I-frames coincide in the sample windows (P and B pairs fill the rest).`);
   const uploadRetry = /^image upload attempt (\d+) failed; retrying automatically in ([\d.]+) s$/.exec(message);
   if (uploadRetry) return t(`A képfeltöltés ${uploadRetry[1]}. kísérlete nem sikerült (a tárhely nem elérhető); automatikus újrapróbálás ${uploadRetry[2]} mp múlva`, `Image upload attempt ${uploadRetry[1]} failed (the host is unavailable); retrying automatically in ${uploadRetry[2]} s`);
+  const joins = /^(\d+) remux message\(s\) at (\d+) clip join\(s\)( and the end of the title)?; the strict decode (?:across the joins|there) is clean$/.exec(message);
+  if (joins) {
+    return joins[3]
+      ? t(`A remux ${joins[1]} üzenete a klipillesztéseknél (${joins[2]}) és a film végén keletkezett; a szigorú dekódolás ott hibátlan`, `${joins[1]} remux message(s) at the clip joins (${joins[2]}) and the end of the title; the strict decode there is clean`)
+      : t(`A remux ${joins[1]} üzenete ${joins[2]} klipillesztésnél keletkezett; a szigorú dekódolás az illesztéseken hibátlan`, `${joins[1]} remux message(s) at ${joins[2]} clip join(s); the strict decode across the joins is clean`);
+  }
   const metric = videoMetricFinding(message);
   if (metric) return metric;
   const sampledVmaf = /^sampled VMAF of the final file: mean (\S+), 1% low (\S+) \((\d+) frames\)$/.exec(message);

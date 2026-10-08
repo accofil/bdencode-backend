@@ -182,6 +182,123 @@ def mkvmerge_command(
     return command
 
 
+# mkvmerge exits with 1 when it finished but printed warnings (2 is an error).
+# Blu-ray streams make it warn routinely: a TrueHD/AC-3/DTS track that does
+# not start on a sync frame (it skips the leading bytes), timestamp gaps at
+# clip joins, PGS subtitle quirks.  None of these changes what is muxed, and
+# the QC stage then hashes every track's payload on both sides of the mux and
+# checks the final topology, so a warning is recorded and the job continues.
+#
+# A warning stops the job only when its text reports lost or damaged data.
+# The classes are tried in this order:
+#   1. MKVMERGE_LEADING_BYTES_SKIPPED: a stream that starts mid-frame; the
+#      skipped bytes are no complete frame (harmless, even though "skipped");
+#      MKVMERGE_IGNORED_METADATA: unknown elements or tags left out;
+#   2. MKVMERGE_DATA_LOSS_WARNING: truncated/corrupt/damaged data, an
+#      unexpected end of a file, a read/write/I/O failure or a full disk, and
+#      a track, packet, frame, block, subtitle entry or data that is ignored,
+#      skipped, dropped, discarded, omitted, lost or not muxed: these stop the
+#      job for review;
+#   3. MKVMERGE_HARMLESS_WARNINGS: known harmless classes (timestamps,
+#      Blu-ray audio bitstream notes, subtitles, chapters, track properties);
+#   4. anything else is an unknown warning: recorded, and the job continues.
+MKVMERGE_LEADING_BYTES_SKIPPED = re.compile(
+    r"(?i)(?:(?:does not|doesn't|did not|didn't) start with|"
+    r"first \d+ bytes? (?:will be|were|was|have been|has been) skipped|"
+    r"not start(?:ing)? (?:on|with) a (?:valid )?(?:frame|header|sync))"
+)
+# Unknown or unsupported Matroska elements or tags that mkvmerge leaves out
+# are metadata, not media: harmless although "ignored".
+MKVMERGE_IGNORED_METADATA = re.compile(
+    r"(?i)\b(?:elements?|tags?)\b.*\b(?:ignored|skipped)\b"
+)
+MKVMERGE_DATA_LOSS_WARNING = re.compile(
+    r"(?i)(?:truncat\w*|corrupt\w*|damaged|unexpected(?:ly)? end|premature(?:ly)? end|"
+    r"end of (?:the )?file (?:was )?reached (?:prematurely|too early)|"
+    r"read error|write error|I/O error|input/output error|no space left|"
+    r"\b(?:tracks?|packets?|frames?|blocks?|entries|entry|subtitles?|data)\b.*"
+    r"\b(?:ignored|skipped|dropped|discarded|omitted|lost|"
+    r"not (?:be )?(?:muxed|written|copied))\b)"
+)
+MKVMERGE_HARMLESS_WARNINGS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "timestamps",
+        re.compile(
+            r"(?i)(?:\b(?:time ?stamps?|time ?codes?)\b|\bgap\b|discontinu|"
+            r"non-?monoton|out of order)"
+        ),
+    ),
+    (
+        "audio_bitstream",
+        re.compile(
+            r"(?i)\b(?:TrueHD|MLP|AC-?3|E-?AC-?3|DTS(?:-HD)?|LPCM|PCM)\b"
+        ),
+    ),
+    ("subtitles", re.compile(r"(?i)\b(?:PGS|HDMV|SUP|subtitles?|S_HDMV)\b")),
+    ("chapters", re.compile(r"(?i)\bchapters?\b")),
+    (
+        "track_properties",
+        re.compile(
+            r"(?i)(?:default duration|frame ?rate|aspect ratio|display (?:width|height|dimensions)|"
+            r"codec private|language|track name|\bcues?\b)"
+        ),
+    ),
+)
+_MKVMERGE_WARNING_LINE = re.compile(
+    r"^(?:#GUI#)?warning(?::\s*|\s+)(?P<text>.+)$", re.IGNORECASE
+)
+_QUOTED_PATH = re.compile(r"'([^']*[/\\][^']*)'")
+
+
+@dataclass(frozen=True, slots=True)
+class MkvmergeWarning:
+    """One mkvmerge warning, its class and whether it stops the job."""
+
+    code: str
+    message: str
+    blocking: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"code": self.code, "message": self.message, "blocking": self.blocking}
+
+
+def _public_mkvmerge_text(text: str) -> str:
+    """The warning with each quoted file path shortened to its file name."""
+
+    return _QUOTED_PATH.sub(
+        lambda match: "'" + re.split(r"[/\\]", match[1])[-1] + "'", text.strip()
+    )
+
+
+def mkvmerge_warning_lines(text: str) -> tuple[str, ...]:
+    """The ``Warning:`` messages of mkvmerge's console output."""
+
+    found: list[str] = []
+    for record in re.split(r"[\r\n]+", text):
+        match = _MKVMERGE_WARNING_LINE.match(record.strip())
+        if match is not None:
+            found.append(match["text"].strip())
+    return tuple(found)
+
+
+def classify_mkvmerge_warning(message: str) -> MkvmergeWarning:
+    public = _public_mkvmerge_text(message)
+    if MKVMERGE_LEADING_BYTES_SKIPPED.search(message):
+        return MkvmergeWarning("stream_starts_mid_frame", public, False)
+    if MKVMERGE_IGNORED_METADATA.search(message):
+        return MkvmergeWarning("ignored_metadata", public, False)
+    if MKVMERGE_DATA_LOSS_WARNING.search(message):
+        return MkvmergeWarning("data_loss", public, True)
+    for code, pattern in MKVMERGE_HARMLESS_WARNINGS:
+        if pattern.search(message):
+            return MkvmergeWarning(code, public, False)
+    return MkvmergeWarning("unknown", public, False)
+
+
+def classify_mkvmerge_warnings(messages: Sequence[str]) -> tuple[MkvmergeWarning, ...]:
+    return tuple(classify_mkvmerge_warning(item) for item in messages if item.strip())
+
+
 def _track_options(item: MuxTrack) -> tuple[str, ...]:
     values = [
         "--language",

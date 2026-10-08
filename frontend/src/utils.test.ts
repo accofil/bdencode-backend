@@ -39,6 +39,24 @@ describe("formatEventMessage", () => {
     expect(formatEventMessage("job.upload-reset", "job.upload-reset")).toBe("Képfeltöltés elölről");
   });
 
+  it("localizes the tool warnings a job records and continues after", () => {
+    expect(formatEventMessage("worker.mkvmerge-warning", "mkvmerge finished the mux with warnings that do not affect the media; the job continues"))
+      .toMatch(/^Az mkvmerge figyelmeztetéssel zárta az MKV összeállítását, de ez a sávok tartalmát nem érinti; a job folytatódik/);
+    expect(formatEventMessage("worker.mkvmerge-warning", "mkvmerge identify reported warnings that do not affect the media; the job continues"))
+      .toMatch(/a job folytatódik/);
+    expect(formatEventMessage("worker.full-decode-warning", "the full decode of the final file logged messages that are not decode errors; the job continues"))
+      .toMatch(/^A kész fájl teljes dekódolása üzeneteket írt a naplóba, de dekódolási hiba nem volt/);
+    expect(formatStatusMessage("mkvmerge reported lost or damaged data during the mux; inspect mkvmerge-output.log before resuming", ""))
+      .toMatch(/elveszett vagy sérült adatot jelzett/);
+    expect(formatStatusMessage("full decode emitted an error-level diagnostic; final media is not accepted", ""))
+      .toMatch(/nem fogadható el/);
+    expect(formatEventMessage("worker.clip-joins-verified", "4 remux message(s) at 1 clip join(s) and the end of the title; the strict decode there is clean"))
+      .toBe("A remux 4 üzenete a klipillesztéseknél (1) és a film végén keletkezett; a szigorú dekódolás ott hibátlan");
+    expect(formatEventMessage("worker.clip-joins-verified", "7 remux message(s) at 1 clip join(s); the strict decode across the joins is clean"))
+      .toBe("A remux 7 üzenete 1 klipillesztésnél keletkezett; a szigorú dekódolás az illesztéseken hibátlan");
+    expect(formatEventMessage("worker.full-decode-warning", null)).toBe("Teljes dekódolás: figyelmeztetés");
+  });
+
   it("explains the chapter retry failure without hiding its technical details", () => {
     expect(formatWorkerError("FileNotFoundError: /job/work/chapters.xml"))
       .toMatch(/fejezetlista létrehozása/i);

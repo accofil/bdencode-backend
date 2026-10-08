@@ -21,6 +21,7 @@ import socket
 import subprocess
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from datetime import timedelta
@@ -169,8 +170,11 @@ from .mux import (
     FinalTrackPolicy,
     FinalVideoPolicy,
     MuxTrack,
+    MkvmergeWarning,
+    classify_mkvmerge_warnings,
     inspection_commands,
     mkvmerge_command,
+    mkvmerge_warning_lines,
     parse_stream_start_times,
     parse_stream_start_times_by_type,
     plan_common_zero_timeline,
@@ -265,6 +269,7 @@ from .qc.subtitle import (
     validate_subtitle_classification,
 )
 from .qc.integrity import (
+    classify_final_decode_log,
     clip_join_decode_command,
     VideoEfficiencyError,
     compare_packet_timelines,
@@ -1510,6 +1515,34 @@ def _activate_source_log_generation(
     )
 
 
+def _read_text_or_empty(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _mkvmerge_identify_warnings(report: Path) -> list[str]:
+    """The warnings of ``mkvmerge --identify`` (JSON) and its stderr."""
+
+    messages: list[str] = []
+    try:
+        document = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        document = None
+    if isinstance(document, dict):
+        for key in ("warnings", "errors"):
+            values = document.get(key)
+            if isinstance(values, list):
+                messages.extend(str(item) for item in values if str(item).strip())
+    messages.extend(
+        mkvmerge_warning_lines(
+            _read_text_or_empty(report.with_suffix(report.suffix + ".stderr"))
+        )
+    )
+    return messages
+
+
 def _public_diagnostic_summary(
     diagnostics: Iterable[MediaDiagnostic],
 ) -> list[dict[str, object]]:
@@ -1542,6 +1575,21 @@ def _sticky_source_diagnostics(
             DiagnosticCategory.DECODE_INTEGRITY,
         }
     )
+
+
+def _clip_join_moments(report: Mapping[str, Any]) -> list[float]:
+    """The join times of a verified ``clip-joins.json``, and the title end
+    when the strict decode there was clean too."""
+
+    moments = [float(item) for item in report.get("joins") or []]
+    title_end = report.get("title_end")
+    if (
+        report.get("title_end_verified") is True
+        and isinstance(title_end, (int, float))
+        and not isinstance(title_end, bool)
+    ):
+        moments.append(float(title_end))
+    return moments
 
 
 def _content_kind(job: Job) -> ContentKind:
@@ -4175,7 +4223,9 @@ class PipelineWorker:
         report = self._clip_join_report(paths)
         if report is None:
             return text
-        split = split_clip_join_lines(text, len(report["joins"]))
+        split = split_clip_join_lines(
+            text, len(report["joins"]), moments=_clip_join_moments(report)
+        )
         return text if split is None else split[0]
 
     def _verify_clip_joins(
@@ -4199,36 +4249,56 @@ class PipelineWorker:
                 if segment.relative_start_seconds > 0
             }
         )
-        if not joins:
+        # The title's last packet is cut like a clip's at a join.
+        title_end = (
+            float(playlist.duration_seconds) if playlist.duration_seconds > 0 else None
+        )
+        moments = [*joins, *([title_end] if title_end is not None else [])]
+        if not moments:
             return
         current = self._clip_join_report(paths)
-        if current is not None and current.get("joins") == joins:
+        if (
+            current is not None
+            and current.get("joins") == joins
+            and current.get("title_end") == title_end
+        ):
             return
         report_path = paths.analysis / "clip-joins.json"
         join_messages: list[str] = []
+        end_messages: list[str] = []
         for log_path in sorted(paths.logs.glob("reference-remux*.log")):
-            split = split_clip_join_lines(
-                log_path.read_text(encoding="utf-8", errors="replace"), len(joins)
-            )
-            if split is None:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+            split = split_clip_join_lines(text, len(joins), moments=joins)
+            with_end = split_clip_join_lines(text, len(joins), moments=moments)
+            if split is None or with_end is None:
                 atomic_write_json(
                     report_path,
                     {
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "reference_sha256": reference_sha256,
                         "joins": joins,
+                        "title_end": title_end,
                         "verified": False,
                         "reason": f"{log_path.name} has more timestamp jumps than the playlist has clip joins",
                     },
                 )
                 return
             join_messages.extend(split[1])
-        if not join_messages:
+            # The messages only the end of the title explains.
+            end_messages.extend((Counter(with_end[1]) - Counter(split[1])).elements())
+        if not join_messages and not end_messages:
             return
+        # The joins and the title end are decoded only when they logged
+        # something; a failed end decode leaves the joins' verdict alone.
+        checks = [
+            *((moment, False) for moment in (joins if join_messages else [])),
+            *([(title_end, True)] if end_messages and title_end is not None else []),
+        ]
         failed: list[float] = []
+        end_failed = False
         runner = self._runner(paths)
         with self._step(paths, "clip-joins", ("Klipillesztések ellenőrzése", "Checking clip joins")) as step:
-            for number, moment in enumerate(joins, start=1):
+            for number, (moment, is_end) in enumerate(checks, start=1):
                 try:
                     runner.run(
                         clip_join_decode_command(paths.reference, moment),
@@ -4236,29 +4306,41 @@ class PipelineWorker:
                         stderr_path=paths.logs / f"clip-join-{number:02d}.log",
                     )
                 except ProcessFailure:
-                    failed.append(moment)
-                step.update(number / len(joins))
+                    if is_end:
+                        end_failed = True
+                    else:
+                        failed.append(moment)
+                step.update(number / len(checks))
+        title_end_verified = bool(end_messages) and not end_failed
         atomic_write_json(
             report_path,
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "reference_sha256": reference_sha256,
                 "joins": joins,
+                "title_end": title_end,
                 "verified": not failed,
                 "failed_joins": failed,
-                "join_messages": join_messages[:100],
+                "title_end_verified": title_end_verified,
+                "join_messages": [*join_messages, *(end_messages if title_end_verified else [])][:100],
             },
         )
-        if not failed:
+        excused = len(join_messages) if not failed else 0
+        if title_end_verified:
+            excused += len(end_messages)
+        if excused:
             self.database.add_event(
                 EventCreate(
                     job_id=paths.root.name,
                     kind="worker.clip-joins-verified",
                     message=(
-                        f"{len(join_messages)} remux message(s) at {len(joins)} clip "
+                        f"{excused} remux message(s) at {len(joins)} clip join(s) "
+                        "and the end of the title; the strict decode there is clean"
+                        if title_end_verified
+                        else f"{excused} remux message(s) at {len(joins)} clip "
                         "join(s); the strict decode across the joins is clean"
                     ),
-                    payload={"joins": joins},
+                    payload={"joins": joins, "title_end": title_end},
                 )
             )
 
@@ -5817,18 +5899,129 @@ class PipelineWorker:
         mux_inputs["argv"] = command
         marker = paths.stages / "mux.json"
         if not _valid_stage(marker, mux_inputs, [paths.muxed_output]):
+            # mkvmerge prints its warnings on stdout.
+            mux_output_log = paths.logs / "mkvmerge-output.log"
             mux_result = self._runner(paths).run(
                 command,
                 cwd=paths.work,
+                stdout_path=mux_output_log,
                 stderr_path=paths.logs / "mkvmerge.log",
                 ok_returncodes=(0, 1),
             )
             if getattr(mux_result, "returncode", 0) == 1:
-                raise ReviewRequired(
-                    "mkvmerge completed with warnings; inspect mkvmerge.log before resuming"
+                self._judge_mkvmerge_warnings(
+                    job.id,
+                    paths,
+                    mkvmerge_warning_lines(
+                        "\n".join(
+                            _read_text_or_empty(path)
+                            for path in (mux_output_log, paths.logs / "mkvmerge.log")
+                        )
+                    ),
+                    stage="mux",
                 )
             _write_stage(marker, mux_inputs, [paths.muxed_output])
         self.queue.advance(job.id, JobState.QC, message="final Matroska mux complete")
+
+    def _judge_mkvmerge_warnings(
+        self,
+        job_id: str,
+        paths: JobPaths,
+        messages: Sequence[str],
+        *,
+        stage: Literal["mux", "identify"],
+    ) -> None:
+        """Record mkvmerge's warnings; stop only on one that reports data loss.
+
+        See ``MKVMERGE_DATA_LOSS_WARNING`` in :mod:`bdencode.mux`.  A warning
+        exit without a readable warning is recorded as an unknown warning.
+        """
+
+        warnings = classify_mkvmerge_warnings(messages) or (
+            MkvmergeWarning(
+                "unknown", "mkvmerge exited with warnings but printed none", False
+            ),
+        )
+        blocking = [item for item in warnings if item.blocking]
+        report = paths.analysis / f"mkvmerge-{stage}-warnings.json"
+        atomic_write_json(
+            report,
+            {
+                "schema_version": 1,
+                "stage": stage,
+                "status": "needs_review" if blocking else "passed_with_warnings",
+                "warnings": [item.to_dict() for item in warnings],
+            },
+        )
+        if blocking:
+            raise ReviewRequired(
+                "mkvmerge reported lost or damaged data during the mux; inspect mkvmerge-output.log before resuming"
+                if stage == "mux"
+                else "mkvmerge identify reported lost or damaged data in the final file",
+                details={
+                    "warnings": [item.message for item in blocking[:20]],
+                    "report": report.name,
+                },
+            )
+        self.database.add_event(
+            EventCreate(
+                job_id=job_id,
+                kind="worker.mkvmerge-warning",
+                message=(
+                    "mkvmerge finished the mux with warnings that do not affect the media; the job continues"
+                    if stage == "mux"
+                    else "mkvmerge identify reported warnings that do not affect the media; the job continues"
+                ),
+                payload={
+                    "stage": stage,
+                    "warnings": [item.to_dict() for item in warnings[:20]],
+                    "report": report.name,
+                },
+            )
+        )
+
+    def _judge_full_decode(self, job: Job, paths: JobPaths, log: Path) -> Path | None:
+        """Judge the final file's full-decode log; stop only on a real defect.
+
+        Returns the diagnostics report when the log held any message.
+        """
+
+        text = log.read_text(encoding="utf-8", errors="replace")
+        if not text.strip():
+            return None
+        join_report = self._clip_join_report(paths)
+        join_messages = (
+            [str(item) for item in join_report.get("join_messages") or []]
+            if join_report is not None
+            else []
+        )
+        verdict = classify_final_decode_log(text, join_messages=join_messages)
+        report = log.with_name("full-decode-diagnostics.json")
+        public = verdict.to_dict()
+        for key in ("blocking", "warnings", "excused_join_messages"):
+            public[key] = [sanitize_text(line) for line in public[key][:100]]
+        atomic_write_json(report, {"schema_version": 1, **public})
+        if verdict.blocking:
+            raise ReviewRequired(
+                "full decode emitted an error-level diagnostic; final media is not accepted",
+                details={"report": report.name, "blocking": public["blocking"][:20]},
+            )
+        self.database.add_event(
+            EventCreate(
+                job_id=job.id,
+                kind="worker.full-decode-warning",
+                message=(
+                    "the full decode of the final file logged messages that are not "
+                    "decode errors; the job continues"
+                ),
+                payload={
+                    "warnings": public["warnings"][:20],
+                    "excused_join_messages": public["excused_join_messages"][:20],
+                    "report": report.name,
+                },
+            )
+        )
+        return report
 
     def _qc(self, job: Job, paths: JobPaths) -> None:
         scan, selection = self._load_prepared_scan_and_selection(job, paths)
@@ -6045,7 +6238,7 @@ class PipelineWorker:
         )
         reports: list[Path] = [mux_integrity_report]
         inspections = inspection_commands(output, report_root)
-        identify_warned: list[bool] = []
+        identify_warned: list[tuple[Path, dict[str, Any], Path]] = []
         # Hash the final file once, before the concurrent inspections.
         output_sha256 = sha256_file(output)
         live = self._live(paths)
@@ -6083,7 +6276,8 @@ class PipelineWorker:
                 report.name == "mkvmerge-identify.json"
                 and getattr(inspection_result, "returncode", 0) == 1
             ):
-                identify_warned.append(True)
+                # Judged after the inspections; the marker follows the verdict.
+                identify_warned.append((marker, inputs, report))
                 return
             _write_stage(marker, inputs, [report])
 
@@ -6093,18 +6287,19 @@ class PipelineWorker:
             paths,
             [functools.partial(inspect, command, report) for command, report in inspections],
         )
-        if identify_warned:
-            raise ReviewRequired(
-                "mkvmerge identify completed with warnings; inspect its stderr before resuming"
+        for identify_marker, identify_inputs, identify_report in identify_warned:
+            self._judge_mkvmerge_warnings(
+                job.id,
+                paths,
+                _mkvmerge_identify_warnings(identify_report),
+                stage="identify",
             )
+            _write_stage(identify_marker, identify_inputs, [identify_report])
         for _command, report in inspections:
-            if (
-                report.name == "full-decode.log"
-                and report.read_text(encoding="utf-8", errors="replace").strip()
-            ):
-                raise ReviewRequired(
-                    "full decode emitted an error-level diagnostic; final media is not accepted"
-                )
+            if report.name == "full-decode.log":
+                diagnostics_report = self._judge_full_decode(job, paths, report)
+                if diagnostics_report is not None:
+                    reports.append(diagnostics_report)
             reports.append(report)
 
         playlist = scan.playlist(selection.playlist_id)
