@@ -182,24 +182,26 @@ def test_probe_checkpoints_survive_a_crash_and_are_not_repeated(context) -> None
     ).is_file()
 
 
-def test_unreachable_target_sends_the_job_to_review(context) -> None:
+def test_an_unreachable_target_encodes_at_the_nearest_measured_crf(context) -> None:
     database, settings, worker, runner, ready = ready_job(
         context,
         auto_selection(target_vmaf=99.0, min_crf=14, max_crf=24),
-        lambda crf: 80.0,
+        lambda crf: 80.0 - crf / 10,
     )
 
-    result = worker.process_job(ready)
+    prepared = worker.process_one_stage(ready)
 
-    assert result.state is JobState.NEEDS_REVIEW
+    # The queue keeps going: the best measured quality is the nearest to 99.
+    assert prepared.state is JobState.ENCODING
     paths = JobPaths.create(settings, ready.id)
     report = json.loads((paths.analysis / "crf-search.json").read_text("utf-8"))
-    assert report["status"] == "target_unreachable" and report["chosen_crf"] is None
-    assert not (paths.stages / "crf-search.json").exists()
-    assert not any(
-        command[0] == "ffmpeg" and command[-1].endswith("video-encoded.partial.mkv")
-        for command in runner.commands
+    probes = report["probes"]
+    assert report["status"] == "target_unreachable"
+    assert report["chosen_crf"] == min(probe["crf"] for probe in probes)
+    event = next(
+        item for item in database.list_events(job_id=ready.id, limit=1000) if item.kind == "worker.auto-crf"
     )
+    assert "out of reach" in event.message
 
 
 def test_ceiling_outcome_explains_itself_in_the_event(context) -> None:

@@ -28,6 +28,7 @@ from bdencode.media.bluray import (
     HdrStaticMetadata,
     MediaStream,
     PlaylistCandidate,
+    PlaylistSegment,
     StreamKind,
     ToolCapabilities,
     VideoCodec,
@@ -2991,7 +2992,40 @@ def test_fast_comparison_timeout_requests_review_without_losing_resume_stage(con
     assert result.resume_state is JobState.COMPARISON
     assert "bounded" in (result.status_message or "")
     event = database.list_events(job_id=job.id, limit=1000)[-1]
-    assert event.payload["timeout_seconds"] == 300
+    # Retried with 2x and 4x budgets before the review.
+    assert event.payload["timeout_seconds"] == 1200
+    retries = [item for item in database.list_events(job_id=job.id, limit=1000) if item.kind == "worker.comparison-retry"]
+    assert [item.payload["time_scale"] for item in retries] == [2, 4]
+
+
+def test_a_comparison_timeout_is_retried_with_a_longer_budget(context):
+    database, _settings, scan, _scanner, runner, worker = context
+    real_run = runner.run
+    timeouts: list[float] = []
+
+    def slow_once(argv, **kwargs):
+        command = tuple(os.fspath(item) for item in argv)
+        if (
+            command[0] == "ffprobe"
+            and kwargs.get("stdout_path") is not None
+            and kwargs["stdout_path"].name == "sampled-encoded-frames.json"
+        ):
+            timeouts.append(kwargs.get("timeout", 0))
+            if len(timeouts) == 1:
+                raise subprocess.TimeoutExpired(command, kwargs.get("timeout", 1))
+        return real_run(argv, **kwargs)
+
+    runner.run = slow_once
+    job = _enqueue(database, scan.source)
+    claimed = JobQueue(database).claim_next()
+    assert claimed is not None
+    worker.process_one_stage(claimed)
+    ready = database.set_selection(job.id, _selection())
+
+    result = worker.process_job(ready)
+
+    assert result.state is JobState.COMPLETED
+    assert timeouts[:2] == [300, 600]
 
 
 def test_upload_fails_closed_for_legacy_unannotated_comparison(context):
@@ -3071,19 +3105,32 @@ def test_mux_omits_chapter_option_when_playlist_has_none(context):
     assert "--chapters" not in mux_command
 
 
-def test_mkvmerge_warning_never_creates_a_resumable_success_marker(context):
-    database, settings, scan, scanner, _runner, _worker = context
+def _warning_runner(mux_output: str | None = None, identify_warnings: list[str] | None = None):
+    """A runner whose mkvmerge mux or identify finishes with warnings (exit 1)."""
 
-    class WarningMuxRunner(FakeRunner):
+    class WarningRunner(FakeRunner):
         def run(self, argv, **kwargs):
             super().run(argv, **kwargs)
             command = tuple(os.fspath(item) for item in argv)
-            return subprocess.CompletedProcess(
-                command,
-                1 if command[0] == "mkvmerge" and "--output" in command else 0,
+            muxing = command[0] == "mkvmerge" and "--output" in command
+            identifying = command[0] == "mkvmerge" and "--identify" in command
+            if muxing and mux_output is not None:
+                self._write(kwargs["stdout_path"], mux_output)
+            if identifying and identify_warnings is not None:
+                path = kwargs["stdout_path"]
+                document = json.loads(path.read_text(encoding="utf-8"))
+                document["warnings"] = identify_warnings
+                self._write(path, json.dumps(document))
+            warned = (muxing and mux_output is not None) or (
+                identifying and identify_warnings is not None
             )
+            return subprocess.CompletedProcess(command, 1 if warned else 0)
 
-    runner = WarningMuxRunner()
+    return WarningRunner()
+
+
+def _warning_worker(context, runner):
+    database, settings, scan, scanner, _runner, _worker = context
     worker = PipelineWorker(
         database,
         settings,
@@ -3094,12 +3141,82 @@ def test_mkvmerge_warning_never_creates_a_resumable_success_marker(context):
     claimed = JobQueue(database).claim_next()
     assert claimed is not None
     worker.process_one_stage(claimed)
-    ready = database.set_selection(job.id, _selection())
+    return worker, job, database.set_selection(job.id, _selection())
+
+
+HARMLESS_MUX_OUTPUT = (
+    "mkvmerge v74.0.0 ('You Oughta Know') 64-bit\n"
+    "'/srv/encode/jobs/x/work/audio-01.mka': Using the demultiplexer for the format 'Matroska'.\n"
+    "Warning: '/srv/encode/jobs/x/work/audio-01.mka' track 0: This AC-3 track does not "
+    "start with a valid AC-3 header. The first 1536 bytes will be skipped.\n"
+    "Progress: 100%\r\n"
+    "Warning: '/srv/encode/jobs/x/work/subtitle-01.mks' track 0: A timestamp gap of 2.5s "
+    "was found.\n"
+    "Multiplexing took 2 minutes 3 seconds.\n"
+)
+
+
+def test_a_harmless_mkvmerge_warning_is_recorded_and_the_job_continues(context):
+    database, settings, *_rest = context
+    runner = _warning_runner(mux_output=HARMLESS_MUX_OUTPUT)
+    worker, job, ready = _warning_worker(context, runner)
+
+    result = worker.process_job(ready)
+
+    assert result.state is JobState.COMPLETED
+    paths = JobPaths.create(settings, job.id)
+    report = json.loads(
+        (paths.analysis / "mkvmerge-mux-warnings.json").read_text(encoding="utf-8")
+    )
+    assert report["status"] == "passed_with_warnings"
+    assert [item["code"] for item in report["warnings"]] == [
+        "stream_starts_mid_frame",
+        "timestamps",
+    ]
+    # Only the file name of a quoted path is kept.
+    assert "/srv/encode" not in json.dumps(report)
+    assert "'audio-01.mka' track 0" in report["warnings"][0]["message"]
+    events = [
+        event
+        for event in database.list_events(job_id=job.id)
+        if event.kind == "worker.mkvmerge-warning"
+    ]
+    assert len(events) == 1
+    assert events[0].message == (
+        "mkvmerge finished the mux with warnings that do not affect the media; the job continues"
+    )
+    assert events[0].payload["stage"] == "mux"
+
+
+def test_an_mkvmerge_warning_without_text_is_an_unknown_warning(context):
+    database, *_rest = context
+    runner = _warning_runner(mux_output="Progress: 100%\n")
+    worker, job, ready = _warning_worker(context, runner)
+
+    assert worker.process_job(ready).state is JobState.COMPLETED
+    (event,) = [
+        event
+        for event in database.list_events(job_id=job.id)
+        if event.kind == "worker.mkvmerge-warning"
+    ]
+    assert event.payload["warnings"][0]["code"] == "unknown"
+
+
+def test_an_mkvmerge_data_loss_warning_never_creates_a_resumable_success_marker(context):
+    _database, settings, *_rest = context
+    runner = _warning_runner(
+        mux_output=(
+            "Warning: '/srv/encode/jobs/x/work/audio-01.mka' track 0: The file is "
+            "truncated; the last 3 frames were dropped.\n"
+        )
+    )
+    worker, job, ready = _warning_worker(context, runner)
 
     first = worker.process_job(ready)
     paths = JobPaths.create(settings, job.id)
     assert first.state is JobState.NEEDS_REVIEW
     assert first.resume_state is JobState.MUXING
+    assert "mkvmerge reported lost or damaged data" in (first.status_message or "")
     assert not (paths.stages / "mux.json").exists()
 
     resumed = worker.queue.resume_review(job.id)
@@ -3117,30 +3234,34 @@ def test_mkvmerge_warning_never_creates_a_resumable_success_marker(context):
     )
 
 
-def test_mkvmerge_identify_warning_blocks_every_qc_resume(context):
-    database, settings, scan, scanner, _runner, _worker = context
-
-    class WarningIdentifyRunner(FakeRunner):
-        def run(self, argv, **kwargs):
-            super().run(argv, **kwargs)
-            command = tuple(os.fspath(item) for item in argv)
-            return subprocess.CompletedProcess(
-                command,
-                1 if command[0] == "mkvmerge" and "--identify" in command else 0,
-            )
-
-    runner = WarningIdentifyRunner()
-    worker = PipelineWorker(
-        database,
-        settings,
-        scanner_factory=lambda _settings: scanner,
-        runner_factory=lambda _paths: runner,
+def test_a_harmless_mkvmerge_identify_warning_lets_qc_continue(context):
+    database, settings, *_rest = context
+    runner = _warning_runner(
+        identify_warnings=["The track 2 has an unknown element at 0x1234 which is ignored."]
     )
-    job = _enqueue(database, scan.source)
-    claimed = JobQueue(database).claim_next()
-    assert claimed is not None
-    worker.process_one_stage(claimed)
-    ready = database.set_selection(job.id, _selection())
+    worker, job, ready = _warning_worker(context, runner)
+
+    assert worker.process_job(ready).state is JobState.COMPLETED
+    paths = JobPaths.create(settings, job.id)
+    report = json.loads(
+        (paths.analysis / "mkvmerge-identify-warnings.json").read_text(encoding="utf-8")
+    )
+    assert report["warnings"][0]["code"] == "ignored_metadata"
+    assert [
+        event.message
+        for event in database.list_events(job_id=job.id)
+        if event.kind == "worker.mkvmerge-warning"
+    ] == [
+        "mkvmerge identify reported warnings that do not affect the media; the job continues"
+    ]
+
+
+def test_an_mkvmerge_identify_data_loss_warning_blocks_every_qc_resume(context):
+    _database, settings, *_rest = context
+    runner = _warning_runner(
+        identify_warnings=["The file is truncated or damaged; the end of a cluster is missing."]
+    )
+    worker, job, ready = _warning_worker(context, runner)
 
     first = worker.process_job(ready)
     paths = JobPaths.create(settings, job.id)
@@ -3416,9 +3537,17 @@ def test_audio_spectrum_pngs_are_registered_as_spectrogram_artifacts(context):
             assert content.content.startswith(b"\x89PNG\r\n\x1a\n")
 
 
-@pytest.mark.parametrize("internal_final_audio_gap", [False, True])
+@pytest.mark.parametrize(
+    ("internal_final_audio_gap", "loud_master", "clip_join"),
+    [
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        (True, False, True),
+    ],
+)
 def test_lossy_audio_transcode_uses_target_qc_without_pcm_hash_gate(
-    context, internal_final_audio_gap: bool
+    context, internal_final_audio_gap: bool, loud_master: bool, clip_join: bool
 ):
     database, settings, scan, scanner, runner, worker = context
     audio = MediaStream(
@@ -3433,12 +3562,29 @@ def test_lossy_audio_transcode_uses_target_qc_without_pcm_hash_gate(
         sample_rate=48_000,
         object_audio=True,
     )
+    if clip_join:
+        (scan.source / "BDMV" / "STREAM").mkdir(parents=True, exist_ok=True)
+        for clip_id in ("00001", "00002", "00003"):
+            (scan.source / "BDMV" / "STREAM" / f"{clip_id}.m2ts").write_bytes(
+                b"x" * 1000
+            )
     scanner.result = replace(
         scan,
         playlists=(
             replace(
                 scan.playlists[0],
                 streams=(*scan.playlists[0].streams, audio),
+                # The internal-gap case has a 32 ms gap at 200 s and the
+                # matching overlap at 400 s: one at each clip join.
+                segments=(
+                    (
+                        PlaylistSegment("00001", 0.0, 200.0),
+                        PlaylistSegment("00002", 0.0, 200.0, 200.0),
+                        PlaylistSegment("00003", 0.0, 201.0, 400.0),
+                    )
+                    if clip_join
+                    else scan.playlists[0].segments
+                ),
             ),
         ),
     )
@@ -3452,6 +3598,32 @@ def test_lossy_audio_transcode_uses_target_qc_without_pcm_hash_gate(
             if muxer == "hash":
                 pytest.fail("lossy audio QC must not run a meaningless PCM hash gate")
         real_run(argv, **kwargs)
+        stderr_path = kwargs.get("stderr_path")
+        if (
+            loud_master
+            and stderr_path is not None
+            and stderr_path.name.endswith("-analysis.log")
+        ):
+            # A loud master: full-scale samples and intersample peaks above
+            # 0 dBTP in the source and in its lossy encode.
+            runner._write(
+                stderr_path,
+                """
+[Parsed_astats_1] Overall
+[Parsed_astats_1] Peak level dB: 0.000000
+[Parsed_astats_1] Peak count: 40
+[Parsed_astats_1] Number of NaNs: 0
+[Parsed_astats_1] Number of Infs: 0
+[Parsed_astats_1] Number of denormals: 0
+[Parsed_ebur128_0] Summary:
+[Parsed_ebur128_0]   Integrated loudness:
+[Parsed_ebur128_0]     I: -14.0 LUFS
+[Parsed_ebur128_0]   Loudness range:
+[Parsed_ebur128_0]     LRA: 6.0 LU
+[Parsed_ebur128_0]   True peak:
+[Parsed_ebur128_0]     Peak: 0.6 dBFS
+""",
+            )
         stdout_path = kwargs.get("stdout_path")
         if stdout_path is None:
             return
@@ -3536,7 +3708,9 @@ def test_lossy_audio_transcode_uses_target_qc_without_pcm_hash_gate(
                                 "channel_layout": "7.1"
                                 if source_probe
                                 else "5.1(side)",
-                                "bit_rate": None if source_probe else "1024000",
+                                "bit_rate": None
+                                if source_probe or loud_master
+                                else "1024000",
                                 "start_time": "0",
                                 "duration": "601" if source_probe else "601.016",
                             }
@@ -3560,7 +3734,12 @@ def test_lossy_audio_transcode_uses_target_qc_without_pcm_hash_gate(
 
     result = worker.process_job(ready)
 
-    if internal_final_audio_gap:
+    continuity_warnings = [
+        event
+        for event in database.list_events(job_id=job.id, limit=1000)
+        if event.kind == "worker.audio-continuity-warning"
+    ]
+    if internal_final_audio_gap and not clip_join:
         assert result.state is JobState.NEEDS_REVIEW
         assert "sample-cursor continuity failed" in result.status_message
         assert not list(paths.analysis.glob("*frames.json"))
@@ -3581,10 +3760,42 @@ def test_lossy_audio_transcode_uses_target_qc_without_pcm_hash_gate(
     )
     assert manifest["schema_version"] == 4
     track = manifest["tracks"][0]
+    if clip_join:
+        # The gap at the clip join is recorded and the job completes.
+        assert track["source_to_final_continuity"]["passed"] is True
+        assert track["source_to_final_continuity"]["excused_join_discontinuities"] == 2
+        assert track["final_frame_continuity"]["continuous"] is False
+        assert [event.message for event in continuity_warnings] == [
+            "audio track audio:4352 has small gaps or overlaps at the playlist's "
+            "clip joins; the sample count matches and the job continues"
+        ]
+        return
+    assert continuity_warnings == []
     assert track["verification_mode"] == "lossy_transcode"
     assert track["decoded_pcm_sha256_required"] is False
     assert track["decoded_pcm_sha256_match"] is None
     assert track["verification"]["passed"] is True
+    audio_warnings = [
+        event
+        for event in database.list_events(job_id=job.id, limit=1000)
+        if event.kind == "worker.audio-qc-warning"
+    ]
+    if loud_master:
+        assert track["signal_verification"]["passed"] is True
+        assert any(
+            "source audio contains 40 clipped/full-scale samples" in item
+            for item in track["signal_verification"]["warnings"]
+        )
+        assert track["verification"]["warnings"] == [
+            "encoded audio bitrate is not reported; expected 1024000 bit/s"
+        ]
+        assert len(audio_warnings) == 1
+        assert audio_warnings[0].message == (
+            "audio track audio:4352 has level or bitrate findings that do not "
+            "show a broken encode; the job continues"
+        )
+    else:
+        assert audio_warnings == []
     assert track["effective_target"]["codec_name"] == "eac3"
     assert track["decoded_frame_continuity_required"] is True
     assert track["source_to_sidecar_continuity"]["passed"] is True
@@ -3752,6 +3963,15 @@ def _advance_to_uploading(
     while current.state is not JobState.UPLOADING:
         current = worker.process_one_stage(current)
     return worker, current, JobPaths.create(settings, job.id)
+
+
+def _published_pngs(paths: JobPaths) -> list[Path]:
+    """The comparison images the upload stage sends: the ten published pairs."""
+
+    from bdencode.worker import _images_to_upload
+
+    manifest = json.loads((paths.comparison / "video-comparison.json").read_text(encoding="utf-8"))
+    return _images_to_upload(_current_comparison_pngs(paths), "all", manifest["pairs"])
 
 
 def _read_upload_checkpoint(paths: JobPaths) -> dict[str, Any]:
@@ -3945,7 +4165,7 @@ def test_upload_falls_back_only_before_the_first_success(context):
         context,
         (lambda: primary, lambda: fallback, lambda: unused),
     )
-    expected_names = {path.name for path in _current_comparison_pngs(paths)}
+    expected_names = {path.name for path in _published_pngs(paths)}
 
     result = worker.process_job(uploading)
 
@@ -4309,7 +4529,7 @@ def test_schema_v1_upload_checkpoint_resumes_as_imgbb_without_mixing(context):
         context,
         (lambda: primary, lambda: fallback),
     )
-    pngs = _current_comparison_pngs(paths)
+    pngs = _published_pngs(paths)
     first = pngs[0]
     digest = sha256_file(first)
     legacy_url = f"https://i.ibb.co/legacy/{first.name}"
@@ -4986,3 +5206,45 @@ def test_a_worker_shutdown_ends_the_upload_retry_wait(context):
     # The durable state stays UPLOADING; the next worker run tries again.
     assert result.state is JobState.UPLOADING
     assert len(host.calls) == 1
+
+
+def test_a_passing_io_error_reruns_the_stage(context):
+    import errno as errno_module
+
+    database, _settings, scan, _scanner, _runner, worker = context
+    real_stage = worker.process_one_stage
+    failures: list[str] = []
+
+    def flaky_share(job):
+        if not failures:
+            failures.append("EIO")
+            raise OSError(errno_module.EIO, "Input/output error")
+        return real_stage(job)
+
+    worker.io_retry_delays = (3,)
+    worker._sleep = lambda _seconds: None
+    worker.process_one_stage = flaky_share
+    job = _enqueue(database, scan.source)
+    claimed = JobQueue(database).claim_next()
+    assert claimed is not None
+
+    result = worker.process_job(claimed)
+
+    assert result.state is JobState.AWAITING_SELECTION
+    retries = [item for item in database.list_events(job_id=job.id, limit=1000) if item.kind == "worker.io-retry"]
+    assert len(retries) == 1 and retries[0].payload["delay_seconds"] == 3
+
+
+def test_a_missing_file_is_not_retried(context):
+    database, _settings, scan, _scanner, _runner, worker = context
+
+    def missing(_job):
+        raise FileNotFoundError("gone")
+
+    worker.io_retry_delays = (3,)
+    worker._sleep = lambda _seconds: pytest.fail("a missing file must not wait")
+    worker.process_one_stage = missing
+    _enqueue(database, scan.source)
+    claimed = JobQueue(database).claim_next()
+
+    assert worker.process_job(claimed).state is JobState.FAILED

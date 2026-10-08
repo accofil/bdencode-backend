@@ -18,6 +18,7 @@ import {
   Tv2,
   UploadCloud,
   Wrench,
+  X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
@@ -174,7 +175,8 @@ export function NewEncodePage() {
       ...value,
       sourcePath: entry.path,
       sourceName: entry.name,
-      name: value.name || entry.name,
+      // The name follows the chosen disc until the operator types their own.
+      name: !value.name.trim() || value.name === value.sourceName ? entry.name : value.name,
     }));
   }
 
@@ -260,6 +262,7 @@ export function NewEncodePage() {
               <Check size={18} />
               <div><strong>{draft.sourceName}</strong><span>{draft.sourcePath}</span></div>
               <Badge tone="success">{t("Kiválasztva", "Selected")}</Badge>
+              <button type="button" className="selected-source__clear" onClick={() => setDraft((value) => ({ ...value, sourcePath: "", sourceName: "", name: value.name === value.sourceName ? "" : value.name }))} aria-label={t("Kijelölés törlése", "Clear the selection")}><X size={16} aria-hidden="true" /></button>
             </div>
           )}
         </Card>

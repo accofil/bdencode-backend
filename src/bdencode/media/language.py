@@ -159,6 +159,96 @@ def supported_iso639_2() -> tuple[str, ...]:
     return tuple(sorted(_ISO639_2T_TO_BCP47))
 
 
+# Detection often names a member of a macrolanguage, or a close sibling, where
+# the disc carries the umbrella code; these count as the same language.
+_LANGUAGE_FAMILY: dict[str, str] = {
+    "yue": "zho", "cmn": "zho", "nan": "zho", "hak": "zho", "wuu": "zho",
+    "nob": "nor", "nno": "nor",
+    "hrv": "hbs", "srp": "hbs", "bos": "hbs",
+}
+# A detection this sure may overrule nothing on its own, but it settles a
+# disagreement between the disc's labels.
+STRONG_DETECTION = 0.85
+
+
+def same_language(first: str | None, second: str | None) -> bool:
+    return (
+        first is not None
+        and second is not None
+        and _LANGUAGE_FAMILY.get(first, first) == _LANGUAGE_FAMILY.get(second, second)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class LanguageSettlement:
+    """The language a retained track is muxed with, and why.
+
+    ``language`` is ``None`` when nothing names it (the track is tagged
+    ``und``); ``warning`` explains a choice the operator may want to check;
+    ``stop`` is true only when the disc's labels contradict each other and a
+    confident detection confirms none of them.
+    """
+
+    language: str | None
+    warning: str | None = None
+    stop: bool = False
+
+
+def settle_track_language(
+    labels: Mapping[str, str | None],
+    detected: str | None = None,
+    confidence: float = 0.0,
+) -> LanguageSettlement:
+    """Choose a track language from the disc labels and the detection.
+
+    ``labels`` holds the normalised MPLS, CLPI and PMT codes.  Agreeing labels
+    are kept even when the detection hears something else (songs, signs or a
+    dub's original-language inserts fool it); the disagreement becomes a
+    warning.  The detection only settles labels that contradict each other.
+    """
+
+    mpls, clpi, pmt = labels.get("mpls"), labels.get("clpi"), labels.get("pmt")
+    present = [code for code in (mpls, clpi, pmt) if code]
+    families = {_LANGUAGE_FAMILY.get(code, code) for code in present}
+    strong = detected if detected and confidence >= STRONG_DETECTION else None
+    if present and (len(families) == 1 or (mpls and clpi and same_language(mpls, clpi))):
+        label = mpls or present[0]
+        if strong and not same_language(strong, label):
+            return LanguageSettlement(
+                label,
+                f"the disc label {label} is kept although the language detection "
+                f"heard {strong} ({confidence:.0%})",
+            )
+        return LanguageSettlement(label)
+    if present:
+        if strong:
+            match = next((code for code in present if same_language(code, strong)), None)
+            if match is None:
+                return LanguageSettlement(None, stop=True)
+            return LanguageSettlement(
+                match,
+                f"the disc labels disagree ({', '.join(present)}); the language "
+                f"detection chose {match} ({confidence:.0%})",
+            )
+        label = mpls or present[0]
+        return LanguageSettlement(
+            label,
+            f"the disc labels disagree ({', '.join(present)}) and the language "
+            f"detection could not decide; the playlist label {label} is used",
+        )
+    if detected and confidence >= 0.75:
+        return LanguageSettlement(
+            detected,
+            None
+            if confidence >= 0.90
+            else f"the disc names no language; the language detection chose "
+            f"{detected} ({confidence:.0%})",
+        )
+    return LanguageSettlement(
+        None, "neither the disc nor the language detection names the language; the track is tagged und"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class LanguageEvidence:
     source: LanguageSource

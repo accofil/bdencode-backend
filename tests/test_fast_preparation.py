@@ -253,7 +253,7 @@ def test_the_integrity_decode_can_also_verify_the_crop() -> None:
     plain = source_video_integrity_command(Path("/work/reference.mkv"))
     verifying = source_video_integrity_command(Path("/work/reference.mkv"), cropdetect=True)
     position = verifying.index("-vf")
-    assert verifying[position:position + 2] == ["-vf", "cropdetect=limit=0.094:round=2:reset=0"]
+    assert verifying[position:position + 2] == ["-vf", "cropdetect=limit=0.094:round=2:reset=1"]
     assert verifying[:position] + verifying[position + 2:] == plain
     # Strict error detection stays: this decode is the integrity check.
     assert "-xerror" in verifying and "explode" in verifying

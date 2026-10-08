@@ -133,6 +133,16 @@ function eventKindLabel(kind: string): string | undefined {
     "worker.dynamic-hdr": ["Dinamikus HDR", "Dynamic HDR"],
     "worker.variable-aspect": ["Változó képarány", "Variable aspect ratio"],
     "worker.final-vmaf": ["Mintavett VMAF a kész fájlon", "Sampled VMAF of the final file"],
+    "worker.audio-qc-warning": ["Figyelmeztetés a hangellenőrzésből", "Audio check warning"],
+    "worker.audio-continuity-warning": ["Hang a klipillesztéseknél", "Audio at the clip joins"],
+    "worker.crop-verification-warning": ["Crop-ellenőrzés: rövid felvillanás", "Crop check: short flash"],
+    "worker.subtitle-decode-warning": ["Felirat-dekódolás: figyelmeztetés", "Subtitle decode warning"],
+    "worker.video-duration-warning": ["Videóhossz: figyelmeztetés", "Video duration warning"],
+    "worker.video-efficiency-warning": ["Videóméret: figyelmeztetés", "Video size warning"],
+    "worker.stream-policy-warning": ["Videósáv leírása: figyelmeztetés", "Video stream description warning"],
+    "worker.clip-joins-verified": ["Klipillesztések ellenőrizve", "Clip joins verified"],
+    "worker.mkvmerge-warning": ["mkvmerge-figyelmeztetés", "mkvmerge warning"],
+    "worker.full-decode-warning": ["Teljes dekódolás: figyelmeztetés", "Full decode: warning"],
     "job.upload-reset": ["Képfeltöltés elölről", "Image upload restarted"],
   };
   const pair = labels[kind];
@@ -151,11 +161,21 @@ function eventMessageLabel(message: string): string | undefined {
     "I/P/B comparison complete": ["Az I/P/B összehasonlítás elkészült", "I/P/B comparison complete"],
     "encode, QC and comparison completed": ["A kódolás, az ellenőrzés és az összehasonlítás elkészült", "Encode, checks and comparison complete"],
     "image upload failed; retry is safe": ["A képfeltöltés sikertelen; biztonságosan újrapróbálható", "Image upload failed; a retry is safe"],
+    "track languages were chosen with warnings; check them in language-inference.json": ["A sávnyelveket a program figyelmeztetéssel választotta ki (például a lemez címkéje és a nyelvfelismerés eltér); a részletek a language-inference.json-ban", "Track languages were chosen with warnings (for example the disc label and the language detection differ); details in language-inference.json"],
+    "some retained tracks have no known language and are tagged und": ["Néhány megtartott sáv nyelve ismeretlen, ezért „und” jelölést kap; a jelölés a kódolás után is javítható", "Some kept tracks have no known language and are tagged und; the tag can be fixed after the encode"],
     "one or more retained tracks need a confirmed language before encoding": ["Egy vagy több megtartott sáv nyelvét meg kell erősíteni a kódolás előtt", "One or more kept tracks need a confirmed language before encoding"],
     "track languages confirmed by operator": ["A sávok nyelve megerősítve", "Track languages confirmed"],
     "image upload reset by operator": ["A képfeltöltés elölről indul", "Image upload starts over"],
     "image upload restarted after a reset": ["A képfeltöltés újraindult", "Image upload restarted"],
     "finishing without image upload": ["Befejezés képfeltöltés nélkül", "Finishing without image upload"],
+    "mkvmerge finished the mux with warnings that do not affect the media; the job continues": ["Az mkvmerge figyelmeztetéssel zárta az MKV összeállítását, de ez a sávok tartalmát nem érinti; a job folytatódik (részletek az mkvmerge-mux-warnings.json-ban)", "mkvmerge finished the MKV mux with warnings that do not affect the tracks; the job continues (details in mkvmerge-mux-warnings.json)"],
+    "mkvmerge identify reported warnings that do not affect the media; the job continues": ["Az mkvmerge a kész fájl vizsgálatakor figyelmeztetett, de ez a tartalmat nem érinti; a job folytatódik (részletek az mkvmerge-identify-warnings.json-ban)", "mkvmerge warned while inspecting the finished file, but the content is not affected; the job continues (details in mkvmerge-identify-warnings.json)"],
+    "mkvmerge reported lost or damaged data during the mux; inspect mkvmerge-output.log before resuming": ["Az mkvmerge az MKV összeállításakor elveszett vagy sérült adatot jelzett; folytatás előtt nézd meg az mkvmerge-output.log-ot", "mkvmerge reported lost or damaged data during the MKV mux; check mkvmerge-output.log before continuing"],
+    "mkvmerge identify reported lost or damaged data in the final file": ["Az mkvmerge elveszett vagy sérült adatot talált a kész fájlban; ellenőrzés szükséges", "mkvmerge found lost or damaged data in the finished file; please review"],
+    "mkvmerge completed with warnings; inspect mkvmerge.log before resuming": ["Az mkvmerge figyelmeztetéssel zárta az MKV összeállítását; folytatás előtt nézd meg az mkvmerge.log-ot", "mkvmerge finished the MKV mux with warnings; check mkvmerge.log before continuing"],
+    "mkvmerge identify completed with warnings; inspect its stderr before resuming": ["Az mkvmerge a kész fájl vizsgálatakor figyelmeztetett; folytatás előtt nézd meg a naplóját", "mkvmerge warned while inspecting the finished file; check its log before continuing"],
+    "the full decode of the final file logged messages that are not decode errors; the job continues": ["A kész fájl teljes dekódolása üzeneteket írt a naplóba, de dekódolási hiba nem volt; a job folytatódik (részletek a full-decode-diagnostics.json-ban)", "The full decode of the finished file logged messages, but no decode error; the job continues (details in full-decode-diagnostics.json)"],
+    "full decode emitted an error-level diagnostic; final media is not accepted": ["A kész fájl teljes dekódolása hibát jelzett, ezért a fájl nem fogadható el; ellenőrzés szükséges (részletek a full-decode-diagnostics.json-ban)", "The full decode of the finished file reported an error, so the file is not accepted; please review (details in full-decode-diagnostics.json)"],
   };
   const pair = labels[message];
   return pair ? t(pair[0], pair[1]) : undefined;
@@ -211,6 +231,8 @@ export function formatStatusMessage(message: string | null, fallback: string): s
   }
   const probe = /^CRF (\S+) scored VMAF (\S+)$/.exec(message);
   if (probe) return t(`CRF ${probe[1]} próba: VMAF ${probe[2]}`, `CRF ${probe[1]} probe: VMAF ${probe[2]}`);
+  const clamped = /^automatic CRF search selected CRF (\S+); the (size|VMAF) target is out of reach within CRF (\S+), so the nearest measured CRF is used$/.exec(message);
+  if (clamped) return t(`Az automatikus CRF-keresés a CRF ${clamped[1]} értéket választotta: a ${clamped[2] === "size" ? "méretcél" : "VMAF-cél"} a CRF ${clamped[3]} tartományban nem érhető el, ezért a hozzá legközelebbi mért értékkel kódol`, `The automatic CRF search chose CRF ${clamped[1]}: the ${clamped[2]} target is out of reach within CRF ${clamped[3]}, so the nearest measured CRF is used`);
   const chosen = /^automatic CRF search selected CRF (\S+)$/.exec(message);
   if (chosen) return t(`Az automatikus CRF-keresés a CRF ${chosen[1]} értéket választotta`, `The automatic CRF search chose CRF ${chosen[1]}`);
   const verified = /^(hdr10plus|dolby_vision) metadata verified for (\d+) frames$/.exec(message);
@@ -233,10 +255,24 @@ export function formatStatusMessage(message: string | null, fallback: string): s
   }
   const reducedI = /^comparison uses (\d+) I pairs: too few source and encode I-frames coincide in the sample windows$/.exec(message);
   if (reducedI) return t(`Az összehasonlítás ${reducedI[1]} I-képpárt használ: a mintaablakokban kevés helyen esik egybe a forrás és a kódolás I-képkockája (a hiányzó helyekre P- és B-párok kerültek).`, `The comparison uses ${reducedI[1]} I pairs: few source and encode I-frames coincide in the sample windows (P and B pairs fill the rest).`);
+  const ioRetry = /^a storage or network error interrupted the ([A-Z_]+) stage; retrying automatically in ([\d.]+) s$/.exec(message);
+  if (ioRetry) return t(`Tárhely- vagy hálózati hiba szakította meg a(z) ${stateLabel(ioRetry[1] as JobState)} szakaszt; automatikus újrapróbálás ${ioRetry[2]} mp múlva`, `A storage or network error interrupted the ${stateLabel(ioRetry[1] as JobState)} stage; retrying automatically in ${ioRetry[2]} s`);
+  const comparisonRetry = /^comparison ran out of time; retrying automatically with (\d+)x time budgets$/.exec(message);
+  if (comparisonRetry) return t(`Az összehasonlítás kifutott az időből; automatikus újrapróbálás ${comparisonRetry[1]}× hosszabb időkerettel (az elkészült képpárok megmaradnak)`, `The comparison ran out of time; retrying automatically with ${comparisonRetry[1]}x time budgets (finished pairs are kept)`);
   const uploadRetry = /^image upload attempt (\d+) failed; retrying automatically in ([\d.]+) s$/.exec(message);
   if (uploadRetry) return t(`A képfeltöltés ${uploadRetry[1]}. kísérlete nem sikerült (a tárhely nem elérhető); automatikus újrapróbálás ${uploadRetry[2]} mp múlva`, `Image upload attempt ${uploadRetry[1]} failed (the host is unavailable); retrying automatically in ${uploadRetry[2]} s`);
+  const audio = audioQcFinding(message);
+  if (audio) return audio;
+  const joins = /^(\d+) remux message\(s\) at (\d+) clip join\(s\)( and the end of the title)?; the strict decode (?:across the joins|there) is clean$/.exec(message);
+  if (joins) {
+    return joins[3]
+      ? t(`A remux ${joins[1]} üzenete a klipillesztéseknél (${joins[2]}) és a film végén keletkezett; a szigorú dekódolás ott hibátlan`, `${joins[1]} remux message(s) at the clip joins (${joins[2]}) and the end of the title; the strict decode there is clean`)
+      : t(`A remux ${joins[1]} üzenete ${joins[2]} klipillesztésnél keletkezett; a szigorú dekódolás az illesztéseken hibátlan`, `${joins[1]} remux message(s) at ${joins[2]} clip join(s); the strict decode across the joins is clean`);
+  }
   const metric = videoMetricFinding(message);
   if (metric) return metric;
+  const stability = stabilityWarning(message);
+  if (stability) return stability;
   const sampledVmaf = /^sampled VMAF of the final file: mean (\S+), 1% low (\S+) \((\d+) frames\)$/.exec(message);
   if (sampledVmaf) return t(`Mintavett VMAF a kész fájlon: átlag ${sampledVmaf[1]}, 1% low ${sampledVmaf[2]} (${sampledVmaf[3]} képkocka)`, `Sampled VMAF of the final file: mean ${sampledVmaf[1]}, 1% low ${sampledVmaf[2]} (${sampledVmaf[3]} frames)`);
   return encodeProgressLabel(message) ?? eventMessageLabel(message) ?? formatWorkerError(message);
@@ -253,6 +289,30 @@ export function formatWorkerError(error: string): string {
     return t("Egy feliratsáv Matroska-fájlja nem készült el. A kész videó- és hangsávok megmaradtak; a javítás után biztonságosan folytatható.", "A subtitle track's Matroska file was not created. The finished video and audio tracks are kept; after the fix the job can safely continue.");
   }
   return error;
+}
+
+/** An audio check finding that is recorded as a warning, localised. */
+export function audioQcFinding(message: string): string | undefined {
+  const level = /^audio track (\S+) has level or bitrate findings that do not show a broken encode; the job continues$/.exec(message);
+  if (level) return t(`A(z) ${level[1]} hangsáv szint- vagy bitrátamérése eltérést mutatott, de ez nem hibás kódolásra utal; a job folytatódik (részletek az audio-comparison.json-ban)`, `Audio track ${level[1]} has level or bitrate findings that do not point to a broken encode; the job continues (details in audio-comparison.json)`);
+  const joins = /^audio track (\S+) has small gaps or overlaps at the playlist's clip joins; the sample count matches and the job continues$/.exec(message);
+  if (joins) return t(`A(z) ${joins[1]} hangsávban a playlist klipillesztéseinél kis szünet vagy átfedés van; a hangminták száma egyezik, a job folytatódik`, `Audio track ${joins[1]} has small gaps or overlaps at the playlist's clip joins; the sample count matches and the job continues`);
+  return undefined;
+}
+
+/**
+ * Checks that record a measurement artefact or an FFmpeg-build difference as a
+ * warning and let the job continue (since 3.7.3), localised.
+ */
+export function stabilityWarning(message: string): string | undefined {
+  const flash = /^crop verification: (\d+) short flash\(es\) reach into the cropped border \((\d+) frame\(s\), longest ([\d.]+) s\); the crop is kept and the job continues$/.exec(message);
+  if (flash) return t(`Crop-ellenőrzés: ${flash[1]} rövid felvillanás ér bele a levágott sávba (${flash[2]} képkocka, a leghosszabb ${flash[3]} mp). A crop marad, a job folytatódik.`, `Crop check: ${flash[1]} short flash(es) reach into the cropped border (${flash[2]} frame(s), longest ${flash[3]} s). The crop is kept and the job continues.`);
+  if (message === "the final subtitle decode shows known harmless differences; the job continues") return t("A kész feliratok dekódolása ismert, ártalmatlan eltéréseket mutat; a job folytatódik (részletek a subtitle-integrity.json-ban)", "The final subtitle decode shows known harmless differences; the job continues (details in subtitle-integrity.json)");
+  if (message === "the estimated playlist duration differs from the frame count; the job continues") return t("A playlist becsült hossza eltér a képkockák számából adódó hossztól; a job folytatódik (részletek a video-frame-completeness.json-ban)", "The estimated playlist duration differs from the frame count; the job continues (details in video-frame-completeness.json)");
+  if (message === "the encoded video is not smaller than the source; the job continues") return t("A kódolt videó nem lett kisebb a forrásnál (alacsony bitrátájú vagy animációs lemeznél előfordul); a job folytatódik", "The encoded video is not smaller than the source (this happens with low-bitrate or animated discs); the job continues");
+  if (message === "the final video stream is described differently by this FFmpeg build; the job continues") return t("Ez az FFmpeg-verzió másképp írja le a kész videósávot (profilnév, chroma-pozíció vagy szint); a kép megfelel a beállításoknak, a job folytatódik", "This FFmpeg build describes the final video stream differently (profile name, chroma location or level); the picture matches the settings and the job continues");
+  if (message === "The libbluray playlist reader failed; playlist durations are ffprobe estimates and the duration check only warns.") return t("A libbluray playlist-olvasó nem futott le; a playlistek hossza az ffprobe becslése, ezért a hosszellenőrzés csak figyelmeztet.", "The libbluray playlist reader failed; playlist durations are ffprobe estimates and the duration check only warns.");
+  return undefined;
 }
 
 /** One finding of the sampled native-YUV PSNR/SSIM measurement, localised. */

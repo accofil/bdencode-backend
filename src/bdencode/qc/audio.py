@@ -61,6 +61,25 @@ class AudioComparison:
 
 AUDIO_FRAME_CONTINUITY_SCHEMA_VERSION = 1
 _MAX_REPORTED_AUDIO_DISCONTINUITIES = 32
+# Every discontinuity up to this many keeps its position and size, so the
+# ones at a playlist's clip joins can be told apart from the rest.
+_MAX_RECORDED_AUDIO_DISCONTINUITIES = 1024
+
+# A multi-clip Blu-ray playlist is played as one stream; at a clip join the
+# sound of the next clip may start a little before or after the previous one
+# ended.  A gap or overlap is a join artefact when it lies this close to a
+# join of the playlist (the join times are the video's, the audio cursor
+# starts at its own first frame) and is no longer than the second limit.
+AUDIO_JOIN_WINDOW_SECONDS = Decimal("1.0")
+AUDIO_MAXIMUM_JOIN_DISCONTINUITY_SECONDS = Decimal("0.5")
+
+
+@dataclass(frozen=True, slots=True)
+class AudioDiscontinuity:
+    """One sample-cursor jump: positive ``delta_samples`` is a gap."""
+
+    position_seconds: Decimal
+    delta_samples: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +111,9 @@ class AudioFrameContinuity:
     # 6.0, e.g. Debian 12's 5.1); the stream's rate then stands for every
     # frame, and a rate change inside the stream cannot be seen.
     frame_sample_rates_reported: bool = True
+    # Position (seconds from the first frame) and size of each discontinuity,
+    # up to ``_MAX_RECORDED_AUDIO_DISCONTINUITIES``.
+    discontinuities: tuple[AudioDiscontinuity, ...] = ()
 
     @property
     def continuous(self) -> bool:
@@ -106,6 +128,13 @@ class AudioFrameContinuity:
         ):
             value[field] = str(value[field])
         value["discontinuity_frame_indexes"] = list(self.discontinuity_frame_indexes)
+        value["discontinuities"] = [
+            {
+                "position_seconds": str(item.position_seconds),
+                "delta_samples": item.delta_samples,
+            }
+            for item in self.discontinuities
+        ]
         value["continuous"] = self.continuous
         return value
 
@@ -128,11 +157,27 @@ class AudioFrameContinuityVerdict:
     total_samples_within_tolerance: bool
     normalized_end_within_tolerance: bool
     passed: bool
+    # Discontinuities that are not explained by a clip join of the playlist;
+    # only these fail the check.
+    source_unexcused_discontinuities: int = 0
+    encoded_unexcused_discontinuities: int = 0
+    # Gaps and overlaps at the playlist's clip joins: recorded, not failed.
+    excused_join_discontinuities: int = 0
+    join_slack_seconds: Decimal = Decimal(0)
+    endpoint_tolerance_seconds: Decimal | None = None
+    join_seconds: tuple[Decimal, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["normalized_end_delta_seconds"] = str(self.normalized_end_delta_seconds)
         value["tolerance_seconds"] = str(self.tolerance_seconds)
+        value["join_slack_seconds"] = str(self.join_slack_seconds)
+        value["endpoint_tolerance_seconds"] = (
+            None
+            if self.endpoint_tolerance_seconds is None
+            else str(self.endpoint_tolerance_seconds)
+        )
+        value["join_seconds"] = [str(item) for item in self.join_seconds]
         return value
 
 
@@ -154,11 +199,15 @@ class AudioVerification:
     timing_tolerance_seconds: Decimal
     duration_tolerance_seconds: Decimal
     passed: bool
+    expected_bit_rate: int | None = None
+    encode_bit_rate: int | None = None
+    warnings: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["timing_tolerance_seconds"] = str(self.timing_tolerance_seconds)
         value["duration_tolerance_seconds"] = str(self.duration_tolerance_seconds)
+        value["warnings"] = list(self.warnings)
         return value
 
 
@@ -416,6 +465,28 @@ def _finite_decimal(value: Decimal | None) -> Decimal | None:
     return value if value is not None and value.is_finite() else None
 
 
+# A lossy encode (and a DTS core extraction) decodes to different samples
+# than its source, so it cannot inherit the source's clipping by PCM proof.
+# Loud Blu-ray masters routinely touch full scale and carry intersample peaks
+# above 0 dBTP, and a lossy codec moves those peaks by a few tenths of a dB:
+# such findings are warnings.  The job stops only on damage the encode itself
+# added.
+#
+# Full-scale samples: a decoded lossy stream is floating point, and astats
+# counts the occasions the signal reaches its single maximum, so a loud
+# master's encode reports a handful.  More than ten times the source's count
+# and at least 1000 occasions is widespread new clipping, not a loud master.
+LOSSY_NEW_CLIPPING_MINIMUM_SAMPLES = 1000
+LOSSY_NEW_CLIPPING_SOURCE_FACTOR = 10
+# Integrated loudness: a 7.1 to 5.1 downmix moves a whole film by well under
+# 1.5 LU because the front channels dominate.  A shift above 3 LU (twice the
+# acoustic power, or half of it) is a gain, channel-mapping or missing-channel
+# defect.
+LOSSY_MAXIMUM_LOUDNESS_SHIFT_LU = Decimal("3")
+# A source quieter than this may legitimately gate to silence after encoding.
+_AUDIBLE_SOURCE_LUFS = Decimal("-50")
+
+
 def verify_audio_signal(
     source: AudioSignalAnalysis,
     encode: AudioSignalAnalysis,
@@ -425,24 +496,33 @@ def verify_audio_signal(
     maximum_lossy_true_peak_dbfs: Decimal = Decimal("0"),
     near_ceiling_dbfs: Decimal = Decimal("-1.0"),
     maximum_near_ceiling_increase_db: Decimal = Decimal("0.3"),
+    maximum_loudness_shift_lu: Decimal = LOSSY_MAXIMUM_LOUDNESS_SHIFT_LU,
 ) -> AudioSignalVerification:
     """Validate whole-track audio signal safety for an effective output policy.
 
-    Only ``policy.strategy == \"lossy_transcode\"`` receives the lossy
-    intersample-peak gates.  Non-finite samples always fail.  Copy and FLAC may
-    report source clipping as an inherited warning only when their complete
-    decoded PCM SHA-256 values match; new, changed or unproven clipping remains
-    a failure.  Positive intersample peaks remain explicit warnings for the
-    other lossless policies.
+    Incomplete or invalid analyses and non-finite samples always fail.  Copy
+    and FLAC may report source clipping as an inherited warning only when
+    their complete decoded PCM SHA-256 values match; new, changed or unproven
+    clipping remains a failure there.
+
+    Policies without a PCM proof (lossy transcodes, DTS core extraction)
+    report source clipping, true peaks above the ceiling and a near-ceiling
+    true-peak rise as warnings.  They fail only on new damage: far more
+    clipped samples than the source has (see
+    ``LOSSY_NEW_CLIPPING_*``), an integrated loudness shift above
+    ``maximum_loudness_shift_lu``, or a silent encode of an audible source.
     """
 
     if maximum_near_ceiling_increase_db < 0:
         raise ValueError("maximum true-peak increase must not be negative")
     if near_ceiling_dbfs > maximum_lossy_true_peak_dbfs:
         raise ValueError("near-ceiling threshold must not exceed the peak ceiling")
+    if maximum_loudness_shift_lu <= 0:
+        raise ValueError("maximum loudness shift must be positive")
 
     failures: list[str] = []
     warnings: list[str] = []
+    pcm_proof_policy = policy.pcm_match_required
     inherited_clipping = (
         policy.pcm_match_required
         and decoded_pcm_sha256_match is True
@@ -467,9 +547,13 @@ def verify_audio_signal(
                 f"(NaN={analysis.nan_samples or 0}, Inf={analysis.inf_samples or 0})"
             )
         if analysis.has_clipping and not inherited_clipping:
-            failures.append(
+            message = (
                 f"{label} audio contains {analysis.clipped_samples} clipped/full-scale samples"
             )
+            if pcm_proof_policy:
+                failures.append(message)
+            else:
+                warnings.append(message)
         if analysis.has_denormals:
             warnings.append(
                 f"{label} audio contains {analysis.denormal_samples} denormal samples"
@@ -490,14 +574,10 @@ def verify_audio_signal(
     )
     lossy_transcode = policy.strategy == "lossy_transcode"
     if encode_peak is not None and encode_peak > maximum_lossy_true_peak_dbfs:
-        message = (
+        warnings.append(
             f"encode true peak is {encode_peak} dBTP, above "
             f"{maximum_lossy_true_peak_dbfs} dBTP"
         )
-        if lossy_transcode:
-            failures.append(message)
-        else:
-            warnings.append(message)
     if source_peak is not None and source_peak > maximum_lossy_true_peak_dbfs:
         warnings.append(
             f"source true peak is {source_peak} dBTP, above "
@@ -510,10 +590,38 @@ def verify_audio_signal(
         and peak_increase is not None
         and peak_increase > maximum_near_ceiling_increase_db
     ):
-        failures.append(
+        warnings.append(
             f"lossy transcode increased near-ceiling true peak by "
-            f"{peak_increase} dB (limit {maximum_near_ceiling_increase_db} dB)"
+            f"{peak_increase} dB (policy {maximum_near_ceiling_increase_db} dB)"
         )
+
+    if not pcm_proof_policy:
+        source_clipped = source.clipped_samples or 0
+        encode_clipped = encode.clipped_samples or 0
+        allowed_clipped = max(
+            LOSSY_NEW_CLIPPING_MINIMUM_SAMPLES,
+            LOSSY_NEW_CLIPPING_SOURCE_FACTOR * source_clipped,
+        )
+        if encode_clipped > allowed_clipped:
+            failures.append(
+                f"encode audio has {encode_clipped} clipped/full-scale samples, "
+                f"far above the source's {source_clipped} (limit {allowed_clipped})"
+            )
+        source_loudness = _finite_decimal(source.integrated_lufs)
+        encode_loudness = _finite_decimal(encode.integrated_lufs)
+        if source_loudness is not None and encode_loudness is not None:
+            shift = encode_loudness - source_loudness
+            if abs(shift) > maximum_loudness_shift_lu:
+                failures.append(
+                    f"encode integrated loudness differs from the source by "
+                    f"{shift} LU (limit {maximum_loudness_shift_lu} LU)"
+                )
+        elif (
+            source_loudness is not None
+            and source_loudness > _AUDIBLE_SOURCE_LUFS
+            and encode.integrated_lufs == Decimal("-Infinity")
+        ):
+            failures.append("encode audio is silent while the source is audible")
 
     return AudioSignalVerification(
         action=policy.action,
@@ -527,6 +635,27 @@ def verify_audio_signal(
         failures=tuple(failures),
         warnings=tuple(warnings),
         passed=not failures,
+    )
+
+
+# ffprobe reports the bitrate a lossy stream's headers declare, which is not
+# always the nominal preset value: a DTS "1536 kbps" frame (2013 bytes per 512
+# samples at 48 kHz) reads back as 1509750 or 1509000 bit/s.  A wrong preset
+# is off by a whole table step (640 against 448 kbps), far beyond 3 %.
+AUDIO_BITRATE_TOLERANCE_RATIO = Decimal("0.03")
+_EQUIVALENT_AUDIO_BIT_RATES: dict[tuple[str, int], frozenset[int]] = {
+    ("dts", 1_536_000): frozenset({1_509_000, 1_509_750, 1_536_000}),
+}
+
+
+def audio_bit_rate_matches(codec: str, expected: int, reported: int) -> bool:
+    """Whether a reported lossy bitrate is the expected preset's bitrate."""
+
+    known = _EQUIVALENT_AUDIO_BIT_RATES.get((codec.casefold(), expected))
+    if known is not None and reported in known:
+        return True
+    return abs(Decimal(reported - expected)) <= (
+        Decimal(expected) * AUDIO_BITRATE_TOLERANCE_RATIO
     )
 
 
@@ -547,7 +676,20 @@ def verify_audio_output(
     expected_bit_rate = (
         policy.bitrate_kbps * 1000 if policy.bitrate_kbps is not None else None
     )
-    bitrate_match = expected_bit_rate is None or encode.bit_rate == expected_bit_rate
+    warnings: list[str] = []
+    if expected_bit_rate is None:
+        bitrate_match = True
+    elif encode.bit_rate is None:
+        # A missing header value is a measurement gap, not a wrong encode:
+        # the codec, channels, sample rate and timing are still checked.
+        bitrate_match = True
+        warnings.append(
+            f"encoded audio bitrate is not reported; expected {expected_bit_rate} bit/s"
+        )
+    else:
+        bitrate_match = audio_bit_rate_matches(
+            policy.codec_name, expected_bit_rate, encode.bit_rate
+        )
     sample_rate_match = encode.sample_rate == expected_sample_rate
     channels_match = encode.channels == expected_channels
     if policy.pcm_match_required:
@@ -611,6 +753,9 @@ def verify_audio_output(
         timing_tolerance_seconds=tolerance,
         duration_tolerance_seconds=duration_tolerance,
         passed=passed,
+        expected_bit_rate=expected_bit_rate,
+        encode_bit_rate=encode.bit_rate,
+        warnings=tuple(warnings),
     )
 
 
@@ -725,6 +870,7 @@ def parse_audio_frame_continuity(
     maximum_gap_samples = 0
     maximum_overlap_samples = 0
     discontinuity_indexes: list[int] = []
+    discontinuities: list[AudioDiscontinuity] = []
     last_frame_samples = 0
     frames_without_rate = 0
     for index, frame in enumerate(frames):
@@ -762,13 +908,14 @@ def parse_audio_frame_continuity(
             if delta > timestamp_tolerance_samples:
                 gap_count += 1
                 maximum_gap_samples = max(maximum_gap_samples, delta)
-                if len(discontinuity_indexes) < _MAX_REPORTED_AUDIO_DISCONTINUITIES:
-                    discontinuity_indexes.append(index)
             elif delta < -timestamp_tolerance_samples:
                 overlap_count += 1
                 maximum_overlap_samples = max(maximum_overlap_samples, -delta)
+            if abs(delta) > timestamp_tolerance_samples:
                 if len(discontinuity_indexes) < _MAX_REPORTED_AUDIO_DISCONTINUITIES:
                     discontinuity_indexes.append(index)
+                if len(discontinuities) < _MAX_RECORDED_AUDIO_DISCONTINUITIES:
+                    discontinuities.append(AudioDiscontinuity(normalized_pts, delta))
         previous_end_cursor = cursor + frame_samples
         total_samples += frame_samples
         last_pts = pts
@@ -800,16 +947,80 @@ def parse_audio_frame_continuity(
         maximum_overlap_samples=maximum_overlap_samples,
         discontinuity_frame_indexes=tuple(discontinuity_indexes),
         frame_sample_rates_reported=frames_without_rate == 0,
+        discontinuities=tuple(discontinuities),
     )
+
+
+def _split_join_discontinuities(
+    evidence: AudioFrameContinuity,
+    join_seconds: tuple[Decimal, ...],
+    *,
+    window_seconds: Decimal,
+    maximum_seconds: Decimal,
+) -> tuple[int, tuple[AudioDiscontinuity, ...]]:
+    """Count the discontinuities a clip join does not explain.
+
+    Returns that count and the excused join discontinuities.  A discontinuity
+    beyond the recorded ones has no position, so it is never excused.
+    """
+
+    maximum_samples = maximum_seconds * Decimal(evidence.sample_rate)
+    excused: list[AudioDiscontinuity] = []
+    for item in evidence.discontinuities:
+        if abs(item.delta_samples) <= maximum_samples and any(
+            abs(item.position_seconds - join) <= window_seconds
+            for join in join_seconds
+        ):
+            excused.append(item)
+    total = evidence.gap_count + evidence.overlap_count
+    return total - len(excused), tuple(excused)
 
 
 def compare_audio_frame_continuity(
     source: AudioFrameContinuity,
     encoded: AudioFrameContinuity,
     policy: EffectiveAudioPolicy,
+    *,
+    join_seconds: tuple[Decimal, ...] = (),
+    join_window_seconds: Decimal = AUDIO_JOIN_WINDOW_SECONDS,
+    maximum_join_discontinuity_seconds: Decimal = (
+        AUDIO_MAXIMUM_JOIN_DISCONTINUITY_SECONDS
+    ),
 ) -> AudioFrameContinuityVerdict:
-    """Compare normalized decoded sample counts and endpoints under policy."""
+    """Compare normalized decoded sample counts and endpoints under policy.
 
+    ``join_seconds`` are the clip joins of a multi-clip playlist.  A gap or
+    overlap at a join (see ``AUDIO_JOIN_WINDOW_SECONDS``) is recorded but does
+    not fail; the endpoint tolerance grows by the size of those join
+    discontinuities, because an encoder may close a join gap instead of
+    keeping it.  The decoded total sample count keeps its codec tolerance:
+    lost or invented sound still fails.
+    """
+
+    joins = tuple(sorted(set(join_seconds)))
+    source_unexcused, source_excused = _split_join_discontinuities(
+        source,
+        joins,
+        window_seconds=join_window_seconds,
+        maximum_seconds=maximum_join_discontinuity_seconds,
+    )
+    encoded_unexcused, encoded_excused = _split_join_discontinuities(
+        encoded,
+        joins,
+        window_seconds=join_window_seconds,
+        maximum_seconds=maximum_join_discontinuity_seconds,
+    )
+    join_slack_seconds = sum(
+        (
+            Decimal(abs(item.delta_samples)) / Decimal(evidence.sample_rate)
+            for evidence, excused in (
+                (source, source_excused),
+                (encoded, encoded_excused),
+            )
+            for item in excused
+        ),
+        Decimal(0),
+    )
     source_sample_duration = Decimal(source.total_samples) / Decimal(source.sample_rate)
     expected_encoded_samples = int(
         (source_sample_duration * Decimal(encoded.sample_rate)).to_integral_value(
@@ -831,10 +1042,11 @@ def compare_audio_frame_continuity(
         )
     )
     sample_count_match = abs(total_sample_delta) <= tolerance_samples
-    endpoint_match = abs(normalized_end_delta) <= tolerance_seconds
+    endpoint_tolerance = tolerance_seconds + join_slack_seconds
+    endpoint_match = abs(normalized_end_delta) <= endpoint_tolerance
     passed = (
-        source.continuous
-        and encoded.continuous
+        source_unexcused == 0
+        and encoded_unexcused == 0
         and sample_count_match
         and endpoint_match
     )
@@ -853,6 +1065,12 @@ def compare_audio_frame_continuity(
         total_samples_within_tolerance=sample_count_match,
         normalized_end_within_tolerance=endpoint_match,
         passed=passed,
+        source_unexcused_discontinuities=source_unexcused,
+        encoded_unexcused_discontinuities=encoded_unexcused,
+        excused_join_discontinuities=len(source_excused) + len(encoded_excused),
+        join_slack_seconds=join_slack_seconds,
+        endpoint_tolerance_seconds=endpoint_tolerance,
+        join_seconds=joins,
     )
 
 

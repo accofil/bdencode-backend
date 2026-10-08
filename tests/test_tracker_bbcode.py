@@ -61,7 +61,7 @@ def test_screenshots_are_spread_b_pairs() -> None:
 
 def test_comparisons_prefer_b_frames_never_i() -> None:
     chosen = comparison_pairs(PAIRS)
-    assert len(chosen) == 12 and {item["category"] for item in chosen} == {"B"}
+    assert len(chosen) == 10 and {item["category"] for item in chosen} == {"B"}
     indexes = [item["presentation_index"] for item in chosen]
     assert indexes == sorted(indexes)
     # Without enough B pairs, P pairs fill up to ten.
@@ -72,7 +72,7 @@ def test_aither_block_follows_the_comparison_guide() -> None:
     lines = tracker_bbcode("aither", PAIRS, upload_all(PAIRS), encoder_log="x265 [info]: frame B: 1", codec="x265")
     block = next(line for line in lines if line.startswith("[comparison=Source, Encode]"))
     urls = block.removeprefix("[comparison=Source, Encode]").removesuffix("[/comparison]").split(" ")
-    assert len(urls) == 24
+    assert len(urls) == 20
     assert urls[0].endswith("-reference-sdr.png") and urls[1].endswith("-encode-sdr.png")
     start = lines.index("[center]")
     shots = lines[start + 1 : lines.index("[/center]")]
@@ -93,7 +93,7 @@ def test_ncore_has_three_clean_screenshots_and_comparison_links() -> None:
     assert len(shots) == 3 and all("-screenshot.png" in line for line in shots)
     assert "[center][size=12pt][highlight]Forrás vs. Encode[/highlight][/size]" in lines
     links = [line for line in lines if line.startswith("[url=") and "Forrás" in line]
-    assert len(links) == 12 and all("(B-frame, 00:" in line for line in links)
+    assert len(links) == 10 and all("(B-frame, 00:" in line for line in links)
     assert lines[-1] == "[/center]"
 
 
@@ -119,3 +119,19 @@ def test_nothing_without_a_profile_or_without_uploads() -> None:
 )
 def test_the_encoder_summary_keeps_only_encoder_lines(log: str, expected: str) -> None:
     assert encoder_summary(log) == expected
+
+
+def test_ten_pairs_are_published_b_first_and_spread_over_the_runtime() -> None:
+    from bdencode.tracker_bbcode import published_pairs
+
+    chosen = published_pairs(make_pairs("IPB" * 8))
+    assert [item["category"] for item in chosen].count("B") == 8
+    assert [item["category"] for item in chosen].count("P") == 2
+    assert "I" not in {item["category"] for item in chosen}
+    indexes = [item["presentation_index"] for item in chosen]
+    assert indexes == sorted(indexes)
+    # The two P pairs come from both ends of the title, not the start.
+    p_indexes = [item["presentation_index"] for item in chosen if item["category"] == "P"]
+    assert p_indexes == [2000, 23000]
+    # I-frames only when B and P run out.
+    assert [item["category"] for item in published_pairs(make_pairs("IIIIIIIIBP"))].count("I") == 8

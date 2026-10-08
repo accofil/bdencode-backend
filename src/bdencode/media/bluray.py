@@ -278,6 +278,16 @@ class DiscScan:
         }
 
 
+# The libbluray playlist helper reads every playlist of the disc; on a slow
+# HDD that can take several minutes.  It is tried twice before the scan falls
+# back to ffprobe's estimated durations.
+LIBBLURAY_SCAN_TIMEOUT_SECONDS = 600
+LIBBLURAY_SCAN_ATTEMPTS = 2
+LIBBLURAY_UNAVAILABLE_WARNING = (
+    "The libbluray playlist reader failed; playlist durations are ffprobe "
+    "estimates and the duration check only warns."
+)
+
 @dataclass(frozen=True, slots=True)
 class CaptureResult:
     returncode: int
@@ -399,6 +409,8 @@ class BluRayScanner:
         content = ContentKind(content_kind)
         warnings: list[str] = []
         native = self._native_metadata(root)
+        if not native and (self.libbluray_provider or self.capabilities.libbluray_json):
+            warnings.append(LIBBLURAY_UNAVAILABLE_WARNING)
         mpls_files = sorted((root / "BDMV" / "PLAYLIST").glob("*.mpls"))
         native_by_id = {
             str(item.get("id", item.get("playlist_id", ""))).zfill(5): item
@@ -511,17 +523,34 @@ class BluRayScanner:
         return sorted(kept), total
 
     def _native_metadata(self, root: Path) -> Mapping[str, Any]:
+        """The libbluray playlist metadata, or ``{}`` when it is unavailable.
+
+        Reading every playlist of a disc on a slow or spun-down HDD can take
+        minutes, so the helper gets a generous time limit and one more try.
+        Without it the scan falls back to ffprobe's estimated durations and no
+        segments (see :data:`LIBBLURAY_UNAVAILABLE_WARNING`).
+        """
+
         if self.libbluray_provider:
             return self.libbluray_provider(root)
         executable = self.capabilities.libbluray_json
         if not executable:
             return {}
-        completed = self.runner.capture(
-            [executable, "--json", os.fspath(root)], timeout=120, check=False
-        )
-        if getattr(completed, "returncode", 1) != 0:
-            return {}
-        return _json_object(getattr(completed, "stdout", ""))
+        for _attempt in range(LIBBLURAY_SCAN_ATTEMPTS):
+            try:
+                completed = self.runner.capture(
+                    [executable, "--json", os.fspath(root)],
+                    timeout=LIBBLURAY_SCAN_TIMEOUT_SECONDS,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if getattr(completed, "returncode", 1) != 0:
+                continue
+            payload = _json_object(getattr(completed, "stdout", ""))
+            if payload:
+                return payload
+        return {}
 
     def _ffprobe_playlist(
         self, root: Path, playlist_id: str

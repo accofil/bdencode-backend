@@ -815,6 +815,8 @@ A képfeltöltésnél a **Feltöltött képek** mező dönti el, mely comparison
 - csak az SDR-nézet;
 - csak a natív kép.
 
+3.7.3-tól a mért képpárok közül csak **tíz** kerül fel. A program elsősorban B-képeket választ, ha azok elfogynak, P-, végül I-képeket, mindegyiket a film hosszában elosztva. Mellettük mindig felkerülnek a hangelemzés képei és trackerprofilnál a kötelező tiszta képernyőképek. A minőségmérés továbbra is mind a 24 páron történik.
+
 HDR-filmnél minden képpárnak natív és SDR-re leképezett nézete is van, ezért az egyik elhagyása felezi a feltöltést. A helyi PNG-k mind megmaradnak. Az első kép után a feltöltés tárhelyenként párhuzamosan, egyszerre három képpel halad.
 
 ### 7.6. A kész munka ellenőrzése

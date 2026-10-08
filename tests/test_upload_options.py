@@ -99,3 +99,30 @@ def test_hosts_without_parallel_support_upload_in_order() -> None:
 
     assert host.done == names(pngs)
     assert host.peak == 1
+
+
+def test_only_the_ten_published_pairs_are_uploaded_with_every_spectrogram() -> None:
+    from bdencode.tracker_bbcode import published_pairs
+
+    pairs = []
+    pngs = []
+    for number, category in enumerate("IPB" * 8, start=1):
+        label = f"{number:02d}-{category}-f{number * 1000:09d}"
+        pair = {"category": category, "presentation_index": number * 1000,
+                "reference_png": f"{label}-reference.png", "encode_png": f"{label}-encode.png"}
+        if number == 3:
+            pair["screenshot_png"] = f"{label}-screenshot.png"
+            pngs.append(Path(pair["screenshot_png"]))
+        pairs.append(pair)
+        pngs += [Path(pair["reference_png"]), Path(pair["encode_png"])]
+    pngs += [Path("audio-01-source-spectrum.png"), Path("audio-01-encode-spectrum.png")]
+
+    chosen = _images_to_upload(pngs, "all", pairs)
+
+    published = {name for item in published_pairs(pairs) for name in (item["reference_png"], item["encode_png"])}
+    assert len(published) == 20
+    assert set(names(chosen)) == published | {
+        "03-B-f000003000-screenshot.png",
+        "audio-01-source-spectrum.png",
+        "audio-01-encode-spectrum.png",
+    }

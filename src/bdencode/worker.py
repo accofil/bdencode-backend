@@ -8,6 +8,7 @@ restart never treats the mere presence of a partial output as success.
 from __future__ import annotations
 
 import contextlib
+import errno
 import functools
 import hashlib
 import json
@@ -21,6 +22,7 @@ import socket
 import subprocess
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from datetime import timedelta
@@ -49,6 +51,7 @@ from .crf_search import (
     CrfSearchError,
     CrfSearchOutcome,
     STATUS_MIN_CRF,
+    STATUS_UNREACHABLE,
     SampleWindow,
     SizeSearch,
     plan_sample_windows,
@@ -100,6 +103,7 @@ from .media.bluray import (
     DiscKind,
     DiscScan,
     HdrStaticMetadata,
+    LIBBLURAY_UNAVAILABLE_WARNING,
     MediaStream,
     PlaylistCandidate,
     PlaylistSegment,
@@ -113,8 +117,11 @@ from .media.language import (
     LanguageDecision,
     LanguageEvidence,
     LanguageResolver,
+    LanguageSettlement,
     LanguageSource,
     LanguageStatus,
+    normalize_iso639_2,
+    settle_track_language,
 )
 from .media.language_runtime import AudioLanguageRuntime, LanguageInferenceUnavailable
 from .media.track_analysis import (
@@ -169,14 +176,17 @@ from .mux import (
     FinalTrackPolicy,
     FinalVideoPolicy,
     MuxTrack,
+    MkvmergeWarning,
+    classify_mkvmerge_warnings,
     inspection_commands,
     mkvmerge_command,
+    mkvmerge_warning_lines,
     parse_stream_start_times,
     parse_stream_start_times_by_type,
     plan_common_zero_timeline,
     stream_start_probe_command,
     validate_dynamic_hdr_output,
-    validate_ffprobe_stream_policy,
+    assess_ffprobe_stream_policy,
     validate_hdr10_side_data,
     validate_mkvmerge_identification,
     validate_stream_start_times,
@@ -259,14 +269,15 @@ from .qc.video import (
 from .qc.subtitle import (
     SubtitleDecodeError,
     parse_subtitle_probe,
+    assess_final_subtitle_decode,
     require_subtitle_decode,
     subtitle_decode_probe_command,
     subtitle_probe_command,
     validate_subtitle_classification,
 )
 from .qc.integrity import (
+    classify_final_decode_log,
     clip_join_decode_command,
-    VideoEfficiencyError,
     compare_packet_timelines,
     packet_timeline_probe_command,
     parse_packet_timeline,
@@ -275,7 +286,7 @@ from .qc.integrity import (
     parse_video_stream_hash,
     require_video_cadence,
     require_video_completeness,
-    require_video_efficiency,
+    evaluate_video_efficiency,
     source_video_integrity_command,
     split_clip_join_lines,
     stream_payload_hash_command,
@@ -292,7 +303,12 @@ from .live_progress import (
     time_fraction,
 )
 from .review import read_upload_override, video_metrics_accepted
-from .tracker_bbcode import encoder_summary, screenshot_pair_numbers, tracker_bbcode
+from .tracker_bbcode import (
+    encoder_summary,
+    published_pairs,
+    screenshot_pair_numbers,
+    tracker_bbcode,
+)
 from .tracker_policy import TrackerProfile
 from .release_naming import (
     RELEASE_NAME_PATTERNS,
@@ -350,14 +366,31 @@ INTEGRITY_DECODE_THREADS = max(1, min(16, os.cpu_count() or 1))
 CROP_SCAN_SEGMENTS = max(1, min(16, os.cpu_count() or 1))
 
 
-def _images_to_upload(pngs: Sequence[Path], image_set: str) -> list[Path]:
+def _images_to_upload(
+    pngs: Sequence[Path],
+    image_set: str,
+    pairs: Sequence[Mapping[str, Any]] | None = None,
+) -> list[Path]:
     """The published subset of the comparison images.
 
-    ``sdr`` leaves out the native picture of every pair that also has a
-    tone-mapped ``-sdr`` view (an SDR title keeps its native pictures);
-    ``native`` leaves out the ``-sdr`` views.  Audio spectrograms always stay.
+    With the comparison ``pairs``, only the pictures of the published pairs
+    (:func:`published_pairs`, ten) are kept; the other measured pairs stay
+    local.  ``sdr`` leaves out the native picture of every pair that also has
+    a tone-mapped ``-sdr`` view (an SDR title keeps its native pictures);
+    ``native`` leaves out the ``-sdr`` views.  Audio spectrograms and tracker
+    screenshots always stay.
     """
 
+    if pairs:
+        kept = {id(item) for item in published_pairs(pairs)}
+        held_back = {
+            str(item.get(key))
+            for item in pairs
+            if isinstance(item, Mapping) and id(item) not in kept
+            for key in ("reference_png", "encode_png", "reference_sdr_png", "encode_sdr_png")
+            if item.get(key)
+        }
+        pngs = [png for png in pngs if png.name not in held_back]
     if image_set == "all":
         return list(pngs)
     names = {png.name for png in pngs}
@@ -418,6 +451,10 @@ COMPARISON_FRAME_PROBE_TIMEOUT_SECONDS = 300
 COMPARISON_DEADLINE_SECONDS = 1800
 _REFERENCE_PIXELS = 1920 * 1080
 MAX_COMPARISON_BUDGET_SCALE = 4
+# A comparison that runs out of time is retried with these multiples of its
+# budgets before the job asks for review: a slow disk or a busy host is far
+# more common than a hung decoder, and finished pairs are kept between runs.
+COMPARISON_RETRY_TIME_SCALES: tuple[int, ...] = (1, 2, 4)
 
 
 def comparison_budget_scale(width: int | None, height: int | None) -> int:
@@ -1510,6 +1547,34 @@ def _activate_source_log_generation(
     )
 
 
+def _read_text_or_empty(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _mkvmerge_identify_warnings(report: Path) -> list[str]:
+    """The warnings of ``mkvmerge --identify`` (JSON) and its stderr."""
+
+    messages: list[str] = []
+    try:
+        document = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        document = None
+    if isinstance(document, dict):
+        for key in ("warnings", "errors"):
+            values = document.get(key)
+            if isinstance(values, list):
+                messages.extend(str(item) for item in values if str(item).strip())
+    messages.extend(
+        mkvmerge_warning_lines(
+            _read_text_or_empty(report.with_suffix(report.suffix + ".stderr"))
+        )
+    )
+    return messages
+
+
 def _public_diagnostic_summary(
     diagnostics: Iterable[MediaDiagnostic],
 ) -> list[dict[str, object]]:
@@ -1542,6 +1607,21 @@ def _sticky_source_diagnostics(
             DiagnosticCategory.DECODE_INTEGRITY,
         }
     )
+
+
+def _clip_join_moments(report: Mapping[str, Any]) -> list[float]:
+    """The join times of a verified ``clip-joins.json``, and the title end
+    when the strict decode there was clean too."""
+
+    moments = [float(item) for item in report.get("joins") or []]
+    title_end = report.get("title_end")
+    if (
+        report.get("title_end_verified") is True
+        and isinstance(title_end, (int, float))
+        and not isinstance(title_end, bool)
+    ):
+        moments.append(float(title_end))
+    return moments
 
 
 def _content_kind(job: Job) -> ContentKind:
@@ -2509,6 +2589,18 @@ def _mean_plane_bias(
     return {name: round(sum(values) / len(values), 4) for name, values in totals.items()}
 
 
+def _playlist_join_seconds(playlist: PlaylistCandidate) -> list[float]:
+    """The clip-join times of a multi-clip playlist, from its start."""
+
+    return sorted(
+        {
+            segment.relative_start_seconds
+            for segment in playlist.segments
+            if segment.relative_start_seconds > 0
+        }
+    )
+
+
 # Below these the encode is broken (wrong frames, corruption, a failed
 # filter), not merely soft: the job stops for review.  The stricter quality
 # policy of ``_sampled_video_metric_errors`` only warns, because grainy film
@@ -2517,6 +2609,23 @@ BROKEN_SAMPLE_SSIM = 0.80
 BROKEN_SAMPLE_PSNR_DB = 28.0
 BROKEN_MEAN_SSIM = 0.90
 BROKEN_MEAN_PSNR_DB = 33.0
+
+
+def _title_duration_is_estimate(scan: DiscScan, playlist: PlaylistCandidate) -> bool:
+    """Whether the playlist duration is ffprobe's container estimate.
+
+    The libbluray playlist reader provides both the exact playlist duration
+    and its clip segments.  When it failed or timed out during the scan the
+    playlist has no segments and its duration is ffprobe's ``format.duration``
+    estimate, which can be off by more than a frame or two.  A scan without
+    any playlist backend (the largest-clip fallback) is an estimate as well.
+    """
+
+    return not playlist.segments or any(
+        warning == LIBBLURAY_UNAVAILABLE_WARNING
+        or warning.startswith("No libbluray playlist backend")
+        for warning in scan.warnings
+    )
 
 
 def _sampled_video_metric_blockers(
@@ -2616,6 +2725,24 @@ def _sampled_video_metric_errors(
 UPLOAD_RETRY_DELAYS: tuple[float, ...] = (30, 60, 120, 300, 600, 900)
 
 
+# Waits before a stage is run again after a passing storage or network error
+# (a NAS or SMB share that drops for a moment); finished checkpoints are kept.
+IO_RETRY_DELAYS: tuple[float, ...] = (60, 300, 900)
+_TRANSIENT_ERRNOS = frozenset(
+    getattr(errno, name)
+    for name in (
+        "EIO", "ESTALE", "ETIMEDOUT", "EAGAIN", "EBUSY", "EINTR", "ENOTCONN",
+        "ECONNRESET", "ECONNABORTED", "EHOSTDOWN", "EHOSTUNREACH", "ENETDOWN",
+        "ENETUNREACH", "ENETRESET", "EREMOTEIO",
+    )
+    if hasattr(errno, name)
+)
+
+
+def _transient_os_error(exc: OSError) -> bool:
+    return exc.errno in _TRANSIENT_ERRNOS
+
+
 def _transient_upload_error(exc: ImageUploadError) -> bool:
     """Whether the same upload may succeed a little later.
 
@@ -2672,6 +2799,8 @@ class PipelineWorker:
         self.stop_requested = stop_requested or (lambda: False)
         # Mutable for tests, like ``upload_client_factory``.
         self.upload_retry_delays: tuple[float, ...] = UPLOAD_RETRY_DELAYS
+        self._comparison_time_scale = 1
+        self.io_retry_delays: tuple[float, ...] = IO_RETRY_DELAYS
         self._sleep: Callable[[float], None] = time.sleep
         self._runners: dict[str, Runner] = {}
         self._lives: dict[str, LiveProgress] = {}
@@ -2854,11 +2983,90 @@ class PipelineWorker:
                 self._qc(job, paths)
         elif job.state is JobState.COMPARISON:
             with self._step(paths, "comparison", ("Összehasonlítás", "Comparison")):
-                self._comparison(job, paths)
+                self._comparison_with_retries(job, paths)
         elif job.state is JobState.UPLOADING:
             with self._step(paths, "upload", ("Képfeltöltés és lezárás", "Image upload and finalization")):
                 self._upload_with_retries(job, paths)
         return self.database.get_job(job.id)
+
+    def _process_stage_with_io_retries(self, job: Job) -> Job:
+        """One stage; a passing storage or network error runs it again.
+
+        Stages resume from their checkpoints, so a retry repeats only the
+        unfinished part.  Other errors, and the last failed attempt, reach the
+        usual failure handling.
+        """
+
+        delays = tuple(self.io_retry_delays)
+        for attempt in range(1, len(delays) + 2):
+            try:
+                return self.process_one_stage(job)
+            except OSError as exc:
+                if attempt > len(delays) or not _transient_os_error(exc):
+                    raise
+                delay = delays[attempt - 1]
+                detail = sanitize_text(str(exc)).strip()[:400] or type(exc).__name__
+                LOG.warning(
+                    "job %s stage %s hit a passing I/O error (%s); retrying in %g s",
+                    job.id,
+                    job.state.value,
+                    detail,
+                    delay,
+                )
+                self.database.add_event(
+                    EventCreate(
+                        job_id=job.id,
+                        kind="worker.io-retry",
+                        message=(
+                            f"a storage or network error interrupted the {job.state.value} "
+                            f"stage; retrying automatically in {delay:g} s"
+                        ),
+                        payload={"attempt": attempt, "delay_seconds": delay, "detail": detail},
+                    )
+                )
+                self._wait_before_upload_retry(job.id, delay)
+                job = self.database.get_job(job.id)
+        raise AssertionError("unreachable")
+
+    def _comparison_with_retries(self, job: Job, paths: JobPaths) -> None:
+        """Run the comparison; a timeout is retried with longer budgets."""
+
+        scales = tuple(COMPARISON_RETRY_TIME_SCALES) or (1,)
+        try:
+            for attempt, scale in enumerate(scales, start=1):
+                self._comparison_time_scale = scale
+                try:
+                    self._comparison(job, paths)
+                    return
+                except subprocess.TimeoutExpired as exc:
+                    if attempt == len(scales):
+                        raise
+                    self._stop_at_operator_boundary(job.id)
+                    if self.stop_requested():
+                        raise ProcessInterrupted("worker shutdown before a comparison retry") from exc
+                    LOG.warning(
+                        "job %s comparison ran out of time (%s); retrying with %dx budgets",
+                        job.id,
+                        exc.timeout,
+                        scales[attempt],
+                    )
+                    self.database.add_event(
+                        EventCreate(
+                            job_id=job.id,
+                            kind="worker.comparison-retry",
+                            message=(
+                                "comparison ran out of time; retrying automatically "
+                                f"with {scales[attempt]}x time budgets"
+                            ),
+                            payload={
+                                "attempt": attempt,
+                                "time_scale": scales[attempt],
+                                "timeout_seconds": exc.timeout,
+                            },
+                        )
+                    )
+        finally:
+            self._comparison_time_scale = 1
 
     def _upload_with_retries(self, job: Job, paths: JobPaths) -> None:
         """Upload and finalise; a passing host error is retried automatically.
@@ -2942,7 +3150,7 @@ class PipelineWorker:
                 return job
             try:
                 before = job.state
-                job = self.process_one_stage(job)
+                job = self._process_stage_with_io_retries(job)
                 if job.control_state is JobControlState.PAUSED:
                     return job
                 if job.state is before:
@@ -3393,6 +3601,45 @@ class PipelineWorker:
                 result[item.source.value] = item.raw_code
         return result
 
+    @staticmethod
+    def _declared_language_codes(
+        decision: LanguageDecision | None,
+    ) -> dict[str, str | None]:
+        raw = PipelineWorker._declared_language_evidence(decision)
+        return {source: normalize_iso639_2(code) for source, code in raw.items()}
+
+    @staticmethod
+    def _settle_language(
+        stream: MediaStream,
+        settlement: LanguageSettlement,
+        resolved: dict[str, str],
+        unresolved: list[dict[str, Any]],
+        warnings: list[dict[str, Any]],
+        *,
+        decision: LanguageDecision | None = None,
+    ) -> None:
+        if settlement.stop:
+            entry: dict[str, Any] = {
+                "stream_id": stream.id,
+                "kind": stream.kind.value,
+                "reason": "language_conflict_or_low_confidence",
+            }
+            if decision is not None:
+                entry["decision"] = decision.to_dict()
+            unresolved.append(entry)
+            return
+        if settlement.language is not None:
+            resolved[stream.id] = settlement.language
+        if settlement.warning:
+            warnings.append(
+                {
+                    "stream_id": stream.id,
+                    "kind": stream.kind.value,
+                    "language": settlement.language,
+                    "warning": settlement.warning,
+                }
+            )
+
     def _resolve_selected_languages(
         self,
         job: Job,
@@ -3436,6 +3683,7 @@ class PipelineWorker:
             except (OSError, TypeError, ValueError, json.JSONDecodeError):
                 pass
         unresolved: list[dict[str, Any]] = []
+        language_warnings: list[dict[str, Any]] = []
         reference_digest = sha256_file(paths.reference)
         resolver = LanguageResolver()
         audio_ordinals = {
@@ -3449,6 +3697,7 @@ class PipelineWorker:
             if stream is None:
                 continue
             declared = stream.language
+            labels = self._declared_language_codes(declared)
             if stream.kind is StreamKind.SUBTITLE:
                 # Subtitle declarations remain usable when their independent
                 # authored metadata agrees.  Audio is different: repeated
@@ -3460,12 +3709,8 @@ class PipelineWorker:
                     and not declared.needs_review
                 ):
                     continue
-                unresolved.append(
-                    {
-                        "stream_id": stream.id,
-                        "kind": stream.kind.value,
-                        "reason": "subtitle_ocr_or_manual_override_required",
-                    }
+                self._settle_language(
+                    stream, settle_track_language(labels), resolved, unresolved, language_warnings
                 )
                 continue
             if stream.kind is not StreamKind.AUDIO:
@@ -3490,13 +3735,16 @@ class PipelineWorker:
                         },
                     }
                 )
-                unresolved.append(
-                    {
-                        "stream_id": stream.id,
-                        "kind": stream.kind.value,
-                        "reason": exc.reason_code,
-                    }
-                )
+                settlement = settle_track_language(labels)
+                if settlement.language is not None and settlement.warning is None:
+                    settlement = replace(
+                        settlement,
+                        warning=(
+                            f"the language detection is unavailable ({exc.reason_code}); "
+                            f"the disc label {settlement.language} is used"
+                        ),
+                    )
+                self._settle_language(stream, settlement, resolved, unresolved, language_warnings)
                 continue
             consensus = inference.get("consensus", {})
             raw = self._declared_language_evidence(declared)
@@ -3517,13 +3765,17 @@ class PipelineWorker:
             if decision.iso639_2t and not decision.needs_review:
                 resolved[stream.id] = decision.iso639_2t
             else:
-                unresolved.append(
-                    {
-                        "stream_id": stream.id,
-                        "kind": stream.kind.value,
-                        "reason": "language_conflict_or_low_confidence",
-                        "decision": decision.to_dict(),
-                    }
+                self._settle_language(
+                    stream,
+                    settle_track_language(
+                        labels,
+                        normalize_iso639_2(consensus.get("iso639_2t")),
+                        float(consensus.get("confidence", 0.0)),
+                    ),
+                    resolved,
+                    unresolved,
+                    language_warnings,
+                    decision=decision,
                 )
 
         report = {
@@ -3535,6 +3787,7 @@ class PipelineWorker:
             "resolved_languages": resolved,
             "evidence": evidence_records,
             "unresolved": unresolved,
+            "warnings": language_warnings,
         }
         atomic_write_json(paths.language_json, report)
         self._register_artifact(
@@ -3548,6 +3801,18 @@ class PipelineWorker:
             raise ReviewRequired(
                 "one or more retained tracks need a confirmed language before encoding",
                 details={"tracks": unresolved},
+            )
+        if language_warnings:
+            self.database.add_event(
+                EventCreate(
+                    job_id=job.id,
+                    kind="worker.language-warning",
+                    message=(
+                        "track languages were chosen with warnings; check them in "
+                        "language-inference.json"
+                    ),
+                    payload={"tracks": language_warnings},
+                )
             )
         if not resolved:
             return selection
@@ -3958,7 +4223,7 @@ class PipelineWorker:
             "reference_sha256": reference_sha256,
             "context": "source",
             "decode_mode": "full-pixel-decode",
-            "crop_verification": "cropdetect-reset0",
+            "crop_verification": "cropdetect-per-frame",
         }
         outputs = [
             paths.analysis / "source-video-integrity.json",
@@ -4088,9 +4353,11 @@ class PipelineWorker:
 
         Preparation chooses the crop from the keyframes.  A shot shorter than a
         keyframe interval that shows more picture (a full-frame insert in a
-        scope film) appears only here; a crop that would cut into it stops the
-        job for review and drops the crop checkpoint, so a restart scans every
-        frame and encodes with the crop that keeps the whole picture.
+        scope film) appears only here; a crop that would cut into it for at
+        least half a second stops the job for review and drops the crop
+        checkpoint, so a restart scans every frame and encodes with the crop
+        that keeps the whole picture.  A shorter flash in the bar is recorded
+        as a ``worker.crop-verification-warning`` and the job continues.
         """
 
         report = paths.analysis / "crop-verification.json"
@@ -4125,15 +4392,39 @@ class PipelineWorker:
                 f"crop verification requires review: {exc}",
                 details={"code": exc.code, "report": report.name},
             ) from exc
+        flashes = verification.passed and verification.flash_runs > 0
         atomic_write_json(
             report,
             {
-                "schema_version": 1,
-                "status": "passed" if verification.passed else "needs_review",
+                "schema_version": 2,
+                "status": (
+                    "needs_review"
+                    if not verification.passed
+                    else "passed_with_warnings" if flashes else "passed"
+                ),
                 "reference_sha256": reference_sha256,
                 **verification.to_dict(),
             },
         )
+        if flashes:
+            # A bright frame in the bar (a flash, a logo, dust, grain in an HDR
+            # bar) is no lost picture: the crop stays and the job continues.
+            self.database.add_event(
+                EventCreate(
+                    job_id=paths.root.name,
+                    kind="worker.crop-verification-warning",
+                    message=verification.summary(),
+                    payload={
+                        "report": report.name,
+                        "flash_runs": verification.flash_runs,
+                        "cut_frames": verification.cut_frames,
+                        "minimum_persistent_seconds": (
+                            verification.minimum_persistent_seconds
+                        ),
+                        "runs": [run.to_dict() for run in verification.flashes[:5]],
+                    },
+                )
+            )
         if not verification.passed:
             (paths.stages / "crop-policy.json").unlink(missing_ok=True)
             raise ReviewRequired(
@@ -4175,7 +4466,9 @@ class PipelineWorker:
         report = self._clip_join_report(paths)
         if report is None:
             return text
-        split = split_clip_join_lines(text, len(report["joins"]))
+        split = split_clip_join_lines(
+            text, len(report["joins"]), moments=_clip_join_moments(report)
+        )
         return text if split is None else split[0]
 
     def _verify_clip_joins(
@@ -4192,43 +4485,57 @@ class PipelineWorker:
         before.
         """
 
-        joins = sorted(
-            {
-                segment.relative_start_seconds
-                for segment in playlist.segments
-                if segment.relative_start_seconds > 0
-            }
+        joins = _playlist_join_seconds(playlist)
+        # The title's last packet is cut like a clip's at a join.
+        title_end = (
+            float(playlist.duration_seconds) if playlist.duration_seconds > 0 else None
         )
-        if not joins:
+        moments = [*joins, *([title_end] if title_end is not None else [])]
+        if not moments:
             return
         current = self._clip_join_report(paths)
-        if current is not None and current.get("joins") == joins:
+        if (
+            current is not None
+            and current.get("joins") == joins
+            and current.get("title_end") == title_end
+        ):
             return
         report_path = paths.analysis / "clip-joins.json"
         join_messages: list[str] = []
+        end_messages: list[str] = []
         for log_path in sorted(paths.logs.glob("reference-remux*.log")):
-            split = split_clip_join_lines(
-                log_path.read_text(encoding="utf-8", errors="replace"), len(joins)
-            )
-            if split is None:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+            split = split_clip_join_lines(text, len(joins), moments=joins)
+            with_end = split_clip_join_lines(text, len(joins), moments=moments)
+            if split is None or with_end is None:
                 atomic_write_json(
                     report_path,
                     {
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "reference_sha256": reference_sha256,
                         "joins": joins,
+                        "title_end": title_end,
                         "verified": False,
                         "reason": f"{log_path.name} has more timestamp jumps than the playlist has clip joins",
                     },
                 )
                 return
             join_messages.extend(split[1])
-        if not join_messages:
+            # The messages only the end of the title explains.
+            end_messages.extend((Counter(with_end[1]) - Counter(split[1])).elements())
+        if not join_messages and not end_messages:
             return
+        # The joins and the title end are decoded only when they logged
+        # something; a failed end decode leaves the joins' verdict alone.
+        checks = [
+            *((moment, False) for moment in (joins if join_messages else [])),
+            *([(title_end, True)] if end_messages and title_end is not None else []),
+        ]
         failed: list[float] = []
+        end_failed = False
         runner = self._runner(paths)
         with self._step(paths, "clip-joins", ("Klipillesztések ellenőrzése", "Checking clip joins")) as step:
-            for number, moment in enumerate(joins, start=1):
+            for number, (moment, is_end) in enumerate(checks, start=1):
                 try:
                     runner.run(
                         clip_join_decode_command(paths.reference, moment),
@@ -4236,29 +4543,41 @@ class PipelineWorker:
                         stderr_path=paths.logs / f"clip-join-{number:02d}.log",
                     )
                 except ProcessFailure:
-                    failed.append(moment)
-                step.update(number / len(joins))
+                    if is_end:
+                        end_failed = True
+                    else:
+                        failed.append(moment)
+                step.update(number / len(checks))
+        title_end_verified = bool(end_messages) and not end_failed
         atomic_write_json(
             report_path,
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "reference_sha256": reference_sha256,
                 "joins": joins,
+                "title_end": title_end,
                 "verified": not failed,
                 "failed_joins": failed,
-                "join_messages": join_messages[:100],
+                "title_end_verified": title_end_verified,
+                "join_messages": [*join_messages, *(end_messages if title_end_verified else [])][:100],
             },
         )
-        if not failed:
+        excused = len(join_messages) if not failed else 0
+        if title_end_verified:
+            excused += len(end_messages)
+        if excused:
             self.database.add_event(
                 EventCreate(
                     job_id=paths.root.name,
                     kind="worker.clip-joins-verified",
                     message=(
-                        f"{len(join_messages)} remux message(s) at {len(joins)} clip "
+                        f"{excused} remux message(s) at {len(joins)} clip join(s) "
+                        "and the end of the title; the strict decode there is clean"
+                        if title_end_verified
+                        else f"{excused} remux message(s) at {len(joins)} clip "
                         "join(s); the strict decode across the joins is clean"
                     ),
-                    payload={"joins": joins},
+                    payload={"joins": joins, "title_end": title_end},
                 )
             )
 
@@ -5083,6 +5402,18 @@ class PipelineWorker:
             )
 
         outcome = search.outcome()
+        if not outcome.usable and outcome.probes:
+            # The target is out of reach within the allowed range: encode at
+            # the end of the range nearest to it (the best measured quality,
+            # or the smallest measured size) instead of stopping the queue.
+            nearest = (
+                max(outcome.probes, key=lambda item: item.crf)
+                if size_mode
+                else max(outcome.probes, key=lambda item: (item.score, -item.crf))
+            )
+            outcome = replace(
+                outcome, chosen_crf=nearest.crf, chosen_score=nearest.score
+            )
         atomic_write_json(
             report,
             {
@@ -5138,6 +5469,14 @@ class PipelineWorker:
                 message += (
                     "; the search ended before a CRF closer to the target was found"
                 )
+        if outcome.status == STATUS_UNREACHABLE:
+            message += (
+                f"; the {'size' if size_mode else 'VMAF'} target is out of reach within "
+                f"CRF {config.min_crf:g}-{config.max_crf:g}, so the nearest measured "
+                "CRF is used"
+            )
+        elif size_mode:
+            pass
         elif outcome.status == STATUS_MAX_CRF:
             message += (
                 f"; the VMAF target {config.target_vmaf:g} is met even at the "
@@ -5579,11 +5918,19 @@ class PipelineWorker:
         }
         extracted_audio: list[tuple[int, TrackSelection, MediaStream, Path]] = []
         extracted_subtitles: list[tuple[int, TrackSelection, MediaStream, Path]] = []
-        for number, item, stream in retained:
-            if item.bcp47(stream) == "und":
-                raise ReviewRequired(
-                    f"retained track {stream.id} has no confirmed language; provide an override"
+        untagged = [stream.id for _number, item, stream in retained if item.bcp47(stream) == "und"]
+        if untagged:
+            # Nothing names these languages; they are muxed as ``und`` and the
+            # tag can be fixed later without touching the encode.
+            self.database.add_event(
+                EventCreate(
+                    job_id=job.id,
+                    kind="worker.language-warning",
+                    message="some retained tracks have no known language and are tagged und",
+                    payload={"tracks": untagged},
                 )
+            )
+        for number, item, stream in retained:
             output = self._track_path(paths, number, item, stream)
             inputs = {
                 "reference_sha256": sha256_file(paths.reference),
@@ -5817,18 +6164,129 @@ class PipelineWorker:
         mux_inputs["argv"] = command
         marker = paths.stages / "mux.json"
         if not _valid_stage(marker, mux_inputs, [paths.muxed_output]):
+            # mkvmerge prints its warnings on stdout.
+            mux_output_log = paths.logs / "mkvmerge-output.log"
             mux_result = self._runner(paths).run(
                 command,
                 cwd=paths.work,
+                stdout_path=mux_output_log,
                 stderr_path=paths.logs / "mkvmerge.log",
                 ok_returncodes=(0, 1),
             )
             if getattr(mux_result, "returncode", 0) == 1:
-                raise ReviewRequired(
-                    "mkvmerge completed with warnings; inspect mkvmerge.log before resuming"
+                self._judge_mkvmerge_warnings(
+                    job.id,
+                    paths,
+                    mkvmerge_warning_lines(
+                        "\n".join(
+                            _read_text_or_empty(path)
+                            for path in (mux_output_log, paths.logs / "mkvmerge.log")
+                        )
+                    ),
+                    stage="mux",
                 )
             _write_stage(marker, mux_inputs, [paths.muxed_output])
         self.queue.advance(job.id, JobState.QC, message="final Matroska mux complete")
+
+    def _judge_mkvmerge_warnings(
+        self,
+        job_id: str,
+        paths: JobPaths,
+        messages: Sequence[str],
+        *,
+        stage: Literal["mux", "identify"],
+    ) -> None:
+        """Record mkvmerge's warnings; stop only on one that reports data loss.
+
+        See ``MKVMERGE_DATA_LOSS_WARNING`` in :mod:`bdencode.mux`.  A warning
+        exit without a readable warning is recorded as an unknown warning.
+        """
+
+        warnings = classify_mkvmerge_warnings(messages) or (
+            MkvmergeWarning(
+                "unknown", "mkvmerge exited with warnings but printed none", False
+            ),
+        )
+        blocking = [item for item in warnings if item.blocking]
+        report = paths.analysis / f"mkvmerge-{stage}-warnings.json"
+        atomic_write_json(
+            report,
+            {
+                "schema_version": 1,
+                "stage": stage,
+                "status": "needs_review" if blocking else "passed_with_warnings",
+                "warnings": [item.to_dict() for item in warnings],
+            },
+        )
+        if blocking:
+            raise ReviewRequired(
+                "mkvmerge reported lost or damaged data during the mux; inspect mkvmerge-output.log before resuming"
+                if stage == "mux"
+                else "mkvmerge identify reported lost or damaged data in the final file",
+                details={
+                    "warnings": [item.message for item in blocking[:20]],
+                    "report": report.name,
+                },
+            )
+        self.database.add_event(
+            EventCreate(
+                job_id=job_id,
+                kind="worker.mkvmerge-warning",
+                message=(
+                    "mkvmerge finished the mux with warnings that do not affect the media; the job continues"
+                    if stage == "mux"
+                    else "mkvmerge identify reported warnings that do not affect the media; the job continues"
+                ),
+                payload={
+                    "stage": stage,
+                    "warnings": [item.to_dict() for item in warnings[:20]],
+                    "report": report.name,
+                },
+            )
+        )
+
+    def _judge_full_decode(self, job: Job, paths: JobPaths, log: Path) -> Path | None:
+        """Judge the final file's full-decode log; stop only on a real defect.
+
+        Returns the diagnostics report when the log held any message.
+        """
+
+        text = log.read_text(encoding="utf-8", errors="replace")
+        if not text.strip():
+            return None
+        join_report = self._clip_join_report(paths)
+        join_messages = (
+            [str(item) for item in join_report.get("join_messages") or []]
+            if join_report is not None
+            else []
+        )
+        verdict = classify_final_decode_log(text, join_messages=join_messages)
+        report = log.with_name("full-decode-diagnostics.json")
+        public = verdict.to_dict()
+        for key in ("blocking", "warnings", "excused_join_messages"):
+            public[key] = [sanitize_text(line) for line in public[key][:100]]
+        atomic_write_json(report, {"schema_version": 1, **public})
+        if verdict.blocking:
+            raise ReviewRequired(
+                "full decode emitted an error-level diagnostic; final media is not accepted",
+                details={"report": report.name, "blocking": public["blocking"][:20]},
+            )
+        self.database.add_event(
+            EventCreate(
+                job_id=job.id,
+                kind="worker.full-decode-warning",
+                message=(
+                    "the full decode of the final file logged messages that are not "
+                    "decode errors; the job continues"
+                ),
+                payload={
+                    "warnings": public["warnings"][:20],
+                    "excused_join_messages": public["excused_join_messages"][:20],
+                    "report": report.name,
+                },
+            )
+        )
+        return report
 
     def _qc(self, job: Job, paths: JobPaths) -> None:
         scan, selection = self._load_prepared_scan_and_selection(job, paths)
@@ -5871,17 +6329,16 @@ class PipelineWorker:
                 encoded_summary = parse_video_packet_sizes(
                     encoded_packets.read_text(encoding="utf-8")
                 )
-                verdict = require_video_efficiency(
+                # A low-bitrate or animated disc at a low CRF can legitimately
+                # come out larger than its source: that is a warning, not a
+                # defect.  Unreadable packet evidence still stops the job.
+                verdict = evaluate_video_efficiency(
                     source_summary.total_bytes,
                     encoded_summary.total_bytes,
                     encoded_is_lossy=True,
                 )
             except (OSError, ValueError) as exc:
-                failure = (
-                    str(exc)
-                    if isinstance(exc, VideoEfficiencyError)
-                    else f"video packet-size evidence is invalid: {exc}"
-                )
+                failure = f"video packet-size evidence is invalid: {exc}"
                 atomic_write_json(
                     efficiency_report,
                     {
@@ -5898,12 +6355,32 @@ class PipelineWorker:
                 efficiency_report,
                 {
                     "schema_version": 1,
-                    "status": "passed",
+                    "status": "passed" if verdict.passed else "passed_with_warnings",
                     "source": source_summary.to_dict(),
                     "encoded": encoded_summary.to_dict(),
                     "verdict": verdict.to_dict(),
+                    "warnings": [] if verdict.passed else [verdict.reason],
                 },
             )
+            if not verdict.passed:
+                self.database.add_event(
+                    EventCreate(
+                        job_id=job.id,
+                        kind="worker.video-efficiency-warning",
+                        message=(
+                            "the encoded video is not smaller than the source; "
+                            "the job continues"
+                        ),
+                        payload={
+                            "source_bytes": verdict.source_bytes,
+                            "encoded_bytes": verdict.encoded_bytes,
+                            "encoded_to_source_ratio": str(
+                                verdict.encoded_to_source_ratio
+                            ),
+                            "report": efficiency_report.name,
+                        },
+                    )
+                )
             _write_stage(
                 efficiency_marker,
                 efficiency_inputs,
@@ -6045,7 +6522,7 @@ class PipelineWorker:
         )
         reports: list[Path] = [mux_integrity_report]
         inspections = inspection_commands(output, report_root)
-        identify_warned: list[bool] = []
+        identify_warned: list[tuple[Path, dict[str, Any], Path]] = []
         # Hash the final file once, before the concurrent inspections.
         output_sha256 = sha256_file(output)
         live = self._live(paths)
@@ -6083,7 +6560,8 @@ class PipelineWorker:
                 report.name == "mkvmerge-identify.json"
                 and getattr(inspection_result, "returncode", 0) == 1
             ):
-                identify_warned.append(True)
+                # Judged after the inspections; the marker follows the verdict.
+                identify_warned.append((marker, inputs, report))
                 return
             _write_stage(marker, inputs, [report])
 
@@ -6093,18 +6571,19 @@ class PipelineWorker:
             paths,
             [functools.partial(inspect, command, report) for command, report in inspections],
         )
-        if identify_warned:
-            raise ReviewRequired(
-                "mkvmerge identify completed with warnings; inspect its stderr before resuming"
+        for identify_marker, identify_inputs, identify_report in identify_warned:
+            self._judge_mkvmerge_warnings(
+                job.id,
+                paths,
+                _mkvmerge_identify_warnings(identify_report),
+                stage="identify",
             )
+            _write_stage(identify_marker, identify_inputs, [identify_report])
         for _command, report in inspections:
-            if (
-                report.name == "full-decode.log"
-                and report.read_text(encoding="utf-8", errors="replace").strip()
-            ):
-                raise ReviewRequired(
-                    "full decode emitted an error-level diagnostic; final media is not accepted"
-                )
+            if report.name == "full-decode.log":
+                diagnostics_report = self._judge_full_decode(job, paths, report)
+                if diagnostics_report is not None:
+                    reports.append(diagnostics_report)
             reports.append(report)
 
         playlist = scan.playlist(selection.playlist_id)
@@ -6573,7 +7052,7 @@ class PipelineWorker:
         ffprobe_document = json.loads(
             (report_root / "ffprobe-streams.json").read_text(encoding="utf-8")
         )
-        stream_errors = validate_ffprobe_stream_policy(
+        stream_errors, stream_warnings = assess_ffprobe_stream_policy(
             ffprobe_document,
             video=video_policy,
             media_tracks=[*audio_policies, *subtitle_policies],
@@ -6621,12 +7100,27 @@ class PipelineWorker:
                 "final media streams differ from the reviewed codec/color/HDR policy",
                 details={"errors": list(policy_errors)},
             )
+        if stream_warnings:
+            # FFmpeg builds name a profile or default the chroma location
+            # differently; the picture itself matches the reviewed policy.
+            self.database.add_event(
+                EventCreate(
+                    job_id=job.id,
+                    kind="worker.stream-policy-warning",
+                    message=(
+                        "the final video stream is described differently by this "
+                        "FFmpeg build; the job continues"
+                    ),
+                    payload={"warnings": list(stream_warnings)},
+                )
+            )
 
         # The general full-decode pass maps video/audio only.  Send every final
         # subtitle event through FFmpeg's actual decoder; packet-copy/remux
         # evidence cannot prove that a PGS/text payload is parseable.
         subtitle_integrity_results: list[dict[str, Any]] = []
         subtitle_decode_reports: list[Path] = []
+        subtitle_warnings: list[dict[str, Any]] = []
         retained_subtitle_entries = [
             entry for entry in retained_streams if entry[2].kind is StreamKind.SUBTITLE
         ]
@@ -6664,36 +7158,26 @@ class PipelineWorker:
                         stdout_path=subtitle_decode_report,
                         stderr_path=subtitle_decode_log,
                     )
-                if subtitle_decode_log.read_text(
+                decode_stderr = subtitle_decode_log.read_text(
                     encoding="utf-8", errors="replace"
-                ).strip():
-                    raise SubtitleDecodeError(
-                        "subtitle decoder emitted error-level diagnostics"
-                    )
+                )
                 verdict = require_subtitle_decode(
                     subtitle_decode_report.read_text(encoding="utf-8")
                 )
                 sidecar_probe = parse_subtitle_probe(
                     sidecar_probe_path.read_text(encoding="utf-8")
                 )
-                if (
-                    stream.codec.casefold() == "hdmv_pgs_subtitle"
-                    and verdict.decoded_event_count != sidecar_probe.packet_count
-                ):
-                    raise SubtitleDecodeError(
-                        "decoded PGS event count differs from the sidecar packet count"
-                    )
-                title_duration = Decimal(str(playlist.duration_seconds))
-                timestamp_tolerance = Decimal("0.100")
-                if (
-                    verdict.first_timestamp is None
-                    or verdict.last_timestamp is None
-                    or verdict.first_timestamp < -timestamp_tolerance
-                    or verdict.last_timestamp > title_duration + timestamp_tolerance
-                ):
-                    raise SubtitleDecodeError(
-                        "decoded subtitle timestamps fall outside the reviewed title"
-                    )
+                # Real defects stop the job; known PGS quirks, FFmpeg-build
+                # differences in the event count and a trailing clear set
+                # just past the title end are recorded as warnings.
+                decode_errors, decode_warnings = assess_final_subtitle_decode(
+                    verdict,
+                    stderr_text=decode_stderr,
+                    packet_count=sidecar_probe.packet_count,
+                    title_duration_seconds=Decimal(str(playlist.duration_seconds)),
+                )
+                if decode_errors:
+                    raise SubtitleDecodeError("; ".join(decode_errors))
             except (OSError, UnicodeError, ProcessFailure, SubtitleDecodeError) as exc:
                 subtitle_integrity_results.append(
                     {
@@ -6731,22 +7215,45 @@ class PipelineWorker:
             subtitle_integrity_results.append(
                 {
                     "subtitle_ordinal": subtitle_ordinal,
-                    "status": "passed",
+                    "status": "passed_with_warnings" if decode_warnings else "passed",
                     "decode": verdict.to_dict(),
                     "sidecar_packet_count": sidecar_probe.packet_count,
+                    "warnings": list(decode_warnings),
                     "evidence_sha256": sha256_file(subtitle_decode_report),
                 }
             )
+            if decode_warnings:
+                subtitle_warnings.append(
+                    {
+                        "subtitle_ordinal": subtitle_ordinal,
+                        "warnings": list(decode_warnings),
+                    }
+                )
             subtitle_decode_reports.append(subtitle_decode_report)
         subtitle_integrity_report = report_root / "subtitle-integrity.json"
         atomic_write_json(
             subtitle_integrity_report,
             {
                 "schema_version": 2,
-                "status": "passed",
+                "status": "passed_with_warnings" if subtitle_warnings else "passed",
                 "tracks": subtitle_integrity_results,
             },
         )
+        if subtitle_warnings:
+            self.database.add_event(
+                EventCreate(
+                    job_id=job.id,
+                    kind="worker.subtitle-decode-warning",
+                    message=(
+                        "the final subtitle decode shows known harmless differences; "
+                        "the job continues"
+                    ),
+                    payload={
+                        "tracks": subtitle_warnings,
+                        "report": subtitle_integrity_report.name,
+                    },
+                )
+            )
         reports.extend(subtitle_decode_reports)
         reports.append(subtitle_integrity_report)
 
@@ -6757,6 +7264,11 @@ class PipelineWorker:
         audio_ordinals = {
             item.id: index for index, item in enumerate(playlist.audio_streams)
         }
+        # Gaps and overlaps of the sound at these clip joins are a property of
+        # the disc, not of the encode.
+        audio_join_seconds = tuple(
+            Decimal(str(moment)) for moment in _playlist_join_seconds(playlist)
+        )
         audio_inputs: dict[str, Any] = {
             "manifest_schema_version": 4,
             "audio_decode_policy_schema_version": AUDIO_DECODE_POLICY_SCHEMA_VERSION,
@@ -6987,10 +7499,16 @@ class PipelineWorker:
                         f"decoded audio frame evidence is incomplete for {stream.id}"
                     ) from exc
                 sidecar_continuity = compare_audio_frame_continuity(
-                    source_frame_value, sidecar_frame_value, audio_policy
+                    source_frame_value,
+                    sidecar_frame_value,
+                    audio_policy,
+                    join_seconds=audio_join_seconds,
                 )
                 final_continuity = compare_audio_frame_continuity(
-                    source_frame_value, final_frame_value, audio_policy
+                    source_frame_value,
+                    final_frame_value,
+                    audio_policy,
+                    join_seconds=audio_join_seconds,
                 )
                 if not sidecar_continuity.passed or not final_continuity.passed:
                     raise ReviewRequired(
@@ -7004,6 +7522,26 @@ class PipelineWorker:
                             "source_to_sidecar": sidecar_continuity.to_dict(),
                             "source_to_final": final_continuity.to_dict(),
                         },
+                    )
+                if final_continuity.excused_join_discontinuities:
+                    self.database.add_event(
+                        EventCreate(
+                            job_id=job.id,
+                            kind="worker.audio-continuity-warning",
+                            message=(
+                                f"audio track {stream.id} has small gaps or "
+                                "overlaps at the playlist's clip joins; the "
+                                "sample count matches and the job continues"
+                            ),
+                            payload={
+                                "stream_id": stream.id,
+                                "join_seconds": [
+                                    str(item) for item in audio_join_seconds
+                                ],
+                                "source_to_final": final_continuity.to_dict(),
+                                "report": audio_manifest_path.name,
+                            },
+                        )
                     )
             # Compare timing on the same rebased timeline used by the mux.  A
             # source track that legitimately started at +40 ms and was moved to
@@ -7138,6 +7676,27 @@ class PipelineWorker:
                             audio_policy.pcm_match_required
                         ),
                     },
+                )
+            if verification.warnings or signal_verification.warnings:
+                self.database.add_event(
+                    EventCreate(
+                        job_id=job.id,
+                        kind="worker.audio-qc-warning",
+                        message=(
+                            f"audio track {stream.id} has level or bitrate "
+                            "findings that do not show a broken encode; the "
+                            "job continues"
+                        ),
+                        payload={
+                            "stream_id": stream.id,
+                            "action": item.action.value,
+                            "warnings": [
+                                *verification.warnings,
+                                *signal_verification.warnings,
+                            ],
+                            "report": audio_manifest_path.name,
+                        },
+                    )
                 )
             source_probe_value = asdict(source_value)
             source_timeline_probe_value = asdict(source_timeline_value)
@@ -7612,17 +8171,20 @@ class PipelineWorker:
             comparison_base.width if comparison_base else None,
             comparison_base.height if comparison_base else None,
         )
-        comparison_deadline = time.monotonic() + COMPARISON_DEADLINE_SECONDS * budget_scale
+        time_scale = self._comparison_time_scale
+        deadline_seconds = COMPARISON_DEADLINE_SECONDS * budget_scale * time_scale
+        comparison_deadline = time.monotonic() + deadline_seconds
         probe_limit = COMPARISON_FRAME_PROBE_TIMEOUT_SECONDS * budget_scale
 
         def remaining_timeout(per_command_limit: float) -> float:
             remaining = comparison_deadline - time.monotonic()
             if remaining <= 1:
-                raise ReviewRequired(
-                    "comparison exceeded its time budget "
-                    f"({COMPARISON_DEADLINE_SECONDS * budget_scale // 60} minutes)"
+                # The same path as a command timeout: retried with a longer
+                # budget, then a resumable review.
+                raise subprocess.TimeoutExpired(
+                    ["comparison"], deadline_seconds
                 )
-            return max(1.0, min(per_command_limit, remaining))
+            return max(1.0, min(per_command_limit * time_scale, remaining))
 
         script_sha256 = sha256_file(paths.script)
         reference_sha256 = _recorded_output_sha256(
@@ -7717,6 +8279,7 @@ class PipelineWorker:
             "mux_integrity_report_sha256": sha256_file(mux_integrity_report),
             "final_video_timeline_sha256": sha256_file(final_video_timeline_path),
             "title_duration_seconds": str(playlist.duration_seconds),
+            "title_duration_is_estimate": _title_duration_is_estimate(scan, playlist),
             "final_video_duration_seconds": str(final_video_duration),
             "tolerance_frames": 2,
         }
@@ -7744,6 +8307,7 @@ class PipelineWorker:
                     title_duration_seconds=playlist.duration_seconds,
                     final_video_duration_seconds=final_video_duration,
                     tolerance_frames=2,
+                    title_duration_is_estimate=_title_duration_is_estimate(scan, playlist),
                 )
             except (OSError, ValueError) as exc:
                 error = str(exc)
@@ -7766,12 +8330,31 @@ class PipelineWorker:
                 completeness_report,
                 {
                     "schema_version": 1,
-                    "status": "passed",
+                    "status": (
+                        "passed_with_warnings"
+                        if completeness_verdict.warnings
+                        else "passed"
+                    ),
                     "encoded_packet_summary": encoded_packet_summary.to_dict(),
                     "cadence_verdict": cadence_verdict.to_dict(),
                     "verdict": completeness_verdict.to_dict(),
                 },
             )
+            if completeness_verdict.warnings:
+                self.database.add_event(
+                    EventCreate(
+                        job_id=job.id,
+                        kind="worker.video-duration-warning",
+                        message=(
+                            "the estimated playlist duration differs from the "
+                            "frame count; the job continues"
+                        ),
+                        payload={
+                            "warnings": list(completeness_verdict.warnings),
+                            "report": completeness_report.name,
+                        },
+                    )
+                )
             _write_stage(
                 completeness_marker,
                 completeness_inputs,
@@ -8889,7 +9472,14 @@ class PipelineWorker:
 
         if selection.upload_images:
             try:
-                to_upload = _images_to_upload(pngs, selection.upload_image_set)
+                manifest_pairs = video_manifest.get("pairs")
+                to_upload = _images_to_upload(
+                    pngs,
+                    selection.upload_image_set,
+                    [item for item in manifest_pairs if isinstance(item, Mapping)]
+                    if isinstance(manifest_pairs, list)
+                    else None,
+                )
                 pending = [png for png in to_upload if png.name not in uploaded]
                 live = self._live(paths)
                 if pending:

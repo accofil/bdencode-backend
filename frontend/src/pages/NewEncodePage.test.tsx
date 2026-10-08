@@ -25,6 +25,7 @@ describe("NewEncodePage", () => {
       path: "/storage",
       entries: [
         { name: "MOVIE_DISC", path: "/storage/MOVIE_DISC", is_bluray: true },
+        { name: "OTHER_DISC", path: "/storage/OTHER_DISC", is_bluray: true },
         { name: "Extras", path: "/storage/Extras", is_bluray: false },
       ],
     });
@@ -33,7 +34,7 @@ describe("NewEncodePage", () => {
   it("walks the wizard in Hungarian", async () => {
     renderApp(<NewEncodePage />, "/new");
 
-    expect(await screen.findByText("Blu-ray forrás")).toBeInTheDocument();
+    expect((await screen.findAllByText("Blu-ray forrás")).length).toBe(2);
     expect(screen.getByRole("button", { name: /Forrás$/ })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "MOVIE_DISC kiválasztása" }));
     fireEvent.click(screen.getByRole("button", { name: "Tovább" }));
@@ -46,11 +47,33 @@ describe("NewEncodePage", () => {
     expect(screen.getByRole("button", { name: "Munka létrehozása és scan" })).toBeInTheDocument();
   });
 
+  it("lets another disc replace the first choice, name included", async () => {
+    renderApp(<NewEncodePage />, "/new");
+
+    fireEvent.click(await screen.findByRole("button", { name: "MOVIE_DISC kiválasztása" }));
+    fireEvent.click(screen.getByRole("button", { name: "OTHER_DISC kiválasztása" }));
+    expect(screen.getByText("/storage/OTHER_DISC")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Tovább" }));
+    expect(screen.getByPlaceholderText("Például: A film címe (2024)")).toHaveValue("OTHER_DISC");
+
+    // A name the operator typed is kept when the disc changes.
+    fireEvent.change(screen.getByPlaceholderText("Például: A film címe (2024)"), { target: { value: "My Film (1990)" } });
+    fireEvent.click(screen.getByRole("button", { name: /Forrás$/ }));
+    fireEvent.click(screen.getByRole("button", { name: "MOVIE_DISC kiválasztása" }));
+    fireEvent.click(screen.getByRole("button", { name: "Tovább" }));
+    expect(screen.getByPlaceholderText("Például: A film címe (2024)")).toHaveValue("My Film (1990)");
+
+    fireEvent.click(screen.getByRole("button", { name: /Forrás$/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Kijelölés törlése" }));
+    expect(screen.queryByText("/storage/MOVIE_DISC")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Tovább" })).toBeDisabled();
+  });
+
   it("shows the wizard in English", async () => {
     setLanguage("en", { persist: false });
     renderApp(<NewEncodePage />, "/new");
 
-    expect(await screen.findByText("Blu-ray source")).toBeInTheDocument();
+    expect((await screen.findAllByText("Blu-ray source")).length).toBe(2);
     expect(screen.getByText("Folder")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
     for (const step of ["Source", "Content", "Mode"]) {
