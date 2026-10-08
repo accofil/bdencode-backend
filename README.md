@@ -568,7 +568,7 @@ Frissítés előtt várd meg, hogy a futó kódolás befejeződjön.
 | A laptop elaludt, és a kódolás megállt | Ébresztés után a munka folytatódik. Állítsd be, hogy töltőn ne aludjon el. |
 | Elfogyott a hely | Töröld a régi, kész munkák ideiglenes fájljait (**Takarítás**), vagy a felesleges munkákat (**Munka törlése**). A [2. pontban](#2-mire-lesz-szükséged) megadott hely kell egy munkához. |
 | **Ellenőrzést kér** állapot | Nyisd meg a munkát: a kártya leírja, mi a teendő ([11. pont](#11-mindennapi-használat)). |
-| **Feltöltési hiba** állapot | A munka oldalán: újrapróbálás, másik tárhely, vagy befejezés képek nélkül. Ellenőrizd a képfeltöltő kulcsokat ([8. pont](#8-képfeltöltés-beállítása-nem-kötelező)). |
+| **Feltöltési hiba** állapot | A program előbb kb. 33 percig magától újrapróbálja. Ha így sem sikerül, a munka oldalán: újrapróbálás, másik tárhely, vagy befejezés képek nélkül. Ellenőrizd a képfeltöltő kulcsokat ([8. pont](#8-képfeltöltés-beállítása-nem-kötelező)). |
 | **Hibás** állapot | Olvasd el a hibaüzenetet a munka oldalán. A **Folytatás a hibától** onnan folytatja, ahol abbamaradt. |
 | Nagyon lassú a kódolás | A Rendszer oldalon nézd meg a CPU-keretet ([7.3](#73-a-cpu-keret-beállítása)). Lassabb beállítás (például `slower` preset) sokkal tovább tart. |
 

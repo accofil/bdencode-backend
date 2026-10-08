@@ -233,6 +233,8 @@ export function formatStatusMessage(message: string | null, fallback: string): s
   }
   const reducedI = /^comparison uses (\d+) I pairs: too few source and encode I-frames coincide in the sample windows$/.exec(message);
   if (reducedI) return t(`Az összehasonlítás ${reducedI[1]} I-képpárt használ: a mintaablakokban kevés helyen esik egybe a forrás és a kódolás I-képkockája (a hiányzó helyekre P- és B-párok kerültek).`, `The comparison uses ${reducedI[1]} I pairs: few source and encode I-frames coincide in the sample windows (P and B pairs fill the rest).`);
+  const uploadRetry = /^image upload attempt (\d+) failed; retrying automatically in ([\d.]+) s$/.exec(message);
+  if (uploadRetry) return t(`A képfeltöltés ${uploadRetry[1]}. kísérlete nem sikerült (a tárhely nem elérhető); automatikus újrapróbálás ${uploadRetry[2]} mp múlva`, `Image upload attempt ${uploadRetry[1]} failed (the host is unavailable); retrying automatically in ${uploadRetry[2]} s`);
   const metric = videoMetricFinding(message);
   if (metric) return metric;
   const sampledVmaf = /^sampled VMAF of the final file: mean (\S+), 1% low (\S+) \((\d+) frames\)$/.exec(message);
