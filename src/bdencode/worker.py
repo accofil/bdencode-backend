@@ -252,6 +252,7 @@ from .qc.video import (
     png_filter_chain,
     native_yuv_metric_command,
     select_frame_pairs,
+    select_frame_pairs_reducing_i,
     tracker_type_counts,
     vspipe_info_command,
 )
@@ -7822,7 +7823,7 @@ class PipelineWorker:
             ]
 
         try:
-            pairs = select_frame_pairs(
+            pairs, adjusted_counts = select_frame_pairs_reducing_i(
                 encoded,
                 reference,
                 total_pairs=self.settings.comparison_pair_count,
@@ -7835,6 +7836,18 @@ class PipelineWorker:
                     else None
                 ),
             )
+            if adjusted_counts is not None:
+                self.database.add_event(
+                    EventCreate(
+                        job_id=job.id,
+                        kind="worker.comparison-i-pairs",
+                        message=(
+                            f"comparison uses {adjusted_counts['I']} I pairs: too few "
+                            "source and encode I-frames coincide in the sample windows"
+                        ),
+                        payload={"type_counts": adjusted_counts},
+                    )
+                )
         except FrameSelectionError as exc:
             raise ReviewRequired(
                 "bounded comparison sampling could not find the required "
