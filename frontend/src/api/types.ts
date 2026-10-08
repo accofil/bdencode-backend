@@ -307,7 +307,21 @@ export interface UploadReviewInfo {
   hosts: Array<{ provider: string; max_upload_bytes: number }>;
 }
 
-export type JobReviewKind = "language" | "upload" | "upload_failed" | "comparison_timeout" | "other";
+export type JobReviewKind = "language" | "upload" | "upload_failed" | "comparison_timeout" | "video_metrics" | "other";
+
+export interface VideoMetricsReviewInfo {
+  errors: string[];
+  warnings: string[];
+  ssim_all_mean: number | null;
+  psnr_average_db_mean: number | null;
+  samples: Array<{
+    index: number;
+    category: string | null;
+    presentation_index: number | null;
+    ssim_all: number | string | null;
+    psnr_average_db: number | string | null;
+  }>;
+}
 
 export interface JobReview {
   state: JobState;
@@ -320,6 +334,7 @@ export interface JobReview {
     languages: Array<{ code: string; bcp47: string | null }>;
   } | null;
   upload: UploadReviewInfo | null;
+  video_metrics?: VideoMetricsReviewInfo | null;
 }
 
 export interface UploadResetRequest {

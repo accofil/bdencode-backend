@@ -233,6 +233,8 @@ export function formatStatusMessage(message: string | null, fallback: string): s
   }
   const reducedI = /^comparison uses (\d+) I pairs: too few source and encode I-frames coincide in the sample windows$/.exec(message);
   if (reducedI) return t(`Az összehasonlítás ${reducedI[1]} I-képpárt használ: a mintaablakokban kevés helyen esik egybe a forrás és a kódolás I-képkockája (a hiányzó helyekre P- és B-párok kerültek).`, `The comparison uses ${reducedI[1]} I pairs: few source and encode I-frames coincide in the sample windows (P and B pairs fill the rest).`);
+  const metric = videoMetricFinding(message);
+  if (metric) return metric;
   const sampledVmaf = /^sampled VMAF of the final file: mean (\S+), 1% low (\S+) \((\d+) frames\)$/.exec(message);
   if (sampledVmaf) return t(`Mintavett VMAF a kész fájlon: átlag ${sampledVmaf[1]}, 1% low ${sampledVmaf[2]} (${sampledVmaf[3]} képkocka)`, `Sampled VMAF of the final file: mean ${sampledVmaf[1]}, 1% low ${sampledVmaf[2]} (${sampledVmaf[3]} frames)`);
   return encodeProgressLabel(message) ?? eventMessageLabel(message) ?? formatWorkerError(message);
@@ -249,6 +251,28 @@ export function formatWorkerError(error: string): string {
     return t("Egy feliratsáv Matroska-fájlja nem készült el. A kész videó- és hangsávok megmaradtak; a javítás után biztonságosan folytatható.", "A subtitle track's Matroska file was not created. The finished video and audio tracks are kept; after the fix the job can safely continue.");
   }
   return error;
+}
+
+/** One finding of the sampled native-YUV PSNR/SSIM measurement, localised. */
+export function videoMetricFinding(message: string): string | undefined {
+  const sampleSsim = /^sample (\d+) SSIM is below ([\d.]+) \(([\d.]+)\)$/.exec(message);
+  if (sampleSsim) return t(`A(z) ${sampleSsim[1]}. minta SSIM-je ${sampleSsim[3]}, a határ ${sampleSsim[2]}`, `Sample ${sampleSsim[1]} SSIM is ${sampleSsim[3]}, below ${sampleSsim[2]}`);
+  const samplePsnr = /^sample (\d+) PSNR is below ([\d.]+) dB \(([\d.]+) dB\)$/.exec(message);
+  if (samplePsnr) return t(`A(z) ${samplePsnr[1]}. minta PSNR-je ${samplePsnr[3]} dB, a határ ${samplePsnr[2]} dB`, `Sample ${samplePsnr[1]} PSNR is ${samplePsnr[3]} dB, below ${samplePsnr[2]} dB`);
+  const meanSsim = /^mean sampled SSIM is below ([\d.]+)$/.exec(message);
+  if (meanSsim) return t(`A minták átlagos SSIM-je ${meanSsim[1]} alatt van`, `The mean sampled SSIM is below ${meanSsim[1]}`);
+  const meanPsnr = /^mean sampled PSNR is below ([\d.]+) dB$/.exec(message);
+  if (meanPsnr) return t(`A minták átlagos PSNR-je ${meanPsnr[1]} dB alatt van`, `The mean sampled PSNR is below ${meanPsnr[1]} dB`);
+  if (message === "B-frame sampled SSIM trails P-frames by more than 0.03") return t("A B-képek átlagos SSIM-je több mint 0,03-dal elmarad a P-képekétől", "B-frame sampled SSIM trails P-frames by more than 0.03");
+  const noValue = /^sample (\d+) has no (?:finite SSIM|valid PSNR) value$/.exec(message);
+  if (noValue) return t(`A(z) ${noValue[1]}. mintát nem sikerült megmérni`, `Sample ${noValue[1]} could not be measured`);
+  const bias = /^mean sampled ([YUV]) plane is shifted by ([+-][\d.]+) /.exec(message);
+  if (bias) return t(`A(z) ${bias[1]} sík átlagosan ${bias[2]} kódértékkel eltolódott: rendszeres szín- vagy szinthiba a kódolásban`, `The ${bias[1]} plane is shifted by ${bias[2]} code values on average: a systematic colour or levels error in the encode`);
+  if (message === "sampled native-YUV video metrics require review") return t("A mintavételes képminőség-mérés hibás kódolásra utal; ellenőrzés szükséges", "The sampled picture quality measurement points to a broken encode; review needed");
+  if (message === "sampled video metrics are below the quality policy; the job continues") return t("A mintavételes képminőség egy-egy ponton a minőségi irányérték alatt maradt; a job folytatódik (részletek a video-metrics.json-ban)", "The sampled picture quality dipped below the quality policy at some points; the job continues (details in video-metrics.json)");
+  if (message === "sampled video metrics accepted by the operator" || message === "sampled video metrics accepted by operator") return t("A mintavételes képminőség-mérést az operátor elfogadta", "The sampled picture quality measurement was accepted by the operator");
+  if (message === "comparison resumed after the operator accepted the video metrics") return t("A comparison folytatódik az elfogadott mérés után", "The comparison resumes after the accepted measurement");
+  return undefined;
 }
 
 export function formatEventMessage(kind: string, message: string | null): string {

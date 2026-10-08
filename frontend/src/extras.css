@@ -140,6 +140,7 @@
 .operator-review__facts > div { display: grid; gap: 3px; }
 .operator-review__facts dt { color: var(--muted); font-size: 8px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; }
 .operator-review__facts dd { margin: 0; font-size: 13px; }
+.operator-review__findings { display: grid; gap: 4px; margin: 0; padding-left: 18px; font-size: 12px; }
 .operator-review__hosts { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .operator-review__hosts li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 10px; border: 1px solid var(--border-soft); border-radius: 9px; font-size: 11px; }
 .operator-review__hosts small { color: var(--muted); font-size: 10px; }

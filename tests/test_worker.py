@@ -4870,3 +4870,34 @@ def test_manual_hdr10_can_only_fill_missing_scan_fields(context) -> None:
 
     assert error.value.details["scan_complete"] is False
     assert "mastering_display" in error.value.details["conflicts"]
+
+
+def test_a_grainy_sample_just_under_the_policy_only_warns() -> None:
+    # At Close Range (2026-10): one B-frame of a smoky, grainy scene measured
+    # SSIM 0.9279 while it looked identical to the source.
+    samples = [
+        {"category": "I", "ssim_all": 0.976, "psnr_average_db": 44.4},
+        {"category": "P", "ssim_all": 0.955, "psnr_average_db": 42.7},
+        {"category": "B", "ssim_all": 0.927886, "psnr_average_db": 39.32},
+    ]
+
+    assert worker_module._sampled_video_metric_blockers(samples) == ()
+    assert worker_module._sampled_video_metric_errors(samples) == (
+        "sample 3 SSIM is below 0.93 (0.927886)",
+    )
+
+
+@pytest.mark.parametrize(
+    ("samples", "message"),
+    (
+        ([{"category": "I", "ssim_all": 0.79, "psnr_average_db": 40.0}], "SSIM is below 0.80"),
+        ([{"category": "I", "ssim_all": 0.96, "psnr_average_db": 27.9}], "PSNR is below 28 dB"),
+        ([{"category": k, "ssim_all": 0.89, "psnr_average_db": 40.0} for k in "IPB"], "mean sampled SSIM is below 0.90"),
+        ([{"category": k, "ssim_all": 0.96, "psnr_average_db": 32.9} for k in "IPB"], "mean sampled PSNR is below 33 dB"),
+        ([{"category": "I", "ssim_all": "nan", "psnr_average_db": "nan"}], "no finite SSIM value"),
+    ),
+)
+def test_a_broken_encode_still_stops_for_review(
+    samples: list[dict[str, object]], message: str
+) -> None:
+    assert any(message in error for error in worker_module._sampled_video_metric_blockers(samples))
