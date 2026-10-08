@@ -28,6 +28,7 @@ from bdencode.media.bluray import (
     HdrStaticMetadata,
     MediaStream,
     PlaylistCandidate,
+    PlaylistSegment,
     StreamKind,
     ToolCapabilities,
     VideoCodec,
@@ -3449,9 +3450,17 @@ def test_audio_spectrum_pngs_are_registered_as_spectrogram_artifacts(context):
             assert content.content.startswith(b"\x89PNG\r\n\x1a\n")
 
 
-@pytest.mark.parametrize("internal_final_audio_gap", [False, True])
+@pytest.mark.parametrize(
+    ("internal_final_audio_gap", "loud_master", "clip_join"),
+    [
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        (True, False, True),
+    ],
+)
 def test_lossy_audio_transcode_uses_target_qc_without_pcm_hash_gate(
-    context, internal_final_audio_gap: bool
+    context, internal_final_audio_gap: bool, loud_master: bool, clip_join: bool
 ):
     database, settings, scan, scanner, runner, worker = context
     audio = MediaStream(
@@ -3466,12 +3475,29 @@ def test_lossy_audio_transcode_uses_target_qc_without_pcm_hash_gate(
         sample_rate=48_000,
         object_audio=True,
     )
+    if clip_join:
+        (scan.source / "BDMV" / "STREAM").mkdir(parents=True, exist_ok=True)
+        for clip_id in ("00001", "00002", "00003"):
+            (scan.source / "BDMV" / "STREAM" / f"{clip_id}.m2ts").write_bytes(
+                b"x" * 1000
+            )
     scanner.result = replace(
         scan,
         playlists=(
             replace(
                 scan.playlists[0],
                 streams=(*scan.playlists[0].streams, audio),
+                # The internal-gap case has a 32 ms gap at 200 s and the
+                # matching overlap at 400 s: one at each clip join.
+                segments=(
+                    (
+                        PlaylistSegment("00001", 0.0, 200.0),
+                        PlaylistSegment("00002", 0.0, 200.0, 200.0),
+                        PlaylistSegment("00003", 0.0, 201.0, 400.0),
+                    )
+                    if clip_join
+                    else scan.playlists[0].segments
+                ),
             ),
         ),
     )
@@ -3485,6 +3511,32 @@ def test_lossy_audio_transcode_uses_target_qc_without_pcm_hash_gate(
             if muxer == "hash":
                 pytest.fail("lossy audio QC must not run a meaningless PCM hash gate")
         real_run(argv, **kwargs)
+        stderr_path = kwargs.get("stderr_path")
+        if (
+            loud_master
+            and stderr_path is not None
+            and stderr_path.name.endswith("-analysis.log")
+        ):
+            # A loud master: full-scale samples and intersample peaks above
+            # 0 dBTP in the source and in its lossy encode.
+            runner._write(
+                stderr_path,
+                """
+[Parsed_astats_1] Overall
+[Parsed_astats_1] Peak level dB: 0.000000
+[Parsed_astats_1] Peak count: 40
+[Parsed_astats_1] Number of NaNs: 0
+[Parsed_astats_1] Number of Infs: 0
+[Parsed_astats_1] Number of denormals: 0
+[Parsed_ebur128_0] Summary:
+[Parsed_ebur128_0]   Integrated loudness:
+[Parsed_ebur128_0]     I: -14.0 LUFS
+[Parsed_ebur128_0]   Loudness range:
+[Parsed_ebur128_0]     LRA: 6.0 LU
+[Parsed_ebur128_0]   True peak:
+[Parsed_ebur128_0]     Peak: 0.6 dBFS
+""",
+            )
         stdout_path = kwargs.get("stdout_path")
         if stdout_path is None:
             return
@@ -3569,7 +3621,9 @@ def test_lossy_audio_transcode_uses_target_qc_without_pcm_hash_gate(
                                 "channel_layout": "7.1"
                                 if source_probe
                                 else "5.1(side)",
-                                "bit_rate": None if source_probe else "1024000",
+                                "bit_rate": None
+                                if source_probe or loud_master
+                                else "1024000",
                                 "start_time": "0",
                                 "duration": "601" if source_probe else "601.016",
                             }
@@ -3593,7 +3647,12 @@ def test_lossy_audio_transcode_uses_target_qc_without_pcm_hash_gate(
 
     result = worker.process_job(ready)
 
-    if internal_final_audio_gap:
+    continuity_warnings = [
+        event
+        for event in database.list_events(job_id=job.id, limit=1000)
+        if event.kind == "worker.audio-continuity-warning"
+    ]
+    if internal_final_audio_gap and not clip_join:
         assert result.state is JobState.NEEDS_REVIEW
         assert "sample-cursor continuity failed" in result.status_message
         assert not list(paths.analysis.glob("*frames.json"))
@@ -3614,10 +3673,42 @@ def test_lossy_audio_transcode_uses_target_qc_without_pcm_hash_gate(
     )
     assert manifest["schema_version"] == 4
     track = manifest["tracks"][0]
+    if clip_join:
+        # The gap at the clip join is recorded and the job completes.
+        assert track["source_to_final_continuity"]["passed"] is True
+        assert track["source_to_final_continuity"]["excused_join_discontinuities"] == 2
+        assert track["final_frame_continuity"]["continuous"] is False
+        assert [event.message for event in continuity_warnings] == [
+            "audio track audio:4352 has small gaps or overlaps at the playlist's "
+            "clip joins; the sample count matches and the job continues"
+        ]
+        return
+    assert continuity_warnings == []
     assert track["verification_mode"] == "lossy_transcode"
     assert track["decoded_pcm_sha256_required"] is False
     assert track["decoded_pcm_sha256_match"] is None
     assert track["verification"]["passed"] is True
+    audio_warnings = [
+        event
+        for event in database.list_events(job_id=job.id, limit=1000)
+        if event.kind == "worker.audio-qc-warning"
+    ]
+    if loud_master:
+        assert track["signal_verification"]["passed"] is True
+        assert any(
+            "source audio contains 40 clipped/full-scale samples" in item
+            for item in track["signal_verification"]["warnings"]
+        )
+        assert track["verification"]["warnings"] == [
+            "encoded audio bitrate is not reported; expected 1024000 bit/s"
+        ]
+        assert len(audio_warnings) == 1
+        assert audio_warnings[0].message == (
+            "audio track audio:4352 has level or bitrate findings that do not "
+            "show a broken encode; the job continues"
+        )
+    else:
+        assert audio_warnings == []
     assert track["effective_target"]["codec_name"] == "eac3"
     assert track["decoded_frame_continuity_required"] is True
     assert track["source_to_sidecar_continuity"]["passed"] is True

@@ -365,3 +365,71 @@ def test_lossy_qc_rejects_wrong_bitrate_and_lossless_qc_still_requires_pcm() -> 
     assert not verify_audio_output(
         source, source, copied, decoded_pcm_sha256_match=False
     ).passed
+
+
+def _dts_encode(bit_rate: int | None) -> tuple[AudioProbe, AudioProbe, object]:
+    source = AudioProbe(
+        "truehd", 48_000, 6, "5.1(side)", 480_000, Decimal("0"), Decimal("10"), 24
+    )
+    encode = AudioProbe(
+        "dts",
+        48_000,
+        6,
+        "5.1(side)",
+        None,
+        Decimal("0"),
+        Decimal("10.021"),
+        None,
+        bit_rate=bit_rate,
+    )
+    policy = effective_audio_policy(
+        "dts",
+        source_codec="truehd",
+        source_profile="TrueHD",
+        source_channels=6,
+        source_sample_rate=48_000,
+    )
+    return source, encode, policy
+
+
+@pytest.mark.parametrize(
+    "bit_rate", (1_536_000, 1_509_000, 1_509_750, 1_490_000, 1_580_000)
+)
+def test_dts_1536k_preset_accepts_the_bitrates_ffprobe_reports(bit_rate: int) -> None:
+    source, encode, policy = _dts_encode(bit_rate)
+
+    verification = verify_audio_output(
+        source, encode, policy, decoded_pcm_sha256_match=None
+    )
+
+    assert verification.bitrate_match
+    assert verification.passed
+    assert verification.warnings == ()
+    assert verification.to_dict()["encode_bit_rate"] == bit_rate
+
+
+@pytest.mark.parametrize("bit_rate", (1_411_200, 1_472_000, 1_920_000))
+def test_dts_preset_still_rejects_another_bitrate_table_step(bit_rate: int) -> None:
+    source, encode, policy = _dts_encode(bit_rate)
+
+    verification = verify_audio_output(
+        source, encode, policy, decoded_pcm_sha256_match=None
+    )
+
+    assert not verification.bitrate_match
+    assert not verification.passed
+
+
+def test_a_missing_encoded_bitrate_is_a_warning_not_a_failure() -> None:
+    source, encode, policy = _dts_encode(None)
+
+    verification = verify_audio_output(
+        source, encode, policy, decoded_pcm_sha256_match=None
+    )
+
+    assert verification.bitrate_match
+    assert verification.passed
+    assert verification.warnings == (
+        "encoded audio bitrate is not reported; expected 1536000 bit/s",
+    )
+    assert verification.to_dict()["warnings"] == list(verification.warnings)

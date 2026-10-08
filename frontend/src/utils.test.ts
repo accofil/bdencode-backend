@@ -39,6 +39,14 @@ describe("formatEventMessage", () => {
     expect(formatEventMessage("job.upload-reset", "job.upload-reset")).toBe("Képfeltöltés elölről");
   });
 
+  it("localizes the audio check warnings that let the job continue", () => {
+    expect(formatEventMessage("worker.audio-qc-warning", "audio track audio:4352 has level or bitrate findings that do not show a broken encode; the job continues"))
+      .toBe("A(z) audio:4352 hangsáv szint- vagy bitrátamérése eltérést mutatott, de ez nem hibás kódolásra utal; a job folytatódik (részletek az audio-comparison.json-ban)");
+    expect(formatEventMessage("worker.audio-continuity-warning", "audio track audio:4352 has small gaps or overlaps at the playlist's clip joins; the sample count matches and the job continues"))
+      .toBe("A(z) audio:4352 hangsávban a playlist klipillesztéseinél kis szünet vagy átfedés van; a hangminták száma egyezik, a job folytatódik");
+    expect(formatEventMessage("worker.audio-qc-warning", null)).toBe("Figyelmeztetés a hangellenőrzésből");
+  });
+
   it("explains the chapter retry failure without hiding its technical details", () => {
     expect(formatWorkerError("FileNotFoundError: /job/work/chapters.xml"))
       .toMatch(/fejezetlista létrehozása/i);

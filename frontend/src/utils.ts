@@ -133,6 +133,8 @@ function eventKindLabel(kind: string): string | undefined {
     "worker.dynamic-hdr": ["Dinamikus HDR", "Dynamic HDR"],
     "worker.variable-aspect": ["Változó képarány", "Variable aspect ratio"],
     "worker.final-vmaf": ["Mintavett VMAF a kész fájlon", "Sampled VMAF of the final file"],
+    "worker.audio-qc-warning": ["Figyelmeztetés a hangellenőrzésből", "Audio check warning"],
+    "worker.audio-continuity-warning": ["Hang a klipillesztéseknél", "Audio at the clip joins"],
     "job.upload-reset": ["Képfeltöltés elölről", "Image upload restarted"],
   };
   const pair = labels[kind];
@@ -243,6 +245,8 @@ export function formatStatusMessage(message: string | null, fallback: string): s
   if (comparisonRetry) return t(`Az összehasonlítás kifutott az időből; automatikus újrapróbálás ${comparisonRetry[1]}× hosszabb időkerettel (az elkészült képpárok megmaradnak)`, `The comparison ran out of time; retrying automatically with ${comparisonRetry[1]}x time budgets (finished pairs are kept)`);
   const uploadRetry = /^image upload attempt (\d+) failed; retrying automatically in ([\d.]+) s$/.exec(message);
   if (uploadRetry) return t(`A képfeltöltés ${uploadRetry[1]}. kísérlete nem sikerült (a tárhely nem elérhető); automatikus újrapróbálás ${uploadRetry[2]} mp múlva`, `Image upload attempt ${uploadRetry[1]} failed (the host is unavailable); retrying automatically in ${uploadRetry[2]} s`);
+  const audio = audioQcFinding(message);
+  if (audio) return audio;
   const metric = videoMetricFinding(message);
   if (metric) return metric;
   const sampledVmaf = /^sampled VMAF of the final file: mean (\S+), 1% low (\S+) \((\d+) frames\)$/.exec(message);
@@ -261,6 +265,15 @@ export function formatWorkerError(error: string): string {
     return t("Egy feliratsáv Matroska-fájlja nem készült el. A kész videó- és hangsávok megmaradtak; a javítás után biztonságosan folytatható.", "A subtitle track's Matroska file was not created. The finished video and audio tracks are kept; after the fix the job can safely continue.");
   }
   return error;
+}
+
+/** An audio check finding that is recorded as a warning, localised. */
+export function audioQcFinding(message: string): string | undefined {
+  const level = /^audio track (\S+) has level or bitrate findings that do not show a broken encode; the job continues$/.exec(message);
+  if (level) return t(`A(z) ${level[1]} hangsáv szint- vagy bitrátamérése eltérést mutatott, de ez nem hibás kódolásra utal; a job folytatódik (részletek az audio-comparison.json-ban)`, `Audio track ${level[1]} has level or bitrate findings that do not point to a broken encode; the job continues (details in audio-comparison.json)`);
+  const joins = /^audio track (\S+) has small gaps or overlaps at the playlist's clip joins; the sample count matches and the job continues$/.exec(message);
+  if (joins) return t(`A(z) ${joins[1]} hangsávban a playlist klipillesztéseinél kis szünet vagy átfedés van; a hangminták száma egyezik, a job folytatódik`, `Audio track ${joins[1]} has small gaps or overlaps at the playlist's clip joins; the sample count matches and the job continues`);
+  return undefined;
 }
 
 /** One finding of the sampled native-YUV PSNR/SSIM measurement, localised. */

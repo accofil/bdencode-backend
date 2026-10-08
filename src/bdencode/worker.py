@@ -2540,6 +2540,18 @@ def _mean_plane_bias(
     return {name: round(sum(values) / len(values), 4) for name, values in totals.items()}
 
 
+def _playlist_join_seconds(playlist: PlaylistCandidate) -> list[float]:
+    """The clip-join times of a multi-clip playlist, from its start."""
+
+    return sorted(
+        {
+            segment.relative_start_seconds
+            for segment in playlist.segments
+            if segment.relative_start_seconds > 0
+        }
+    )
+
+
 # Below these the encode is broken (wrong frames, corruption, a failed
 # filter), not merely soft: the job stops for review.  The stricter quality
 # policy of ``_sampled_video_metric_errors`` only warns, because grainy film
@@ -4379,13 +4391,7 @@ class PipelineWorker:
         before.
         """
 
-        joins = sorted(
-            {
-                segment.relative_start_seconds
-                for segment in playlist.segments
-                if segment.relative_start_seconds > 0
-            }
-        )
+        joins = _playlist_join_seconds(playlist)
         if not joins:
             return
         current = self._clip_join_report(paths)
@@ -6972,6 +6978,11 @@ class PipelineWorker:
         audio_ordinals = {
             item.id: index for index, item in enumerate(playlist.audio_streams)
         }
+        # Gaps and overlaps of the sound at these clip joins are a property of
+        # the disc, not of the encode.
+        audio_join_seconds = tuple(
+            Decimal(str(moment)) for moment in _playlist_join_seconds(playlist)
+        )
         audio_inputs: dict[str, Any] = {
             "manifest_schema_version": 4,
             "audio_decode_policy_schema_version": AUDIO_DECODE_POLICY_SCHEMA_VERSION,
@@ -7202,10 +7213,16 @@ class PipelineWorker:
                         f"decoded audio frame evidence is incomplete for {stream.id}"
                     ) from exc
                 sidecar_continuity = compare_audio_frame_continuity(
-                    source_frame_value, sidecar_frame_value, audio_policy
+                    source_frame_value,
+                    sidecar_frame_value,
+                    audio_policy,
+                    join_seconds=audio_join_seconds,
                 )
                 final_continuity = compare_audio_frame_continuity(
-                    source_frame_value, final_frame_value, audio_policy
+                    source_frame_value,
+                    final_frame_value,
+                    audio_policy,
+                    join_seconds=audio_join_seconds,
                 )
                 if not sidecar_continuity.passed or not final_continuity.passed:
                     raise ReviewRequired(
@@ -7219,6 +7236,26 @@ class PipelineWorker:
                             "source_to_sidecar": sidecar_continuity.to_dict(),
                             "source_to_final": final_continuity.to_dict(),
                         },
+                    )
+                if final_continuity.excused_join_discontinuities:
+                    self.database.add_event(
+                        EventCreate(
+                            job_id=job.id,
+                            kind="worker.audio-continuity-warning",
+                            message=(
+                                f"audio track {stream.id} has small gaps or "
+                                "overlaps at the playlist's clip joins; the "
+                                "sample count matches and the job continues"
+                            ),
+                            payload={
+                                "stream_id": stream.id,
+                                "join_seconds": [
+                                    str(item) for item in audio_join_seconds
+                                ],
+                                "source_to_final": final_continuity.to_dict(),
+                                "report": audio_manifest_path.name,
+                            },
+                        )
                     )
             # Compare timing on the same rebased timeline used by the mux.  A
             # source track that legitimately started at +40 ms and was moved to
@@ -7353,6 +7390,27 @@ class PipelineWorker:
                             audio_policy.pcm_match_required
                         ),
                     },
+                )
+            if verification.warnings or signal_verification.warnings:
+                self.database.add_event(
+                    EventCreate(
+                        job_id=job.id,
+                        kind="worker.audio-qc-warning",
+                        message=(
+                            f"audio track {stream.id} has level or bitrate "
+                            "findings that do not show a broken encode; the "
+                            "job continues"
+                        ),
+                        payload={
+                            "stream_id": stream.id,
+                            "action": item.action.value,
+                            "warnings": [
+                                *verification.warnings,
+                                *signal_verification.warnings,
+                            ],
+                            "report": audio_manifest_path.name,
+                        },
+                    )
                 )
             source_probe_value = asdict(source_value)
             source_timeline_probe_value = asdict(source_timeline_value)
