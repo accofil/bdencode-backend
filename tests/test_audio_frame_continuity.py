@@ -81,6 +81,35 @@ def test_audio_frame_parser_builds_continuous_normalized_sample_cursor() -> None
     assert evidence.discontinuity_frame_indexes == ()
 
 
+def test_ffprobe_without_frame_sample_rates_uses_the_stream_rate() -> None:
+    """Debian 12's ffprobe 5.1 prints no per-frame sample_rate."""
+
+    document = _frame_document()
+    for frame in document["frames"]:  # type: ignore[union-attr]
+        del frame["sample_rate"]
+
+    evidence = parse_audio_frame_continuity(document)
+
+    assert evidence.continuous
+    assert evidence.sample_rate == 48000
+    assert evidence.total_samples == 6144
+    assert evidence.frame_sample_rates_reported is False
+    assert evidence.to_dict()["frame_sample_rates_reported"] is False
+    assert parse_audio_frame_continuity(_frame_document()).frame_sample_rates_reported is True
+
+
+def test_a_reported_rate_change_or_a_partly_reported_walk_still_fails() -> None:
+    changed = _frame_document()
+    changed["frames"][2]["sample_rate"] = "44100"  # type: ignore[index]
+    with pytest.raises(ValueError, match="sample rate changed"):
+        parse_audio_frame_continuity(changed)
+
+    partial = _frame_document()
+    del partial["frames"][1]["sample_rate"]  # type: ignore[index]
+    with pytest.raises(ValueError, match="missing for some frames"):
+        parse_audio_frame_continuity(partial)
+
+
 def test_audio_frame_parser_rejects_truncated_counted_evidence() -> None:
     with pytest.raises(ValueError, match="frame count mismatch"):
         parse_audio_frame_continuity(_frame_document(counted_frames=5))
@@ -134,14 +163,14 @@ def test_lossy_total_sample_padding_is_bounded_by_codec_policy() -> None:
     assert verdict.passed
 
 
-def test_each_decoded_frame_must_declare_its_sample_rate() -> None:
+def test_a_frame_without_sample_rate_among_reported_ones_fails() -> None:
     document = _frame_document()
     frames = document["frames"]
     assert isinstance(frames, list)
     assert isinstance(frames[1], dict)
     del frames[1]["sample_rate"]
 
-    with pytest.raises(ValueError, match="sample rate changed or is missing"):
+    with pytest.raises(ValueError, match="missing for some frames"):
         parse_audio_frame_continuity(document)
 
 
