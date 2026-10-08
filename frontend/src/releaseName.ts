@@ -1,4 +1,5 @@
 import type { DynamicHdrMode, Playlist, TrackSelection, VideoProperties } from "./api/types";
+import { t } from "./i18n";
 import { releaseTitleBase } from "./utils";
 
 /** Which tracker's rules a job follows; "none" keeps the plain BDEncode behaviour. */
@@ -6,7 +7,8 @@ export type TrackerProfile = "none" | "aither" | "ncore";
 export type NamingStyle = "aither" | "hungarian";
 
 export const TRACKER_PROFILE_LABELS: Record<TrackerProfile, string> = {
-  none: "Nincs (általános)",
+  // A getter, so the label follows the current interface language.
+  get none() { return t("Nincs (általános)", "None (general)"); },
   aither: "Aither",
   ncore: "nCore",
 };

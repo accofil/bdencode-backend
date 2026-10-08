@@ -20,6 +20,7 @@ import type {
   ReleaseValidationResult,
   TrackerReleaseProfile,
 } from "../api/types";
+import { t } from "../i18n";
 import { formatBytes, humanize } from "../utils";
 import { Badge, Button, Card, EmptyState, LoadingPanel, Modal, Notice } from "./ui";
 
@@ -53,20 +54,23 @@ interface ReleaseDraft {
   languages: string;
 }
 
-const RELEASE_STATE_LABELS: Record<string, string> = {
-  NOT_PREPARED: "Nincs előkészítve",
-  PREPARING: "Előkészítés folyamatban",
-  NEEDS_REVIEW: "Ellenőrzést kér",
-  READY: "Csomag elkészült",
-  SEEDING_CHECK: "Dupe check folyamatban",
-  READY_TO_PUBLISH: "Dupe check: tiszta",
-  // Seeding and publishing states only occur in records made before 3.0.
-  SEEDING: "qBittorrent művelet folyamatban",
-  PUBLISHING: "Publikálás folyamatban",
-  PUBLISHED: "Publikálva",
-  FAILED: "Hibás",
-  UNKNOWN: "Ismeretlen eredmény",
-};
+function releaseStateLabel(state: string): string | undefined {
+  switch (state) {
+    case "NOT_PREPARED": return t("Nincs előkészítve", "Not prepared");
+    case "PREPARING": return t("Előkészítés folyamatban", "Preparing");
+    case "NEEDS_REVIEW": return t("Ellenőrzést kér", "Needs review");
+    case "READY": return t("Csomag elkészült", "Kit ready");
+    case "SEEDING_CHECK": return t("Dupe check folyamatban", "Dupe check running");
+    case "READY_TO_PUBLISH": return t("Dupe check: tiszta", "Dupe check: clean");
+    // Seeding and publishing states only occur in records made before 3.0.
+    case "SEEDING": return t("qBittorrent művelet folyamatban", "qBittorrent action running");
+    case "PUBLISHING": return t("Publikálás folyamatban", "Publishing");
+    case "PUBLISHED": return t("Publikálva", "Published");
+    case "FAILED": return t("Hibás", "Failed");
+    case "UNKNOWN": return t("Ismeretlen eredmény", "Unknown result");
+    default: return undefined;
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -192,7 +196,7 @@ function errorText(error: Error): string {
 }
 
 function safeEvidence(value: unknown, key = "value"): unknown {
-  if (/announce|credential|passkey|token|secret/i.test(key)) return "Rejtett érték";
+  if (/announce|credential|passkey|token|secret/i.test(key)) return t("Rejtett érték", "Hidden value");
   if (Array.isArray(value)) return value.map((item) => safeEvidence(item));
   if (!isRecord(value)) return value;
   return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, safeEvidence(item, name)]));
@@ -204,7 +208,7 @@ function EvidenceList({ value, empty }: { value: unknown; empty: string }) {
     ? value.slice(0, 24).map((item, index) => [String(index + 1), item] as const)
     : isRecord(value)
       ? Object.entries(value).slice(0, 24)
-      : [["Állapot", value] as const];
+      : [[t("Állapot", "Status"), value] as const];
   if (!rows.length) return <p className="muted">{empty}</p>;
   return (
     <ul className="release-check-list">
@@ -396,9 +400,9 @@ export function ReleasePanel({ job, outputArtifact }: { job: Job; outputArtifact
   }
 
   if (job.state !== "COMPLETED") {
-    return <EmptyState icon={<PackageCheck size={28} />} title="A release még nem készíthető elő" description="A release-csomag (NFO, leírás, MediaInfo, képek) csak sikeres encode és QC után építhető fel." />;
+    return <EmptyState icon={<PackageCheck size={28} />} title={t("A release még nem készíthető elő", "The release cannot be prepared yet")} description={t("A release-csomag (NFO, leírás, MediaInfo, képek) csak sikeres encode és QC után építhető fel.", "The release kit (NFO, description, MediaInfo, images) can only be built after a successful encode and QC.")} />;
   }
-  if (profilesQuery.isLoading || preparationsQuery.isLoading) return <LoadingPanel label="Release-adatok betöltése…" />;
+  if (profilesQuery.isLoading || preparationsQuery.isLoading) return <LoadingPanel label={t("Release-adatok betöltése…", "Loading release data…")} />;
 
   const profile = profiles.find((item) => item.profile_id === (current?.profile_id ?? profileId));
   const description = manifestFact(manifest, "description_bbcode", "description", "bbcode");
@@ -414,28 +418,28 @@ export function ReleasePanel({ job, outputArtifact }: { job: Job; outputArtifact
   return (
     <div className="release-panel">
       {(profilesQuery.isError || preparationsQuery.isError) && (
-        <Notice tone="danger" title="A release-kezelő nem érhető el">
+        <Notice tone="danger" title={t("A release-kezelő nem érhető el", "The release manager is not available")}>
           {errorText((profilesQuery.error ?? preparationsQuery.error) as Error)}
         </Notice>
       )}
       {!profiles.length && !profilesQuery.isError && (
-        <Notice tone="warning" title="Nincs használható trackerprofil">A szerveren előbb egy védett release-profilt kell engedélyezni.</Notice>
+        <Notice tone="warning" title={t("Nincs használható trackerprofil", "No usable tracker profile")}>{t("A szerveren előbb egy védett release-profilt kell engedélyezni.", "A protected release profile must first be enabled on the server.")}</Notice>
       )}
 
       <div className="release-layout">
         <Card className="release-form-card">
           <div className="section-heading">
-            <div><span className="section-heading__icon"><PackageCheck size={19} /></span><div><h2>Release-terv</h2><p>A release-csomag nyilvános metaadatai</p></div></div>
-            {current && <Badge tone={releaseTone(state)}>{RELEASE_STATE_LABELS[state] ?? humanize(state)}</Badge>}
+            <div><span className="section-heading__icon"><PackageCheck size={19} /></span><div><h2>{t("Release-terv", "Release plan")}</h2><p>{t("A release-csomag nyilvános metaadatai", "The public metadata of the release kit")}</p></div></div>
+            {current && <Badge tone={releaseTone(state)}>{releaseStateLabel(state) ?? humanize(state)}</Badge>}
           </div>
 
           {preparations.length > 0 && (
             <label className="field">
-              Korábbi előkészítés
+              {t("Korábbi előkészítés", "Earlier preparation")}
               <select value={currentId ?? ""} onChange={(event) => { setSelectedId(event.target.value); setValidationResult(null); }}>
                 {preparations.map((item, index) => {
                   const id = preparationId(item);
-                  return id ? <option value={id} key={id}>{item.metadata?.release_name ?? `Előkészítés ${index + 1}`} · {RELEASE_STATE_LABELS[preparationState(item)] ?? preparationState(item)}</option> : null;
+                  return id ? <option value={id} key={id}>{item.metadata?.release_name ?? t(`Előkészítés ${index + 1}`, `Preparation ${index + 1}`)} · {releaseStateLabel(preparationState(item)) ?? preparationState(item)}</option> : null;
                 })}
               </select>
             </label>
@@ -443,39 +447,39 @@ export function ReleasePanel({ job, outputArtifact }: { job: Job; outputArtifact
 
           <form onSubmit={(event) => { event.preventDefault(); create.mutate(); }}>
             <div className="release-form-grid">
-              <label className="field">Trackerprofil<select required value={profileId} onChange={(event) => setDraft((value) => ({ ...value, profileId: event.target.value }))}><option value="">Válassz profilt…</option>{profiles.map((item) => <option key={item.profile_id} value={item.profile_id}>{item.display_name}</option>)}</select></label>
-              <label className="field">Év<input required inputMode="numeric" min="1878" max="2200" type="number" value={draft.year} onChange={(event) => setDraft((value) => ({ ...value, year: event.target.value }))} /></label>
-              <label className="field release-field--wide">Release-név<input required readOnly aria-readonly="true" maxLength={240} value={releaseName} /><small>Az ellenőrzött OUTPUT MKV fájlnevéből származik.</small></label>
-              <label className="field release-field--wide">Cím<input required maxLength={300} value={draft.title} onChange={(event) => setDraft((value) => ({ ...value, title: event.target.value }))} /></label>
+              <label className="field">{t("Trackerprofil", "Tracker profile")}<select required value={profileId} onChange={(event) => setDraft((value) => ({ ...value, profileId: event.target.value }))}><option value="">{t("Válassz profilt…", "Choose a profile…")}</option>{profiles.map((item) => <option key={item.profile_id} value={item.profile_id}>{item.display_name}</option>)}</select></label>
+              <label className="field">{t("Év", "Year")}<input required inputMode="numeric" min="1878" max="2200" type="number" value={draft.year} onChange={(event) => setDraft((value) => ({ ...value, year: event.target.value }))} /></label>
+              <label className="field release-field--wide">{t("Release-név", "Release name")}<input required readOnly aria-readonly="true" maxLength={240} value={releaseName} /><small>{t("Az ellenőrzött OUTPUT MKV fájlnevéből származik.", "Taken from the file name of the verified OUTPUT MKV.")}</small></label>
+              <label className="field release-field--wide">{t("Cím", "Title")}<input required maxLength={300} value={draft.title} onChange={(event) => setDraft((value) => ({ ...value, title: event.target.value }))} /></label>
               <label className="field">Edition<input maxLength={160} value={draft.edition} onChange={(event) => setDraft((value) => ({ ...value, edition: event.target.value }))} /></label>
-              <label className="field">Kategória<input required value={draft.category} onChange={(event) => setDraft((value) => ({ ...value, category: event.target.value }))} /></label>
+              <label className="field">{t("Kategória", "Category")}<input required value={draft.category} onChange={(event) => setDraft((value) => ({ ...value, category: event.target.value }))} /></label>
               <label className="field">IMDb ID<input pattern="tt[0-9]{7,10}" placeholder="tt1234567" value={draft.imdbId} onChange={(event) => setDraft((value) => ({ ...value, imdbId: event.target.value }))} /></label>
               <label className="field">TMDb ID<input min="1" type="number" value={draft.tmdbId} onChange={(event) => setDraft((value) => ({ ...value, tmdbId: event.target.value }))} /></label>
-              <label className="field">Forrás<input required value={draft.sourceMedia} onChange={(event) => setDraft((value) => ({ ...value, sourceMedia: event.target.value }))} /></label>
-              <label className="field">Felbontás<input required value={draft.resolution} onChange={(event) => setDraft((value) => ({ ...value, resolution: event.target.value }))} /></label>
-              <label className="field">Videokodek<input required value={draft.videoCodec} onChange={(event) => setDraft((value) => ({ ...value, videoCodec: event.target.value }))} /></label>
-              <label className="field">Audiókodekek<input required value={draft.audioCodecs} onChange={(event) => setDraft((value) => ({ ...value, audioCodecs: event.target.value }))} /><small>Vesszővel elválasztva.</small></label>
-              <label className="field release-field--wide">Nyelvek<input required value={draft.languages} onChange={(event) => setDraft((value) => ({ ...value, languages: event.target.value }))} /><small>Normalizált BCP-47 kódok, vesszővel elválasztva.</small></label>
+              <label className="field">{t("Forrás", "Source")}<input required value={draft.sourceMedia} onChange={(event) => setDraft((value) => ({ ...value, sourceMedia: event.target.value }))} /></label>
+              <label className="field">{t("Felbontás", "Resolution")}<input required value={draft.resolution} onChange={(event) => setDraft((value) => ({ ...value, resolution: event.target.value }))} /></label>
+              <label className="field">{t("Videokodek", "Video codec")}<input required value={draft.videoCodec} onChange={(event) => setDraft((value) => ({ ...value, videoCodec: event.target.value }))} /></label>
+              <label className="field">{t("Audiókodekek", "Audio codecs")}<input required value={draft.audioCodecs} onChange={(event) => setDraft((value) => ({ ...value, audioCodecs: event.target.value }))} /><small>{t("Vesszővel elválasztva.", "Comma-separated.")}</small></label>
+              <label className="field release-field--wide">{t("Nyelvek", "Languages")}<input required value={draft.languages} onChange={(event) => setDraft((value) => ({ ...value, languages: event.target.value }))} /><small>{t("Normalizált BCP-47 kódok, vesszővel elválasztva.", "Normalized BCP-47 codes, comma-separated.")}</small></label>
             </div>
-            <Button className="release-create-button" type="submit" icon={<PackageCheck size={17} />} loading={create.isPending} disabled={invalidDraft || !profiles.length}>Új előkészítés létrehozása</Button>
+            <Button className="release-create-button" type="submit" icon={<PackageCheck size={17} />} loading={create.isPending} disabled={invalidDraft || !profiles.length}>{t("Új előkészítés létrehozása", "Create new preparation")}</Button>
           </form>
-          {create.isError && <Notice tone="danger" title="Az előkészítés nem hozható létre">{errorText(create.error)}</Notice>}
+          {create.isError && <Notice tone="danger" title={t("Az előkészítés nem hozható létre", "The preparation could not be created")}>{errorText(create.error)}</Notice>}
         </Card>
 
         <div className="release-side-stack">
           <Card className="release-status-card">
-            <span className="eyebrow">Kiválasztott terv</span>
+            <span className="eyebrow">{t("Kiválasztott terv", "Selected plan")}</span>
             <h2>{current?.metadata?.release_name ?? releaseName}</h2>
             <dl className="summary-list summary-list--stacked">
-              <div><dt>Állapot</dt><dd>{RELEASE_STATE_LABELS[state] ?? humanize(state)}</dd></div>
+              <div><dt>{t("Állapot", "Status")}</dt><dd>{releaseStateLabel(state) ?? humanize(state)}</dd></div>
               <div><dt>Tracker</dt><dd>{profile?.display_name ?? current?.profile_id ?? "—"}</dd></div>
               <div><dt>Payload</dt><dd>{String(manifestFact(manifest, "payload_path", "release_name") ?? "—")}</dd></div>
-              <div><dt>Méret</dt><dd>{typeof payloadSize === "number" ? formatBytes(payloadSize) : "—"}</dd></div>
+              <div><dt>{t("Méret", "Size")}</dt><dd>{typeof payloadSize === "number" ? formatBytes(payloadSize) : "—"}</dd></div>
             </dl>
           </Card>
           <Card className="release-payload-card">
-            <span className="eyebrow">Payload</span><h2>Egy ellenőrzött MKV</h2>
-            <p>A csomag ezt az egy MKV-t írja le; a comparison, az analysis és a tulajdonosi rekord nem része. Torrentet a BDEncode 3.0-tól nem készít.</p>
+            <span className="eyebrow">Payload</span><h2>{t("Egy ellenőrzött MKV", "One verified MKV")}</h2>
+            <p>{t("A csomag ezt az egy MKV-t írja le; a comparison, az analysis és a tulajdonosi rekord nem része. Torrentet a BDEncode 3.0-tól nem készít.", "The kit describes this one MKV; the comparison, the analysis and the ownership record are not part of it. Since 3.0, BDEncode creates no torrent.")}</p>
             <div className="release-payload-path"><FileCheck2 size={18} /><code>{String(manifestFact(manifest, "payload_path") ?? `${releaseName}/${releaseName}.mkv`)}</code></div>
           </Card>
         </div>
@@ -484,32 +488,32 @@ export function ReleasePanel({ job, outputArtifact }: { job: Job; outputArtifact
       {current && (
         <>
           <div className="release-evidence-grid">
-            <Card className="release-evidence-card"><div className="section-heading"><div><span className="section-heading__icon"><ShieldCheck size={18} /></span><div><h2>Preflight</h2><p>Blokkoló és tájékoztató ellenőrzések</p></div></div></div><EvidenceList value={preflight} empty="A validáció még nem futott le." /></Card>
-            <Card className="release-evidence-card"><div className="section-heading"><div><span className="section-heading__icon"><SearchCheck size={18} /></span><div><h2>Csomag-előnézet</h2><p>Hash-pinnelt payload és publikus sidecarok</p></div></div></div><EvidenceList value={preview} empty="A csomag még nem épült fel." /></Card>
+            <Card className="release-evidence-card"><div className="section-heading"><div><span className="section-heading__icon"><ShieldCheck size={18} /></span><div><h2>Preflight</h2><p>{t("Blokkoló és tájékoztató ellenőrzések", "Blocking and informational checks")}</p></div></div></div><EvidenceList value={preflight} empty={t("A validáció még nem futott le.", "Validation has not run yet.")} /></Card>
+            <Card className="release-evidence-card"><div className="section-heading"><div><span className="section-heading__icon"><SearchCheck size={18} /></span><div><h2>{t("Csomag-előnézet", "Kit preview")}</h2><p>{t("Hash-pinnelt payload és publikus sidecarok", "Hash-pinned payload and public sidecars")}</p></div></div></div><EvidenceList value={preview} empty={t("A csomag még nem épült fel.", "The kit has not been built yet.")} /></Card>
           </div>
 
           <Card className="release-actions-card" aria-busy={busy}>
-            <div><span className="eyebrow">Műveletek</span><h2>Validálás, csomag és dupe check</h2><p>Torrentet és trackerfeltöltést a BDEncode 3.0-tól nem végez: a kész csomag alapján kézzel töltesz fel.</p></div>
+            <div><span className="eyebrow">{t("Műveletek", "Actions")}</span><h2>{t("Validálás, csomag és dupe check", "Validation, kit and dupe check")}</h2><p>{t("Torrentet és trackerfeltöltést a BDEncode 3.0-tól nem végez: a kész csomag alapján kézzel töltesz fel.", "Since 3.0, BDEncode makes no torrent and no tracker upload: you upload by hand from the finished kit.")}</p></div>
             <div className="release-actions">
-              <Button variant="secondary" icon={<ShieldCheck size={16} />} loading={validate.isPending} disabled={busy || !hasVersion} onClick={() => run("validate")}>Validálás</Button>
-              <Button icon={<PackageCheck size={16} />} loading={action.isPending && action.variables?.name === "build"} disabled={busy || !hasVersion || !canBuild} onClick={() => run("build")}>Csomag építése</Button>
-              <Button title={!supportsDupeCheck ? "A trackerprofil nem támogat dupe checket." : undefined} variant="secondary" icon={<SearchCheck size={16} />} loading={action.isPending && action.variables?.name === "dupe-check"} disabled={busy || !hasVersion || state !== "READY" || !supportsDupeCheck} onClick={() => run("dupe-check")}>Dupe check</Button>
-              {typeof description === "string" && <Button variant="ghost" icon={<Clipboard size={16} />} disabled={busy} onClick={() => void copyValue(description)}>Leírás másolása</Button>}
-              <Button variant="danger" icon={<Trash2 size={16} />} disabled={busy || !hasVersion || activeState || preservedAuditState} onClick={() => setDeleteTarget(approvalSnapshot(current, preparations))}>Terv törlése</Button>
+              <Button variant="secondary" icon={<ShieldCheck size={16} />} loading={validate.isPending} disabled={busy || !hasVersion} onClick={() => run("validate")}>{t("Validálás", "Validate")}</Button>
+              <Button icon={<PackageCheck size={16} />} loading={action.isPending && action.variables?.name === "build"} disabled={busy || !hasVersion || !canBuild} onClick={() => run("build")}>{t("Csomag építése", "Build kit")}</Button>
+              <Button title={!supportsDupeCheck ? t("A trackerprofil nem támogat dupe checket.", "The tracker profile does not support a dupe check.") : undefined} variant="secondary" icon={<SearchCheck size={16} />} loading={action.isPending && action.variables?.name === "dupe-check"} disabled={busy || !hasVersion || state !== "READY" || !supportsDupeCheck} onClick={() => run("dupe-check")}>Dupe check</Button>
+              {typeof description === "string" && <Button variant="ghost" icon={<Clipboard size={16} />} disabled={busy} onClick={() => void copyValue(description)}>{t("Leírás másolása", "Copy description")}</Button>}
+              <Button variant="danger" icon={<Trash2 size={16} />} disabled={busy || !hasVersion || activeState || preservedAuditState} onClick={() => setDeleteTarget(approvalSnapshot(current, preparations))}>{t("Terv törlése", "Delete plan")}</Button>
             </div>
           </Card>
-          {validate.isError && <Notice tone="danger" title="A validáció sikertelen">{errorText(validate.error)}</Notice>}
-          {action.isError && <Notice tone="danger" title="A release-művelet sikertelen">{errorText(action.error)}</Notice>}
-          {current?.error && <Notice tone="danger" title="Tartós release-hiba">{current.error}</Notice>}
-          {validate.isSuccess && <Notice tone={validationResult?.valid ? "success" : "warning"} title={validationResult?.valid ? "A preflight sikeres" : "A preflight javítást kér"}><CheckCircle2 size={16} /> {validationResult?.valid ? "A payload, a trackerprofil és a bizonyítékok érvényesek." : `${validationResult?.failures.length ?? 0} blokkoló eltérés található.`}</Notice>}
-          {action.isSuccess && <Notice tone={actionRequiresReview ? "warning" : "success"} title={actionRequiresReview ? "A release-művelet ellenőrzést kér" : "A release-művelet elkészült"}><CheckCircle2 size={16} /> {actionRequiresReview ? "A művelet lezárult, de a receipt vagy az új állapot operátori ellenőrzést igényel." : "A friss állapot és bizonyítékok betöltve."}</Notice>}
-          {detailQuery.isError && <Notice tone="warning" title="A részletes állapot nem frissíthető"><Button variant="ghost" icon={<RefreshCw size={15} />} onClick={() => void detailQuery.refetch()}>Újrapróbálás</Button></Notice>}
+          {validate.isError && <Notice tone="danger" title={t("A validáció sikertelen", "Validation failed")}>{errorText(validate.error)}</Notice>}
+          {action.isError && <Notice tone="danger" title={t("A release-művelet sikertelen", "The release action failed")}>{errorText(action.error)}</Notice>}
+          {current?.error && <Notice tone="danger" title={t("Tartós release-hiba", "Persistent release error")}>{current.error}</Notice>}
+          {validate.isSuccess && <Notice tone={validationResult?.valid ? "success" : "warning"} title={validationResult?.valid ? t("A preflight sikeres", "Preflight passed") : t("A preflight javítást kér", "Preflight needs fixes")}><CheckCircle2 size={16} /> {validationResult?.valid ? t("A payload, a trackerprofil és a bizonyítékok érvényesek.", "The payload, the tracker profile and the evidence are valid.") : t(`${validationResult?.failures.length ?? 0} blokkoló eltérés található.`, `${validationResult?.failures.length ?? 0} blocking issue(s) found.`)}</Notice>}
+          {action.isSuccess && <Notice tone={actionRequiresReview ? "warning" : "success"} title={actionRequiresReview ? t("A release-művelet ellenőrzést kér", "The release action needs review") : t("A release-művelet elkészült", "The release action finished")}><CheckCircle2 size={16} /> {actionRequiresReview ? t("A művelet lezárult, de a receipt vagy az új állapot operátori ellenőrzést igényel.", "The action finished, but the receipt or the new state needs operator review.") : t("A friss állapot és bizonyítékok betöltve.", "The fresh state and evidence are loaded.")}</Notice>}
+          {detailQuery.isError && <Notice tone="warning" title={t("A részletes állapot nem frissíthető", "The detailed state cannot be refreshed")}><Button variant="ghost" icon={<RefreshCw size={15} />} onClick={() => void detailQuery.refetch()}>{t("Újrapróbálás", "Retry")}</Button></Notice>}
         </>
       )}
 
-      <Modal open={deleteTarget !== null} title="Törlöd ezt az előkészítést?" busy={remove.isPending} onClose={() => { if (!remove.isPending) setDeleteTarget(null); }} footer={<><Button variant="ghost" disabled={remove.isPending} onClick={() => setDeleteTarget(null)}>Mégse</Button><Button variant="danger" icon={<Trash2 size={17} />} loading={remove.isPending} disabled={!deleteTarget} onClick={() => deleteTarget && remove.mutate({ id: deleteTarget.id, version: deleteTarget.version })}>Előkészítés törlése</Button></>}>
-        <Notice tone="warning">A release-terv és a csomag revíziója törlődik. Az elkészült MKV-hoz és a jobhoz a rendszer nem nyúl.</Notice>
-        {deleteTarget && <dl className="summary-list summary-list--stacked"><div><dt>Rögzített terv</dt><dd>{deleteTarget.releaseName}</dd></div><div><dt>Állapot / revízió</dt><dd>{RELEASE_STATE_LABELS[deleteTarget.state] ?? humanize(deleteTarget.state)} · v{deleteTarget.version}</dd></div><div><dt>Manifest SHA-256</dt><dd><code>{deleteTarget.manifestSha256 || "—"}</code></dd></div><div><dt>Payload SHA-256</dt><dd><code>{deleteTarget.payloadSha256 || "—"}</code></dd></div><div><dt>Előkészítés-revíziók</dt><dd><code>{JSON.stringify(deleteTarget.preparationVersions)}</code></dd></div></dl>}
+      <Modal open={deleteTarget !== null} title={t("Törlöd ezt az előkészítést?", "Delete this preparation?")} busy={remove.isPending} onClose={() => { if (!remove.isPending) setDeleteTarget(null); }} footer={<><Button variant="ghost" disabled={remove.isPending} onClick={() => setDeleteTarget(null)}>{t("Mégse", "Cancel")}</Button><Button variant="danger" icon={<Trash2 size={17} />} loading={remove.isPending} disabled={!deleteTarget} onClick={() => deleteTarget && remove.mutate({ id: deleteTarget.id, version: deleteTarget.version })}>{t("Előkészítés törlése", "Delete preparation")}</Button></>}>
+        <Notice tone="warning">{t("A release-terv és a csomag revíziója törlődik. Az elkészült MKV-hoz és a jobhoz a rendszer nem nyúl.", "The release plan and the kit revision are deleted. The finished MKV and the job are left untouched.")}</Notice>
+        {deleteTarget && <dl className="summary-list summary-list--stacked"><div><dt>{t("Rögzített terv", "Recorded plan")}</dt><dd>{deleteTarget.releaseName}</dd></div><div><dt>{t("Állapot / revízió", "Status / revision")}</dt><dd>{releaseStateLabel(deleteTarget.state) ?? humanize(deleteTarget.state)} · v{deleteTarget.version}</dd></div><div><dt>Manifest SHA-256</dt><dd><code>{deleteTarget.manifestSha256 || "—"}</code></dd></div><div><dt>Payload SHA-256</dt><dd><code>{deleteTarget.payloadSha256 || "—"}</code></dd></div><div><dt>{t("Előkészítés-revíziók", "Preparation revisions")}</dt><dd><code>{JSON.stringify(deleteTarget.preparationVersions)}</code></dd></div></dl>}
         {remove.isError && <Notice tone="danger">{errorText(remove.error)}</Notice>}
       </Modal>
     </div>

@@ -13,21 +13,24 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
+from ..i18n import t
 from .profiles import EncoderSettings, VideoEncoder, recommended_profile
 
 
 @dataclass(frozen=True, slots=True)
 class NoiseProfile:
     id: str
-    label: str
-    description: str
+    label: tuple[str, str]  # (hungarian, english)
+    description: tuple[str, str]  # (hungarian, english)
     settings: Mapping[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
+        """The preset for the API, its texts in the request's language."""
+
         return {
             "id": self.id,
-            "label": self.label,
-            "description": self.description,
+            "label": t(*self.label),
+            "description": t(*self.description),
             "settings": dict(self.settings),
         }
 
@@ -35,15 +38,22 @@ class NoiseProfile:
 _X264: tuple[NoiseProfile, ...] = (
     NoiseProfile(
         "off",
-        "Nincs",
-        "A forrás zaját és szemcséjét az alapértelmezett profil kezeli.",
+        ("Nincs", "None"),
+        (
+            "A forrás zaját és szemcséjét az alapértelmezett profil kezeli.",
+            "The default profile handles the source's noise and grain.",
+        ),
         {},
     ),
     NoiseProfile(
         "preserve_grain",
-        "Szemcse megtartása",
-        "Filmszemcsés forráshoz: grain tune, magasabb qcomp és enyhébb deblock, "
-        "hogy a szemcse ne simuljon el. Nagyobb fájlméretre számíts.",
+        ("Szemcse megtartása", "Preserve grain"),
+        (
+            "Filmszemcsés forráshoz: grain tune, magasabb qcomp és enyhébb deblock, "
+            "hogy a szemcse ne simuljon el. Nagyobb fájlméretre számíts.",
+            "For film-grain sources: grain tune, higher qcomp and softer deblock "
+            "so the grain is not smoothed away. Expect a larger file.",
+        ),
         {
             "tune": "grain",
             "qcomp": 0.75,
@@ -56,23 +66,35 @@ _X264: tuple[NoiseProfile, ...] = (
     ),
     NoiseProfile(
         "light_denoise",
-        "Enyhe zajszűrés",
-        "Kódolóba épített zajcsökkentés (nr 40): a finom digitális zajt "
-        "csökkenti, a részleteket érintetlenül hagyja.",
+        ("Enyhe zajszűrés", "Light denoise"),
+        (
+            "Kódolóba épített zajcsökkentés (nr 40): a finom digitális zajt "
+            "csökkenti, a részleteket érintetlenül hagyja.",
+            "Encoder-built-in noise reduction (nr 40): reduces fine digital noise "
+            "and leaves detail untouched.",
+        ),
         {"noise_reduction": 40},
     ),
     NoiseProfile(
         "medium_denoise",
-        "Közepes zajszűrés",
-        "Kódolóba épített zajcsökkentés (nr 120): látható zajos vagy szemcsés "
-        "forráshoz, mérhető bitrate-megtakarítással.",
+        ("Közepes zajszűrés", "Medium denoise"),
+        (
+            "Kódolóba épített zajcsökkentés (nr 120): látható zajos vagy szemcsés "
+            "forráshoz, mérhető bitrate-megtakarítással.",
+            "Encoder-built-in noise reduction (nr 120): for visibly noisy or grainy "
+            "sources, with a measurable bitrate saving.",
+        ),
         {"noise_reduction": 120},
     ),
     NoiseProfile(
         "strong_denoise",
-        "Erős zajszűrés",
-        "Kódolóba épített zajcsökkentés (nr 300): nagyon zajos forráshoz. "
-        "Részletvesztést okozhat, a QC-kapuk ezt jelzik.",
+        ("Erős zajszűrés", "Strong denoise"),
+        (
+            "Kódolóba épített zajcsökkentés (nr 300): nagyon zajos forráshoz. "
+            "Részletvesztést okozhat, a QC-kapuk ezt jelzik.",
+            "Encoder-built-in noise reduction (nr 300): for very noisy sources. "
+            "It can cost detail; the QC gates report it.",
+        ),
         {"noise_reduction": 300},
     ),
 )
@@ -81,9 +103,13 @@ _X265: tuple[NoiseProfile, ...] = (
     _X264[0],
     NoiseProfile(
         "preserve_grain",
-        "Szemcse megtartása",
-        "Filmszemcsés UHD forráshoz: grain tune, magasabb psy-rd/psy-rdoq, "
-        "kikapcsolt SAO és enyhébb deblock. Nagyobb fájlméretre számíts.",
+        ("Szemcse megtartása", "Preserve grain"),
+        (
+            "Filmszemcsés UHD forráshoz: grain tune, magasabb psy-rd/psy-rdoq, "
+            "kikapcsolt SAO és enyhébb deblock. Nagyobb fájlméretre számíts.",
+            "For film-grain UHD sources: grain tune, higher psy-rd/psy-rdoq, "
+            "SAO off and softer deblock. Expect a larger file.",
+        ),
         {
             "tune": "grain",
             "psy_rd": 2.5,
@@ -98,23 +124,35 @@ _X265: tuple[NoiseProfile, ...] = (
     ),
     NoiseProfile(
         "light_denoise",
-        "Enyhe zajszűrés",
-        "Kódolóba épített zajcsökkentés (nr-intra/nr-inter 100): a finom "
-        "digitális zajt csökkenti.",
+        ("Enyhe zajszűrés", "Light denoise"),
+        (
+            "Kódolóba épített zajcsökkentés (nr-intra/nr-inter 100): a finom "
+            "digitális zajt csökkenti.",
+            "Encoder-built-in noise reduction (nr-intra/nr-inter 100): reduces "
+            "fine digital noise.",
+        ),
         {"noise_reduction": 100},
     ),
     NoiseProfile(
         "medium_denoise",
-        "Közepes zajszűrés",
-        "Kódolóba épített zajcsökkentés (nr-intra/nr-inter 250): látható zajos "
-        "vagy szemcsés forráshoz.",
+        ("Közepes zajszűrés", "Medium denoise"),
+        (
+            "Kódolóba épített zajcsökkentés (nr-intra/nr-inter 250): látható zajos "
+            "vagy szemcsés forráshoz.",
+            "Encoder-built-in noise reduction (nr-intra/nr-inter 250): for visibly "
+            "noisy or grainy sources.",
+        ),
         {"noise_reduction": 250},
     ),
     NoiseProfile(
         "strong_denoise",
-        "Erős zajszűrés",
-        "Kódolóba épített zajcsökkentés (nr-intra/nr-inter 500): nagyon zajos "
-        "forráshoz. Részletvesztést okozhat, a QC-kapuk ezt jelzik.",
+        ("Erős zajszűrés", "Strong denoise"),
+        (
+            "Kódolóba épített zajcsökkentés (nr-intra/nr-inter 500): nagyon zajos "
+            "forráshoz. Részletvesztést okozhat, a QC-kapuk ezt jelzik.",
+            "Encoder-built-in noise reduction (nr-intra/nr-inter 500): for very "
+            "noisy sources. It can cost detail; the QC gates report it.",
+        ),
         {"noise_reduction": 500},
     ),
 )

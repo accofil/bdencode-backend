@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DiscScanResult, SelectionValidation } from "../api/types";
 import { api, ApiError } from "../api/client";
+import { setLanguage } from "../i18n";
 import { makeJob, makeScan } from "../test/fixtures";
 import { renderApp } from "../test/render";
 import { SelectionWizard } from "./SelectionWizard";
@@ -254,6 +255,37 @@ describe("SelectionWizard", () => {
     );
     await waitFor(() => expect(api.saveSelection).toHaveBeenCalledTimes(1));
     expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the steps, track actions and buttons in English", async () => {
+    setLanguage("en", { persist: false });
+    const user = userEvent.setup();
+    renderApp(<SelectionWizard job={makeJob({ state: "AWAITING_SELECTION", settings: { detail_level: "beginner" } })} scan={makeScan()} onComplete={vi.fn()} />);
+
+    expect(screen.getByRole("heading", { name: "Encoding settings" })).toBeInTheDocument();
+    for (const step of [/^1\s*Playlist$/, /^2\s*Tracks$/, /^3\s*Video$/, /^4\s*Check$/]) {
+      expect(screen.getByRole("button", { name: step })).toBeInTheDocument();
+    }
+    expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
+    await waitFor(() => expect(api.profileRecommendation).toHaveBeenCalled());
+
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    expect(screen.getByRole("heading", { name: "Audio tracks" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Omit" })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("source: eng")).toBeInTheDocument();
+    await user.selectOptions(screen.getByRole("combobox", { name: "Tracker profile" }), "aither");
+    await user.click(screen.getByRole("button", { name: "Arrange tracks (Aither)" }));
+    expect(screen.getByText("What changed")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    expect(screen.getByRole("heading", { name: "Recommended profile" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Beginner" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Ask for an AI suggestion" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    expect(screen.getByRole("button", { name: /Suggest name/ })).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Image host" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Check plan" })).toBeInTheDocument();
   });
 
   it("arranges the tracks for nCore, suggests a Hungarian release name and shows the tracker findings", async () => {

@@ -213,7 +213,7 @@ def _format_duration(seconds: float) -> str:
 
 
 def encode_status_message(progress: EncodeProgress) -> str:
-    parts = [f"Videó kódolása: {progress.stage_fraction * 100:.1f}%"]
+    parts = [f"Encoding video: {progress.stage_fraction * 100:.1f}%"]
     if progress.fps is not None:
         parts.append(f"{progress.fps:.1f} fps")
     if progress.speed is not None:
@@ -222,7 +222,7 @@ def encode_status_message(progress: EncodeProgress) -> str:
         parts.append(f"ETA {_format_duration(progress.eta_seconds)}")
     projected = progress.projected_bytes
     if projected is not None and progress.stage_fraction < 1.0:
-        parts.append(f"várható videóméret ~{projected / 1e9:.1f} GB")
+        parts.append(f"projected video size ~{projected / 1e9:.1f} GB")
     return " · ".join(parts)
 
 
@@ -251,7 +251,7 @@ class EncodeProgressReporter:
     def start(self) -> None:
         recorded = self._record(
             encoding_overall_progress(0.0),
-            "Videó kódolása: 0.0% · ETA számítása…",
+            "Encoding video: 0.0% · computing ETA…",
             {
                 "stage": JobState.ENCODING.value,
                 "stage_fraction": 0.0,

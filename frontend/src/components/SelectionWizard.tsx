@@ -43,6 +43,8 @@ import type {
   UploadImageSet,
 } from "../api/types";
 import { api, ApiError } from "../api/client";
+import { t, tx } from "../i18n";
+import type { LocalText } from "../i18n";
 import {
   blockingSourceColorFields,
   hasSafeSourceColorRecommendation,
@@ -77,28 +79,41 @@ import { ProfileLibraryPanel } from "./ProfileLibraryPanel";
 import { QualityOptions } from "./QualityOptions";
 import { Badge, Button, Card, Notice, ProgressBar } from "./ui";
 
-const GROUP_LABELS: Record<string, string> = {
-  rate_control: "Minőség és sebesség",
-  format: "Formátum és színtér",
-  gop: "GOP és képtípusok",
-  motion: "Mozgásbecslés",
-  psychovisual: "Pszichovizuális finomhangolás",
-  filter: "Képszűrés",
-  hdr: "HDR10",
-  bitstream: "Bitstream",
-  x264: "x264-specifikus",
-  x265: "x265-specifikus",
+const GROUP_LABELS: Record<string, LocalText> = {
+  rate_control: { hu: "Minőség és sebesség", en: "Quality and speed" },
+  format: { hu: "Formátum és színtér", en: "Format and colour space" },
+  gop: { hu: "GOP és képtípusok", en: "GOP and frame types" },
+  motion: { hu: "Mozgásbecslés", en: "Motion estimation" },
+  psychovisual: { hu: "Pszichovizuális finomhangolás", en: "Psychovisual tuning" },
+  filter: { hu: "Képszűrés", en: "Filtering" },
+  hdr: { hu: "HDR10", en: "HDR10" },
+  bitstream: { hu: "Bitstream", en: "Bitstream" },
+  x264: { hu: "x264-specifikus", en: "x264-specific" },
+  x265: { hu: "x265-specifikus", en: "x265-specific" },
 };
 
+function groupLabel(group: string): string {
+  const label = GROUP_LABELS[group];
+  return label ? tx(label) : humanize(group);
+}
+
 const AUDIO_TRACK_ACTIONS: TrackAction[] = ["copy", "flac", "ac3", "eac3", "dts", "omit"];
-const AUDIO_ACTION_DETAILS: Record<TrackAction, { label: string; description: string }> = {
-  copy: { label: "Copy", description: "Az eredeti hangsáv változtatás nélkül" },
-  flac: { label: "FLAC", description: "Veszteségmentes PCM-konverzió, eredeti csatornaszám" },
-  ac3: { label: "AC-3", description: "640 kb/s · 48 kHz · legfeljebb 5.1" },
-  eac3: { label: "E-AC-3", description: "1024 kb/s · 48 kHz · legfeljebb 5.1" },
-  dts: { label: "DTS", description: "DTS core · 1536 kb/s · 48 kHz · legfeljebb 5.1" },
-  omit: { label: "Kihagyás", description: "A sáv nem kerül a kész MKV-ba" },
-};
+function audioActionDetails(action: TrackAction): { label: string; description: string } {
+  switch (action) {
+    case "copy":
+      return { label: "Copy", description: t("Az eredeti hangsáv változtatás nélkül", "The original audio track, unchanged") };
+    case "flac":
+      return { label: "FLAC", description: t("Veszteségmentes PCM-konverzió, eredeti csatornaszám", "Lossless PCM conversion, original channel count") };
+    case "ac3":
+      return { label: "AC-3", description: t("640 kb/s · 48 kHz · legfeljebb 5.1", "640 kb/s · 48 kHz · up to 5.1") };
+    case "eac3":
+      return { label: "E-AC-3", description: t("1024 kb/s · 48 kHz · legfeljebb 5.1", "1024 kb/s · 48 kHz · up to 5.1") };
+    case "dts":
+      return { label: "DTS", description: t("DTS core · 1536 kb/s · 48 kHz · legfeljebb 5.1", "DTS core · 1536 kb/s · 48 kHz · up to 5.1") };
+    case "omit":
+      return { label: t("Kihagyás", "Omit"), description: t("A sáv nem kerül a kész MKV-ba", "The track is left out of the finished MKV") };
+  }
+}
 
 const AUDIO_TRANSCODE_ACTIONS = new Set<TrackAction>(["flac", "ac3", "eac3", "dts"]);
 
@@ -108,62 +123,83 @@ function imageUploadProvider(value: unknown): ImageUploadProvider {
     : "auto";
 }
 
-const FIELD_LABELS: Record<string, string> = {
-  encoder: "Kódoló",
-  crf: "CRF minőség",
-  preset: "Preset",
-  tune: "Tartalmi hangolás",
-  profile: "Profil",
-  level: "Dekóderszint",
-  bit_depth: "Bitmélység",
-  pixel_format: "Pixelformátum",
-  color: "Színtér",
-  vbv: "VBV korlátozás",
-  keyint: "Maximális GOP-hossz",
-  min_keyint: "Minimális GOP-hossz",
-  scenecut: "Jelenetváltás-érzékenység",
-  open_gop: "Nyitott GOP",
-  bframes: "B-framek száma",
-  b_adapt: "Adaptív B-frame",
-  b_pyramid: "B-piramis",
-  ref: "Referenciaképek",
-  rc_lookahead: "Előretekintés",
-  weightp: "Súlyozott P-predikció",
-  weightb: "Súlyozott B-predikció",
-  me: "Mozgásbecslési mód",
-  merange: "Keresési tartomány",
-  subme: "Részpixeles finomság",
-  trellis: "Trellis",
-  partitions: "Partíciók",
-  direct: "Direkt predikció",
-  aq_mode: "AQ mód",
-  aq_strength: "AQ erősség",
-  qcomp: "Kvantálási görbe",
-  psy_rd: "Psy-RD",
-  psy_rdoq: "Psy-RDOQ",
-  deblock_alpha: "Deblock alpha",
-  deblock_beta: "Deblock beta",
-  chroma_qp_offset: "Chroma QP eltérés",
-  sao: "SAO",
-  limit_sao: "Korlátozott SAO",
-  strong_intra_smoothing: "Erős intra simítás",
-  rect: "Négyszögletes partíciók",
-  amp: "Aszimmetrikus partíciók",
-  early_skip: "Korai skip",
-  rskip: "Rekurzív skip",
-  aud: "AUD NAL egységek",
-  repeat_headers: "Fejlécek ismétlése",
-  annexb: "Annex B",
+const FIELD_LABELS: Record<string, LocalText> = {
+  encoder: { hu: "Kódoló", en: "Encoder" },
+  crf: { hu: "CRF minőség", en: "CRF quality" },
+  preset: { hu: "Preset", en: "Preset" },
+  tune: { hu: "Tartalmi hangolás", en: "Content tuning" },
+  profile: { hu: "Profil", en: "Profile" },
+  level: { hu: "Dekóderszint", en: "Decoder level" },
+  bit_depth: { hu: "Bitmélység", en: "Bit depth" },
+  pixel_format: { hu: "Pixelformátum", en: "Pixel format" },
+  color: { hu: "Színtér", en: "Colour space" },
+  vbv: { hu: "VBV korlátozás", en: "VBV limit" },
+  keyint: { hu: "Maximális GOP-hossz", en: "Maximum GOP length" },
+  min_keyint: { hu: "Minimális GOP-hossz", en: "Minimum GOP length" },
+  scenecut: { hu: "Jelenetváltás-érzékenység", en: "Scene-cut sensitivity" },
+  open_gop: { hu: "Nyitott GOP", en: "Open GOP" },
+  bframes: { hu: "B-framek száma", en: "Number of B-frames" },
+  b_adapt: { hu: "Adaptív B-frame", en: "Adaptive B-frames" },
+  b_pyramid: { hu: "B-piramis", en: "B-pyramid" },
+  ref: { hu: "Referenciaképek", en: "Reference frames" },
+  rc_lookahead: { hu: "Előretekintés", en: "Lookahead" },
+  weightp: { hu: "Súlyozott P-predikció", en: "Weighted P-prediction" },
+  weightb: { hu: "Súlyozott B-predikció", en: "Weighted B-prediction" },
+  me: { hu: "Mozgásbecslési mód", en: "Motion estimation method" },
+  merange: { hu: "Keresési tartomány", en: "Search range" },
+  subme: { hu: "Részpixeles finomság", en: "Subpixel refinement" },
+  trellis: { hu: "Trellis", en: "Trellis" },
+  partitions: { hu: "Partíciók", en: "Partitions" },
+  direct: { hu: "Direkt predikció", en: "Direct prediction" },
+  aq_mode: { hu: "AQ mód", en: "AQ mode" },
+  aq_strength: { hu: "AQ erősség", en: "AQ strength" },
+  qcomp: { hu: "Kvantálási görbe", en: "Quantizer curve" },
+  psy_rd: { hu: "Psy-RD", en: "Psy-RD" },
+  psy_rdoq: { hu: "Psy-RDOQ", en: "Psy-RDOQ" },
+  deblock_alpha: { hu: "Deblock alpha", en: "Deblock alpha" },
+  deblock_beta: { hu: "Deblock beta", en: "Deblock beta" },
+  chroma_qp_offset: { hu: "Chroma QP eltérés", en: "Chroma QP offset" },
+  sao: { hu: "SAO", en: "SAO" },
+  limit_sao: { hu: "Korlátozott SAO", en: "Limited SAO" },
+  strong_intra_smoothing: { hu: "Erős intra simítás", en: "Strong intra smoothing" },
+  rect: { hu: "Négyszögletes partíciók", en: "Rectangular partitions" },
+  amp: { hu: "Aszimmetrikus partíciók", en: "Asymmetric partitions" },
+  early_skip: { hu: "Korai skip", en: "Early skip" },
+  rskip: { hu: "Rekurzív skip", en: "Recursive skip" },
+  aud: { hu: "AUD NAL egységek", en: "AUD NAL units" },
+  repeat_headers: { hu: "Fejlécek ismétlése", en: "Repeat headers" },
+  annexb: { hu: "Annex B", en: "Annex B" },
 };
 
-const FIELD_HELP: Record<string, string> = {
-  crf: "Alacsonyabb érték: jobb kép és nagyobb fájl. A javaslat jó kiindulópont.",
-  preset: "Lassabb preset általában jobb tömörítést ad, de jelentősen tovább tart.",
-  tune: "A kép jellegéhez igazítja a pszichovizuális döntéseket.",
-  bframes: "Legalább 1 kötelező az I/P/B összehasonlítás miatt.",
-  aq_strength: "A részletgazdag és sötét területek bitelosztását szabályozza.",
-  ref: "Több referenciakép javíthatja a tömörítést, de lassabb és memóriaigényesebb.",
-  rc_lookahead: "Több jövőbeli képkocka elemzése jobb döntéseket, de nagyobb memóriaigényt jelent.",
+const FIELD_HELP: Record<string, LocalText> = {
+  crf: {
+    hu: "Alacsonyabb érték: jobb kép és nagyobb fájl. A javaslat jó kiindulópont.",
+    en: "Lower value: better picture and a larger file. The suggestion is a good starting point.",
+  },
+  preset: {
+    hu: "Lassabb preset általában jobb tömörítést ad, de jelentősen tovább tart.",
+    en: "A slower preset usually compresses better but takes considerably longer.",
+  },
+  tune: {
+    hu: "A kép jellegéhez igazítja a pszichovizuális döntéseket.",
+    en: "Adapts the psychovisual decisions to the character of the picture.",
+  },
+  bframes: {
+    hu: "Legalább 1 kötelező az I/P/B összehasonlítás miatt.",
+    en: "At least 1 is required for the I/P/B comparison.",
+  },
+  aq_strength: {
+    hu: "A részletgazdag és sötét területek bitelosztását szabályozza.",
+    en: "Controls how bits are spread over detailed and dark areas.",
+  },
+  ref: {
+    hu: "Több referenciakép javíthatja a tömörítést, de lassabb és memóriaigényesebb.",
+    en: "More reference frames can improve compression but are slower and use more memory.",
+  },
+  rc_lookahead: {
+    hu: "Több jövőbeli képkocka elemzése jobb döntéseket, de nagyobb memóriaigényt jelent.",
+    en: "Analysing more future frames means better decisions but more memory use.",
+  },
 };
 
 const LOCKED_FIELDS = new Set(["encoder", "profile", "bit_depth", "pixel_format", "color", "hdr10"]);
@@ -228,7 +264,8 @@ function suggestedTemporalFilter(playlist: Playlist): string {
 }
 
 function fieldLabel(name: string): string {
-  return encoderHelp(name)?.title || FIELD_LABELS[name] || humanize(name);
+  const label = FIELD_LABELS[name];
+  return encoderHelp(name)?.title || (label ? tx(label) : "") || humanize(name);
 }
 
 function isSubtitleClassificationError(error: unknown): boolean {
@@ -308,7 +345,10 @@ export function SelectionWizard({
   const [aiQualityPriority, setAiQualityPriority] = useState<AIQualityPriority>("balanced");
   const [aiTargetSize, setAiTargetSize] = useState("");
   const [aiGenre, setAiGenre] = useState("");
-  const [aiPrompt, setAiPrompt] = useState("Őrizze meg a forrás részleteit és textúráját, ésszerű fájlméret mellett.");
+  const [aiPrompt, setAiPrompt] = useState(() => t(
+    "Őrizze meg a forrás részleteit és textúráját, ésszerű fájlméret mellett.",
+    "Keep the source's detail and texture at a reasonable file size.",
+  ));
   const [aiApplied, setAiApplied] = useState(false);
   const [validation, setValidation] = useState<SelectionValidation | null>(null);
   const initialVideo = defaultPlaylist?.streams.find((stream) => stream.kind === "video")?.video;
@@ -460,7 +500,7 @@ export function SelectionWizard({
     if (!playlist) return;
     const result = arrangeForTracker(profile, tracks, playlist, encoder);
     setTracks(result.tracks);
-    setArrangementNotes(result.notes.length ? result.notes : ["A sávterv már megfelel a szabályoknak."]);
+    setArrangementNotes(result.notes.length ? result.notes : [t("A sávterv már megfelel a szabályoknak.", "The track plan already meets the rules.")]);
     setValidation(null);
   }
 
@@ -562,22 +602,22 @@ export function SelectionWizard({
     <div className="selection-wizard">
       <div className="selection-wizard__header">
         <div>
-          <span className="eyebrow">Scan elkészült</span>
-          <h2>Kódolási beállítások</h2>
-          <p>Jóváhagyás után a szerveroldalon ellenőrzött terv kódolásra kész állapotban vár a sorára; külön indítógomb nincs.</p>
+          <span className="eyebrow">{t("Scan elkészült", "Scan complete")}</span>
+          <h2>{t("Kódolási beállítások", "Encoding settings")}</h2>
+          <p>{t("Jóváhagyás után a szerveroldalon ellenőrzött terv kódolásra kész állapotban vár a sorára; külön indítógomb nincs.", "Once approved, the server-checked plan waits in the queue ready to encode; there is no separate start button.")}</p>
         </div>
         <div className="codec-lockup">
           <span>{scan.disc_kind === "uhd" ? "UHD" : "BD"}</span>
           <strong>{encoder}</strong>
-          <small>{scan.disc_kind === "uhd" ? "HDR10 megtartással" : "SDR Blu-ray"}</small>
+          <small>{scan.disc_kind === "uhd" ? t("HDR10 megtartással", "HDR10 retained") : "SDR Blu-ray"}</small>
         </div>
       </div>
 
       <div className="wizard-steps wizard-steps--four">
-        {["Playlist", "Sávok", "Videó", "Ellenőrzés"].map((label, index) => (
+        {["Playlist", t("Sávok", "Tracks"), t("Videó", "Video"), t("Ellenőrzés", "Check")].map((label, index) => (
           <button
             type="button"
-            key={label}
+            key={index}
             className={index + 1 === step ? "wizard-step wizard-step--active" : index + 1 < step ? "wizard-step wizard-step--complete" : "wizard-step"}
             onClick={() => index + 1 < step && setStep(index + 1)}
             disabled={index + 1 > step}
@@ -589,7 +629,7 @@ export function SelectionWizard({
       </div>
 
       {scan.warnings.length > 0 && (
-        <Notice tone="warning" title="A scan figyelmeztetései">
+        <Notice tone="warning" title={t("A scan figyelmeztetései", "Scan warnings")}>
           <ul>{scan.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
         </Notice>
       )}
@@ -603,17 +643,17 @@ export function SelectionWizard({
                 <span className="playlist-card__visual"><Film size={27} aria-hidden="true" /><small>{video?.width ?? "?"}×{video?.height ?? "?"}</small></span>
                 <span className="playlist-card__content">
                   <span className="playlist-card__top">
-                    <strong>{item.edition_label || (item.episode_number ? `${item.episode_number}. epizód` : `Playlist ${item.playlist_id}`)}</strong>
-                    {item.recommended && <Badge tone="success">Ajánlott</Badge>}
+                    <strong>{item.edition_label || (item.episode_number ? t(`${item.episode_number}. epizód`, `Episode ${item.episode_number}`) : `Playlist ${item.playlist_id}`)}</strong>
+                    {item.recommended && <Badge tone="success">{t("Ajánlott", "Recommended")}</Badge>}
                   </span>
                   <span className="playlist-card__facts">
                     <span>{formatDuration(item.duration_seconds)}</span>
-                    <span>{item.chapters.length} fejezet</span>
-                    <span>{item.segments.length} szegmens</span>
-                    <span>{item.angle_count} szög</span>
+                    <span>{t(`${item.chapters.length} fejezet`, `${item.chapters.length} chapters`)}</span>
+                    <span>{t(`${item.segments.length} szegmens`, `${item.segments.length} segments`)}</span>
+                    <span>{t(`${item.angle_count} szög`, `${item.angle_count} angles`)}</span>
                   </span>
                   <span className="playlist-card__tags">
-                    <Badge>{video?.codec?.toUpperCase() || "VIDEÓ"}</Badge>
+                    <Badge>{video?.codec?.toUpperCase() || t("VIDEÓ", "VIDEO")}</Badge>
                     {video?.hdr10 && <Badge tone="info">HDR10</Badge>}
                     {video?.dolby_vision && <Badge tone="warning">DV → HDR10</Badge>}
                     {item.seamless_branching && <Badge>Seamless branching</Badge>}
@@ -625,13 +665,13 @@ export function SelectionWizard({
           })}
           {playlist && playlist.angle_count > 1 && (
             <label className="field playlist-angle-field">
-              <span>Kameraállás / szög</span>
+              <span>{t("Kameraállás / szög", "Camera angle")}</span>
               <select value={angle} onChange={(event) => { setAngle(Number(event.target.value)); setValidation(null); }}>
                 {Array.from({ length: playlist.angle_count }, (_, index) => index + 1).map((value) => (
-                  <option key={value} value={value}>{value}. szög</option>
+                  <option key={value} value={value}>{t(`${value}. szög`, `Angle ${value}`)}</option>
                 ))}
               </select>
-              <small>A kiválasztott playlist több Blu-ray szöget tartalmaz; válaszd ki a feldolgozandót.</small>
+              <small>{t("A kiválasztott playlist több Blu-ray szöget tartalmaz; válaszd ki a feldolgozandót.", "The selected playlist has several Blu-ray angles; choose the one to process.")}</small>
             </label>
           )}
         </div>
@@ -641,62 +681,77 @@ export function SelectionWizard({
         <div className="track-sections">
           <Card className="tracker-card">
             <div className="section-heading">
-              <div><span className="section-heading__icon"><Trophy size={19} /></span><div><h3>Tracker-szabályok</h3><p>Melyik oldal szabályai szerint készüljön a release</p></div></div>
+              <div><span className="section-heading__icon"><Trophy size={19} /></span><div><h3>{t("Tracker-szabályok", "Tracker rules")}</h3><p>{t("Melyik oldal szabályai szerint készüljön a release", "Which site's rules the release should follow")}</p></div></div>
             </div>
             <div className="tracker-card__controls">
               <label className="field">
-                <span>Tracker-profil</span>
-                <select aria-label="Tracker-profil" value={trackerProfile} onChange={(event) => { setTrackerProfile(event.target.value as TrackerProfile); setArrangementNotes([]); setValidation(null); }}>
+                <span>{t("Tracker-profil", "Tracker profile")}</span>
+                <select aria-label={t("Tracker-profil", "Tracker profile")} value={trackerProfile} onChange={(event) => { setTrackerProfile(event.target.value as TrackerProfile); setArrangementNotes([]); setValidation(null); }}>
                   {(Object.keys(TRACKER_PROFILE_LABELS) as TrackerProfile[]).map((value) => <option key={value} value={value}>{TRACKER_PROFILE_LABELS[value]}</option>)}
                 </select>
                 <small>{trackerProfile === "ncore"
-                  ? "nCore + magyar encode-szabvány: magyar hang elöl és alapértelmezett, 1080p-n nincs TrueHD/DTS-HD MA, DTS/TrueHD mellé DD@640 kell."
+                  ? t(
+                    "nCore + magyar encode-szabvány: magyar hang elöl és alapértelmezett, 1080p-n nincs TrueHD/DTS-HD MA, DTS/TrueHD mellé DD@640 kell.",
+                    "nCore + Hungarian encoding standard: Hungarian audio first and default, no TrueHD/DTS-HD MA at 1080p, DTS/TrueHD needs a DD@640 track alongside.",
+                  )
                   : trackerProfile === "aither"
-                    ? "Aither: csak eredeti és angol hang (plusz kommentár), TrueHD mellé DD/DD+ kompatibilitási sáv, angol felirat, ha nincs angol hang."
-                    : "Általános mód: nincs trackerspecifikus ellenőrzés."}</small>
+                    ? t(
+                      "Aither: csak eredeti és angol hang (plusz kommentár), TrueHD mellé DD/DD+ kompatibilitási sáv, angol felirat, ha nincs angol hang.",
+                      "Aither: original and English audio only (plus commentary), a DD/DD+ compatibility track alongside TrueHD, English subtitles when there is no English audio.",
+                    )
+                    : t("Általános mód: nincs trackerspecifikus ellenőrzés.", "General mode: no tracker-specific checks.")}</small>
               </label>
               {trackerProfile !== "none" && (
                 <Button variant="secondary" icon={<WandSparkles size={17} />} onClick={() => applyTrackerArrangement(trackerProfile)}>
-                  Sávterv igazítása ({TRACKER_PROFILE_LABELS[trackerProfile]})
+                  {t("Sávterv igazítása", "Arrange tracks")} ({TRACKER_PROFILE_LABELS[trackerProfile]})
                 </Button>
               )}
             </div>
-            {arrangementNotes.length > 0 && <Notice tone="info" title="Mi változott"><ul>{arrangementNotes.map((note) => <li key={note}>{note}</li>)}</ul></Notice>}
+            {arrangementNotes.length > 0 && <Notice tone="info" title={t("Mi változott", "What changed")}><ul>{arrangementNotes.map((note) => <li key={note}>{note}</li>)}</ul></Notice>}
             {trackerProfile !== "none" && (
-              <ol className="tracker-order" aria-label="Kimeneti sávsorrend">
+              <ol className="tracker-order" aria-label={t("Kimeneti sávsorrend", "Output track order")}>
                 {plannedOrder(tracks, playlist).map(({ track, stream }) => (
                   <li key={track.stream_id}>
-                    <strong>{stream.kind === "audio" ? "Hang" : "Felirat"}</strong>
+                    <strong>{stream.kind === "audio" ? t("Hang", "Audio") : t("Felirat", "Subtitle")}</strong>
                     <span>{track.language || stream.language?.iso639_2t || "?"} · {track.action === "copy" ? (stream.codec_profile || stream.codec) : track.action.toUpperCase()}{stream.kind === "audio" && channelLayout(track.action === "copy" || track.action === "flac" ? stream.channels : Math.min(stream.channels ?? 0, 6)) ? ` ${channelLayout(track.action === "copy" || track.action === "flac" ? stream.channels : Math.min(stream.channels ?? 0, 6))}` : ""}{track.subtitle_kind === "forced" ? " · forced" : ""}</span>
-                    {stream.kind === "audio" && track.default && <Badge tone="success">alapértelmezett</Badge>}
+                    {stream.kind === "audio" && track.default && <Badge tone="success">{t("alapértelmezett", "default")}</Badge>}
                   </li>
                 ))}
               </ol>
             )}
           </Card>
           <TrackTable
-            title="Hangsávok"
+            title={t("Hangsávok", "Audio tracks")}
             icon={<Music size={20} />}
             streams={playlist.streams.filter((stream) => stream.kind === "audio")}
             selections={tracks}
             onUpdate={updateTrack}
           />
           <TrackTable
-            title="Feliratok"
+            title={t("Feliratok", "Subtitles")}
             icon={<Subtitles size={20} />}
             streams={playlist.streams.filter((stream) => stream.kind === "subtitle")}
             selections={tracks}
             onUpdate={updateTrack}
           />
           {unclassifiedRetainedSubtitles.length > 0 && (
-            <Notice tone="warning" title="Felirattípus megadása szükséges">
-              <p>{unclassifiedRetainedSubtitles.length} megtartott felirat még „Ellenőrizendő” állapotban van.</p>
-              <p>Minden megtartott feliratnál válaszd a „Teljes felirat” vagy a „Forced / signs” típust. Ha a sáv nem kell, válaszd a „Kihagyás” lehetőséget. Ezután válik elérhetővé a Tovább gomb.</p>
+            <Notice tone="warning" title={t("Felirattípus megadása szükséges", "Subtitle type required")}>
+              <p>{t(
+                `${unclassifiedRetainedSubtitles.length} megtartott felirat még „Ellenőrizendő” állapotban van.`,
+                `${unclassifiedRetainedSubtitles.length} kept subtitle(s) still marked “Needs check”.`,
+              )}</p>
+              <p>{t(
+                "Minden megtartott feliratnál válaszd a „Teljes felirat” vagy a „Forced / signs” típust. Ha a sáv nem kell, válaszd a „Kihagyás” lehetőséget. Ezután válik elérhetővé a Tovább gomb.",
+                "For every kept subtitle choose “Full subtitle” or “Forced / signs”. If the track is not needed, choose “Omit”. The Next button then becomes available.",
+              )}</p>
             </Notice>
           )}
           {unresolvedTracks.length > 0 && (
-            <Notice tone="warning" title="Hiányzó nyelv">
-              {unresolvedTracks.length} megtartott sáv nyelve bizonytalan. Megadhatod most, vagy a hangot a worker beszédmintákból próbálja azonosítani; PGS feliratnál kézi megadás szükséges.
+            <Notice tone="warning" title={t("Hiányzó nyelv", "Missing language")}>
+              {t(
+                `${unresolvedTracks.length} megtartott sáv nyelve bizonytalan. Megadhatod most, vagy a hangot a worker beszédmintákból próbálja azonosítani; PGS feliratnál kézi megadás szükséges.`,
+                `The language of ${unresolvedTracks.length} kept track(s) is uncertain. You can set it now, or the worker tries to identify audio from speech samples; PGS subtitles must be set by hand.`,
+              )}
             </Notice>
           )}
         </div>
@@ -728,24 +783,32 @@ export function SelectionWizard({
             )}
             <Card className="settings-card ai-adviser-card">
               <div className="section-heading">
-                <div><span className="section-heading__icon"><Sparkles size={19} /></span><div><h3>AI beállítási tanácsadó</h3><p>A scan és a saját minőségi célod alapján</p></div></div>
+                <div><span className="section-heading__icon"><Sparkles size={19} /></span><div><h3>{t("AI beállítási tanácsadó", "AI settings adviser")}</h3><p>{t("A scan és a saját minőségi célod alapján", "Based on the scan and your own quality goal")}</p></div></div>
                 {aiChosen?.configured && <Badge tone="success">{aiChosen.model}</Badge>}
               </div>
-              <Notice tone="info" title="Mit kap meg az AI?">
-                Csak a kiválasztott playlist technikai scanadatait és az alábbi célleírást küldi el a(z) {aiChosen?.label ?? "OpenAI"} API-nak. A film, képkockák, fájlútvonalak és API-kulcs nem kerülnek a kérés tartalmába. A válasz csak szerkeszthető javaslat; alkalmazás és planner-ellenőrzés nélkül nem indulhat kódolás.
+              <Notice tone="info" title={t("Mit kap meg az AI?", "What does the AI receive?")}>
+                {t(
+                  `Csak a kiválasztott playlist technikai scanadatait és az alábbi célleírást küldi el a(z) ${aiChosen?.label ?? "OpenAI"} API-nak. A film, képkockák, fájlútvonalak és API-kulcs nem kerülnek a kérés tartalmába. A válasz csak szerkeszthető javaslat; alkalmazás és planner-ellenőrzés nélkül nem indulhat kódolás.`,
+                  `Only the technical scan data of the selected playlist and the goal description below are sent to the ${aiChosen?.label ?? "OpenAI"} API. The film, frames, file paths and API key are not part of the request. The answer is only an editable suggestion; no encode can start without applying it and passing the planner check.`,
+                )}
               </Notice>
               {aiStatus.isError ? (
-                <Notice tone="danger">Az AI állapota nem kérdezhető le. Frissítsd az oldalt, vagy ellenőrizd a backend verzióját.</Notice>
+                <Notice tone="danger">{t("Az AI állapota nem kérdezhető le. Frissítsd az oldalt, vagy ellenőrizd a backend verzióját.", "The AI status cannot be queried. Reload the page or check the backend version.")}</Notice>
               ) : aiStatus.isLoading ? (
-                <ProgressBar value={0.35} label="AI elérhetőségének ellenőrzése…" />
+                <ProgressBar value={0.35} label={t("AI elérhetőségének ellenőrzése…", "Checking AI availability…")} />
               ) : !aiChosen?.configured ? (
-                <Notice tone="warning" title="AI API-kulcs szükséges">
-                  Az AI-ajánlóhoz OpenAI- vagy Claude-kulcs kell: a <strong>Rendszer</strong> oldal AI tanácsadó kártyáján adhatod meg. Addig a hagyományos, determinisztikus ajánlott profil használható.
+                <Notice tone="warning" title={t("AI API-kulcs szükséges", "AI API key required")}>
+                  {t("Az AI-ajánlóhoz OpenAI- vagy Claude-kulcs kell: a ", "The AI adviser needs an OpenAI or Claude key: set it on the ")}
+                  <strong>{t("Rendszer", "System")}</strong>
+                  {t(
+                    " oldal AI tanácsadó kártyáján adhatod meg. Addig a hagyományos, determinisztikus ajánlott profil használható.",
+                    " page, on the AI adviser card. Until then the classic, deterministic recommended profile is available.",
+                  )}
                 </Notice>
               ) : null}
               {aiConfigured.length > 1 && (
                 <label className="field ai-provider-choice">
-                  <span>AI szolgáltató</span>
+                  <span>{t("AI szolgáltató", "AI provider")}</span>
                   <select value={aiProvider ?? ""} onChange={(event) => { setAiProvider(event.target.value as AIProvider); aiRecommendation.reset(); }}>
                     {aiConfigured.map((item) => <option key={item.id} value={item.id}>{item.label} · {item.model}</option>)}
                   </select>
@@ -753,25 +816,25 @@ export function SelectionWizard({
               )}
               <div className="ai-goal-grid">
                 <label className="field">
-                  <span>Minőség és méret prioritása</span>
+                  <span>{t("Minőség és méret prioritása", "Quality vs. size priority")}</span>
                   <select value={aiQualityPriority} onChange={(event) => { setAiQualityPriority(event.target.value as AIQualityPriority); aiRecommendation.reset(); }}>
-                    <option value="maximum">Maximális minőség / archiválás</option>
-                    <option value="balanced">Kiegyensúlyozott minőség és méret</option>
-                    <option value="compact">Kisebb fájl az elsődleges</option>
+                    <option value="maximum">{t("Maximális minőség / archiválás", "Maximum quality / archival")}</option>
+                    <option value="balanced">{t("Kiegyensúlyozott minőség és méret", "Balanced quality and size")}</option>
+                    <option value="compact">{t("Kisebb fájl az elsődleges", "Smaller file first")}</option>
                   </select>
                 </label>
                 <label className="field">
-                  <span>Kívánt méret (GiB, opcionális)</span>
-                  <input type="number" min="0.1" max="500" step="0.1" value={aiTargetSize} onChange={(event) => { setAiTargetSize(event.target.value); aiRecommendation.reset(); }} placeholder="pl. 12" />
-                  <small>CRF esetén ez irány, nem garantált végleges méret.</small>
+                  <span>{t("Kívánt méret (GiB, opcionális)", "Desired size (GiB, optional)")}</span>
+                  <input type="number" min="0.1" max="500" step="0.1" value={aiTargetSize} onChange={(event) => { setAiTargetSize(event.target.value); aiRecommendation.reset(); }} placeholder={t("pl. 12", "e.g. 12")} />
+                  <small>{t("CRF esetén ez irány, nem garantált végleges méret.", "With CRF this is a direction, not a guaranteed final size.")}</small>
                 </label>
                 <label className="field">
-                  <span>Műfaj / képjellemzők (opcionális)</span>
-                  <input maxLength={120} value={aiGenre} onChange={(event) => { setAiGenre(event.target.value); aiRecommendation.reset(); }} placeholder="pl. szemcsés film noir, anime, koncert" />
+                  <span>{t("Műfaj / képjellemzők (opcionális)", "Genre / picture traits (optional)")}</span>
+                  <input maxLength={120} value={aiGenre} onChange={(event) => { setAiGenre(event.target.value); aiRecommendation.reset(); }} placeholder={t("pl. szemcsés film noir, anime, koncert", "e.g. grainy film noir, anime, concert")} />
                 </label>
                 <label className="field ai-goal-prompt">
-                  <span>Saját kérés az AI-nak</span>
-                  <textarea maxLength={2000} rows={4} value={aiPrompt} onChange={(event) => { setAiPrompt(event.target.value); aiRecommendation.reset(); }} placeholder="Írd le, milyen eredményt szeretnél…" />
+                  <span>{t("Saját kérés az AI-nak", "Your own request to the AI")}</span>
+                  <textarea maxLength={2000} rows={4} value={aiPrompt} onChange={(event) => { setAiPrompt(event.target.value); aiRecommendation.reset(); }} placeholder={t("Írd le, milyen eredményt szeretnél…", "Describe the result you want…")} />
                 </label>
               </div>
               <Button
@@ -781,44 +844,44 @@ export function SelectionWizard({
                 disabled={!aiStatus.data?.configured || !playlistId}
                 onClick={() => aiRecommendation.mutate()}
               >
-                AI-javaslat kérése
+                {t("AI-javaslat kérése", "Ask for an AI suggestion")}
               </Button>
               {aiRecommendation.isError && (
-                <Notice tone="danger" title="Az AI-javaslat nem készült el">
-                  {aiRecommendation.error instanceof ApiError ? aiRecommendation.error.detail : "Ismeretlen hiba történt."}
+                <Notice tone="danger" title={t("Az AI-javaslat nem készült el", "The AI suggestion failed")}>
+                  {aiRecommendation.error instanceof ApiError ? aiRecommendation.error.detail : t("Ismeretlen hiba történt.", "An unknown error occurred.")}
                 </Notice>
               )}
               {aiRecommendation.data && (
                 <div className="ai-recommendation-result">
                   <div className="ai-recommendation-result__heading">
-                    <div><span className="eyebrow">AI-javaslat · {Math.round(aiRecommendation.data.confidence * 100)}% bizonyosság</span><h4>{aiRecommendation.data.summary}</h4></div>
+                    <div><span className="eyebrow">{t(`AI-javaslat · ${Math.round(aiRecommendation.data.confidence * 100)}% bizonyosság`, `AI suggestion · ${Math.round(aiRecommendation.data.confidence * 100)}% confidence`)}</span><h4>{aiRecommendation.data.summary}</h4></div>
                     <Badge tone="info">{aiRecommendation.data.model}</Badge>
                   </div>
                   {aiRecommendation.data.rationale.length > 0 && <ul>{aiRecommendation.data.rationale.map((item) => <li key={item}>{item}</li>)}</ul>}
                   {aiRecommendation.data.warnings.length > 0 && (
-                    <Notice tone="warning" title="Fontos korlátok">
+                    <Notice tone="warning" title={t("Fontos korlátok", "Important limits")}>
                       <ul>{aiRecommendation.data.warnings.map((item) => <li key={item}>{item}</li>)}</ul>
                     </Notice>
                   )}
-                  <Button variant="secondary" icon={<Check size={17} />} onClick={applyAIRecommendation}>Javaslat alkalmazása a mezőkre</Button>
-                  {aiApplied && <Notice tone="success">Az AI-javaslat bekerült a szerkeszthető mezőkbe. A végleges szerveroldali ellenőrzés továbbra is kötelező.</Notice>}
+                  <Button variant="secondary" icon={<Check size={17} />} onClick={applyAIRecommendation}>{t("Javaslat alkalmazása a mezőkre", "Apply suggestion to the fields")}</Button>
+                  {aiApplied && <Notice tone="success">{t("Az AI-javaslat bekerült a szerkeszthető mezőkbe. A végleges szerveroldali ellenőrzés továbbra is kötelező.", "The AI suggestion was loaded into the editable fields. The final server-side check is still required.")}</Notice>}
                 </div>
               )}
             </Card>
             <Card className="settings-card">
               <div className="section-heading">
-                <div><span className="section-heading__icon"><WandSparkles size={19} /></span><div><h3>Ajánlott profil</h3><p>A scan és a tartalomtípus alapján</p></div></div>
-                <div className="detail-switch" role="group" aria-label="Profil részletessége">
+                <div><span className="section-heading__icon"><WandSparkles size={19} /></span><div><h3>{t("Ajánlott profil", "Recommended profile")}</h3><p>{t("A scan és a tartalomtípus alapján", "Based on the scan and the content type")}</p></div></div>
+                <div className="detail-switch" role="group" aria-label={t("Profil részletessége", "Profile detail level")}>
                   {(["beginner", "advanced", "pro"] as DetailLevel[]).map((level) => (
                     <button type="button" key={level} className={detailLevel === level ? "active" : ""} aria-pressed={detailLevel === level} onClick={() => { setDetailLevel(level); setValidation(null); aiRecommendation.reset(); setAiApplied(false); }}>
-                      {level === "beginner" ? "Kezdő" : level === "advanced" ? "Haladó" : "Profi"}
+                      {level === "beginner" ? t("Kezdő", "Beginner") : level === "advanced" ? t("Haladó", "Advanced") : t("Profi", "Pro")}
                     </button>
                   ))}
                 </div>
               </div>
               {schema.isError || recommendation.isError ? (
-                <Notice tone="danger">A profil sémája vagy ajánlása nem tölthető be. Próbáld újra az oldal frissítése után.</Notice>
-              ) : schema.isLoading || recommendation.isLoading ? <ProgressBar value={0.45} label="Profil betöltése…" /> : (
+                <Notice tone="danger">{t("A profil sémája vagy ajánlása nem tölthető be. Próbáld újra az oldal frissítése után.", "The profile schema or recommendation cannot be loaded. Try again after reloading the page.")}</Notice>
+              ) : schema.isLoading || recommendation.isLoading ? <ProgressBar value={0.45} label={t("Profil betöltése…", "Loading profile…")} /> : (
                 <ProfileFields
                   fields={schema.data?.fields ?? []}
                   encoder={encoder}
@@ -855,22 +918,25 @@ export function SelectionWizard({
 
             <Card className="settings-card">
               <div className="section-heading">
-                <div><span className="section-heading__icon"><ScanLine size={19} /></span><div><h3>Képkocka-kezelés és crop</h3><p>{videoStream?.video?.width}×{videoStream?.video?.height} · {videoStream?.video?.field_order || "ismeretlen mezősorrend"}</p></div></div>
+                <div><span className="section-heading__icon"><ScanLine size={19} /></span><div><h3>{t("Képkocka-kezelés és crop", "Frame handling and crop")}</h3><p>{videoStream?.video?.width}×{videoStream?.video?.height} · {videoStream?.video?.field_order || t("ismeretlen mezősorrend", "unknown field order")}</p></div></div>
               </div>
-              {sourceInterlaced && <Notice tone="warning">A scan váltottsoros forrást jelzett. Ellenőrizd, hogy IVTC vagy deinterlace szükséges-e; ezt nem biztonságos teljesen automatikusan eldönteni.</Notice>}
-              <Notice tone="info" title="Automatikus crop">
-                Ha mind a négy érték 0, a worker a teljes film képkockáit átvizsgálja, és automatikusan alkalmazza a biztonságosan kimutatható fekete sávok levágását. Kézzel csak akkor állítsd, ha szándékosan felül akarod írni az automatikus döntést.
+              {sourceInterlaced && <Notice tone="warning">{t("A scan váltottsoros forrást jelzett. Ellenőrizd, hogy IVTC vagy deinterlace szükséges-e; ezt nem biztonságos teljesen automatikusan eldönteni.", "The scan reported an interlaced source. Check whether IVTC or deinterlacing is needed; this is not safe to decide fully automatically.")}</Notice>}
+              <Notice tone="info" title={t("Automatikus crop", "Automatic crop")}>
+                {t(
+                  "Ha mind a négy érték 0, a worker a teljes film képkockáit átvizsgálja, és automatikusan alkalmazza a biztonságosan kimutatható fekete sávok levágását. Kézzel csak akkor állítsd, ha szándékosan felül akarod írni az automatikus döntést.",
+                  "If all four values are 0, the worker scans the frames of the whole film and automatically crops the black bars it can detect safely. Set them by hand only if you deliberately want to override the automatic decision.",
+                )}
               </Notice>
               <label className="field">
-                <span>Időbeli szűrés</span>
+                <span>{t("Időbeli szűrés", "Temporal filtering")}</span>
                 <select value={temporalFilter} onChange={(event) => { setTemporalFilter(event.target.value); setValidation(null); }}>
-                  <option value="progressive">Progresszív — nincs időbeli szűrés</option>
-                  <option value="ivtc_tff">IVTC — felső mező először</option>
-                  <option value="ivtc_bff">IVTC — alsó mező először</option>
-                  <option value="bwdif_tff">BWDIF — felső mező először</option>
-                  <option value="bwdif_bff">BWDIF — alsó mező először</option>
-                  <option value="hybrid_safe_bob_tff">Hibrid safe bob — TFF</option>
-                  <option value="hybrid_safe_bob_bff">Hibrid safe bob — BFF</option>
+                  <option value="progressive">{t("Progresszív — nincs időbeli szűrés", "Progressive — no temporal filtering")}</option>
+                  <option value="ivtc_tff">{t("IVTC — felső mező először", "IVTC — top field first")}</option>
+                  <option value="ivtc_bff">{t("IVTC — alsó mező először", "IVTC — bottom field first")}</option>
+                  <option value="bwdif_tff">{t("BWDIF — felső mező először", "BWDIF — top field first")}</option>
+                  <option value="bwdif_bff">{t("BWDIF — alsó mező először", "BWDIF — bottom field first")}</option>
+                  <option value="hybrid_safe_bob_tff">{t("Hibrid safe bob — TFF", "Hybrid safe bob — TFF")}</option>
+                  <option value="hybrid_safe_bob_bff">{t("Hibrid safe bob — BFF", "Hybrid safe bob — BFF")}</option>
                 </select>
               </label>
               <CropEditor crop={crop} width={videoStream?.video?.width ?? 1920} height={videoStream?.video?.height ?? 1080} onChange={(next) => { setCrop(next); setValidation(null); }} />
@@ -879,17 +945,17 @@ export function SelectionWizard({
 
           <aside className="video-settings-side">
             <Card className="source-facts-card">
-              <span className="eyebrow">Scanből rögzítve</span>
-              <h3>Forrásparaméterek</h3>
+              <span className="eyebrow">{t("Scanből rögzítve", "Fixed by the scan")}</span>
+              <h3>{t("Forrásparaméterek", "Source parameters")}</h3>
               <dl className="summary-list">
-                <div><dt>Kimeneti kodek</dt><dd>{encoder}</dd></div>
-                <div><dt>Forrás</dt><dd>{videoStream?.video?.codec?.toUpperCase() || "—"}</dd></div>
-                <div><dt>Bitmélység</dt><dd>{videoStream?.video?.bit_depth ?? "—"} bit</dd></div>
-                <div><dt>Képsebesség</dt><dd>{videoStream?.video?.frame_rate || "—"}</dd></div>
-                <div><dt>Színtér</dt><dd>{videoStream?.video?.color_primaries || "—"}</dd></div>
-                <div><dt>HDR10</dt><dd>{videoStream?.video?.hdr10 ? "Megtartva" : "Nincs"}</dd></div>
+                <div><dt>{t("Kimeneti kodek", "Output codec")}</dt><dd>{encoder}</dd></div>
+                <div><dt>{t("Forrás", "Source")}</dt><dd>{videoStream?.video?.codec?.toUpperCase() || "—"}</dd></div>
+                <div><dt>{t("Bitmélység", "Bit depth")}</dt><dd>{videoStream?.video?.bit_depth ?? "—"} bit</dd></div>
+                <div><dt>{t("Képsebesség", "Frame rate")}</dt><dd>{videoStream?.video?.frame_rate || "—"}</dd></div>
+                <div><dt>{t("Színtér", "Colour space")}</dt><dd>{videoStream?.video?.color_primaries || "—"}</dd></div>
+                <div><dt>HDR10</dt><dd>{videoStream?.video?.hdr10 ? t("Megtartva", "Kept") : t("Nincs", "None")}</dd></div>
               </dl>
-              {videoStream?.video?.dolby_vision && <Notice tone="warning">Alapértelmezetten a Dolby Vision nem kerül megtartásra (a HDR10 alréteg lesz a kimenet); a „Minőségi opciók” szakaszban kérhető a megtartás.</Notice>}
+              {videoStream?.video?.dolby_vision && <Notice tone="warning">{t("Alapértelmezetten a Dolby Vision nem kerül megtartásra (a HDR10 alréteg lesz a kimenet); a „Minőségi opciók” szakaszban kérhető a megtartás.", "By default Dolby Vision is not kept (the output is the HDR10 base layer); you can ask to keep it in the “Quality options” section.")}</Notice>}
             </Card>
           </aside>
         </div>
@@ -898,174 +964,184 @@ export function SelectionWizard({
       {step === 4 && (
         <div className="review-layout">
           <Card className="review-main-card">
-            <span className="eyebrow">Végleges ellenőrzés</span>
+            <span className="eyebrow">{t("Végleges ellenőrzés", "Final check")}</span>
             <h3>{job.name}</h3>
             <div className="review-summary-grid">
               <div><ListVideo size={18} /><span><small>Playlist</small><strong>{playlistId} · {formatDuration(playlist?.duration_seconds)}</strong></span></div>
-              <div><Music size={18} /><span><small>Megtartott sávok</small><strong>{retainedTracks.length}</strong></span></div>
-              <div><Settings2 size={18} /><span><small>Videóprofil</small><strong>{encoder} · {detailLevel}</strong></span></div>
+              <div><Music size={18} /><span><small>{t("Megtartott sávok", "Kept tracks")}</small><strong>{retainedTracks.length}</strong></span></div>
+              <div><Settings2 size={18} /><span><small>{t("Videóprofil", "Video profile")}</small><strong>{encoder} · {detailLevel}</strong></span></div>
               <div><Sparkles size={18} /><span><small>Comparison</small><strong>I / P / B · PNG</strong></span></div>
             </div>
 
             <label className="field">
-              <span>Kimeneti fájlnév</span>
+              <span>{t("Kimeneti fájlnév", "Output file name")}</span>
               <div className="input-suffix"><input value={outputName} onChange={(event) => { setOutputName(event.target.value); setValidation(null); }} /><span>.mkv</span></div>
             </label>
             <div className="release-name-tools">
               <label className="field">
-                <span>Release-tag (csoport)</span>
-                <input aria-label="Release-tag" maxLength={32} value={releaseTag} placeholder="pl. TAG" onChange={(event) => setReleaseTag(event.target.value)} />
-                <small>A böngésző megjegyzi. Aither-névben „-TAG”, magyar névben „HUN-TAG” alakban jelenik meg.</small>
+                <span>{t("Release-tag (csoport)", "Release tag (group)")}</span>
+                <input aria-label={t("Release-tag", "Release tag")} maxLength={32} value={releaseTag} placeholder={t("pl. TAG", "e.g. TAG")} onChange={(event) => setReleaseTag(event.target.value)} />
+                <small>{t("A böngésző megjegyzi. Aither-névben „-TAG”, magyar névben „HUN-TAG” alakban jelenik meg.", "The browser remembers it. It appears as “-TAG” in an Aither name and as “HUN-TAG” in a Hungarian name.")}</small>
               </label>
               <Button variant="secondary" icon={<Tag size={17} />} onClick={suggestReleaseName}>
-                Név javaslata ({namingStyle(trackerProfile) === "hungarian" ? "magyar szabvány" : "Aither"})
+                {t("Név javaslata", "Suggest name")} ({namingStyle(trackerProfile) === "hungarian" ? t("magyar szabvány", "Hungarian standard") : "Aither"})
               </Button>
             </div>
 
             <div className="review-options">
               <label className="toggle-row">
-                <span><strong>Képfeltöltés és BBCode</strong><small>Automatikus módban a sorrend: ImgBB, Catbox, majd Freeimage; a sikeres szolgáltató az egész csomagra rögzül.</small></span>
+                <span><strong>{t("Képfeltöltés és BBCode", "Image upload and BBCode")}</strong><small>{t("Automatikus módban a sorrend: ImgBB, Catbox, majd Freeimage; a sikeres szolgáltató az egész csomagra rögzül.", "In automatic mode the order is ImgBB, Catbox, then Freeimage; the first host that succeeds is used for the whole set.")}</small></span>
                 <input type="checkbox" checked={uploadImages} onChange={(event) => { setUploadImages(event.target.checked); setValidation(null); }} /><span className="toggle" aria-hidden="true" />
               </label>
               <label className="field">
-                <span>Képtárhely</span>
-                <select aria-label="Képtárhely" value={selectedImageProvider} disabled={!uploadImages} onChange={(event) => { setSelectedImageProvider(event.target.value as ImageUploadProvider); setValidation(null); }}>
+                <span>{t("Képtárhely", "Image host")}</span>
+                <select aria-label={t("Képtárhely", "Image host")} value={selectedImageProvider} disabled={!uploadImages} onChange={(event) => { setSelectedImageProvider(event.target.value as ImageUploadProvider); setValidation(null); }}>
                   {Object.entries(IMAGE_UPLOAD_PROVIDER_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                 </select>
-                <small>Automatikus módban csak az első sikeres kép előtt válthat szolgáltatót; kézi módban nincs failover.</small>
+                <small>{t("Automatikus módban csak az első sikeres kép előtt válthat szolgáltatót; kézi módban nincs failover.", "In automatic mode the host can only change before the first successful image; manual mode has no failover.")}</small>
               </label>
               <label className="field">
-                <span>Feltöltött képek</span>
-                <select aria-label="Feltöltött képek köre" value={selectedImageSet} disabled={!uploadImages} onChange={(event) => { setSelectedImageSet(event.target.value as UploadImageSet); setValidation(null); }}>
+                <span>{t("Feltöltött képek", "Uploaded images")}</span>
+                <select aria-label={t("Feltöltött képek köre", "Set of uploaded images")} value={selectedImageSet} disabled={!uploadImages} onChange={(event) => { setSelectedImageSet(event.target.value as UploadImageSet); setValidation(null); }}>
                   {Object.entries(UPLOAD_IMAGE_SET_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                 </select>
-                <small>HDR-filmnél minden képpárnak natív és SDR-re leképezett nézete is van; az egyik elhagyása felezi a feltöltést. A helyi PNG-k mind megmaradnak.</small>
+                <small>{t("HDR-filmnél minden képpárnak natív és SDR-re leképezett nézete is van; az egyik elhagyása felezi a feltöltést. A helyi PNG-k mind megmaradnak.", "For an HDR film every image pair has a native and an SDR tone-mapped view; leaving one out halves the upload. All local PNGs are kept.")}</small>
               </label>
               <label className="toggle-row">
-                <span><strong>Szigorú I/P/B típusazonosság · kötelező</strong><small>Progresszív forrásnál a source és az encode képtípusa mindig azonos; ez nem kapcsolható ki.</small></span>
-                <input type="checkbox" checked disabled aria-label="Szigorú I/P/B típusazonosság kötelező" /><span className="toggle" aria-hidden="true" />
+                <span><strong>{t("Szigorú I/P/B típusazonosság · kötelező", "Strict I/P/B type match · required")}</strong><small>{t("Progresszív forrásnál a source és az encode képtípusa mindig azonos; ez nem kapcsolható ki.", "For a progressive source the source and encode frame types always match; this cannot be turned off.")}</small></span>
+                <input type="checkbox" checked disabled aria-label={t("Szigorú I/P/B típusazonosság kötelező", "Strict I/P/B type match required")} /><span className="toggle" aria-hidden="true" />
               </label>
             </div>
 
             {!validation && (
-              <Notice tone="info" title="Még nincs jóváhagyva">Az „Ellenőrzés” gomb a backend valódi plannerével validálja a sávokat, cropot, HDR-t és x264/x265 paramétereket, de még nem indít kódolást.</Notice>
+              <Notice tone="info" title={t("Még nincs jóváhagyva", "Not approved yet")}>{t("Az „Ellenőrzés” gomb a backend valódi plannerével validálja a sávokat, cropot, HDR-t és x264/x265 paramétereket, de még nem indít kódolást.", "The “Check plan” button validates the tracks, crop, HDR and x264/x265 parameters with the backend's real planner, but does not start encoding yet.")}</Notice>
             )}
             {needsColorConfirmation && !colorConfirmed && (
-              <Notice tone="warning" title="A forrás színadatait még jóvá kell hagynod">
-                <p>A lemezből hiányzik: {reportedMissingColorFields.map((field) => SOURCE_COLOR_FIELD_LABELS[field]).join(", ")}.</p>
+              <Notice tone="warning" title={t("A forrás színadatait még jóvá kell hagynod", "You still need to approve the source colour data")}>
+                <p>{t("A lemezből hiányzik:", "Missing from the disc:")} {reportedMissingColorFields.map((field) => SOURCE_COLOR_FIELD_LABELS[field]).join(", ")}.</p>
                 <p>{safeColorRecommendation
-                  ? "A forrás jellemzői alapján ajánlott biztonságos értékeket egy érintéssel jóváhagyhatod; ez nem végez színkonverziót."
-                  : "Ehhez a forráshoz nem adható biztonságos automatikus alapérték. Nyisd meg a mezőket, és csak ellenőrzött értékeket adj meg."}</p>
+                  ? t("A forrás jellemzői alapján ajánlott biztonságos értékeket egy érintéssel jóváhagyhatod; ez nem végez színkonverziót.", "You can approve the safe values recommended from the source's properties in one click; this does no colour conversion.")
+                  : t("Ehhez a forráshoz nem adható biztonságos automatikus alapérték. Nyisd meg a mezőket, és csak ellenőrzött értékeket adj meg.", "No safe automatic default exists for this source. Open the fields and enter verified values only.")}</p>
                 {safeColorRecommendation
-                  ? <Button variant="secondary" icon={<Palette size={17} />} onClick={confirmSourceColor}>Ajánlott értékek jóváhagyása</Button>
-                  : <Button variant="secondary" icon={<Palette size={17} />} onClick={() => setStep(3)}>Színadatok kézi megadása</Button>}
+                  ? <Button variant="secondary" icon={<Palette size={17} />} onClick={confirmSourceColor}>{t("Ajánlott értékek jóváhagyása", "Approve recommended values")}</Button>
+                  : <Button variant="secondary" icon={<Palette size={17} />} onClick={() => setStep(3)}>{t("Színadatok kézi megadása", "Enter colour data by hand")}</Button>}
               </Notice>
             )}
-            {validate.isError && !colorApiIssue && !subtitleClassificationApiIssue && !audioSubtitleFieldsApiIssue && <Notice tone="danger" title="A terv nem indítható">{validate.error instanceof ApiError ? validate.error.detail : validate.error.message}</Notice>}
+            {validate.isError && !colorApiIssue && !subtitleClassificationApiIssue && !audioSubtitleFieldsApiIssue && <Notice tone="danger" title={t("A terv nem indítható", "The plan cannot start")}>{validate.error instanceof ApiError ? validate.error.detail : validate.error.message}</Notice>}
             {validate.isError && colorApiIssue && (
-              <Notice tone="danger" title="Hiányos forrás-színinformáció">
-                <p>A kódolás biztonsága érdekében erősítsd meg ezeket: {reportedMissingColorFields.map((field) => SOURCE_COLOR_FIELD_LABELS[field]).join(", ")}.</p>
-                <Button variant="secondary" onClick={() => setStep(3)}>Színadatok megnyitása</Button>
+              <Notice tone="danger" title={t("Hiányos forrás-színinformáció", "Incomplete source colour information")}>
+                <p>{t("A kódolás biztonsága érdekében erősítsd meg ezeket:", "For a safe encode, confirm these:")} {reportedMissingColorFields.map((field) => SOURCE_COLOR_FIELD_LABELS[field]).join(", ")}.</p>
+                <Button variant="secondary" onClick={() => setStep(3)}>{t("Színadatok megnyitása", "Open colour data")}</Button>
               </Notice>
             )}
             {validate.isError && subtitleClassificationApiIssue && (
-              <Notice tone="danger" title="Hiányzik egy megtartott felirat típusa">
-                <p>A megtartott feliratok egyikénél sincs megengedve az „Ellenőrizendő” állapot. Mindegyiket sorold be „Teljes felirat” vagy „Forced / signs” típusba, illetve hagyd ki, ha nincs rá szükség.</p>
-                <Button variant="secondary" onClick={() => setStep(2)}>Feliratok megnyitása</Button>
+              <Notice tone="danger" title={t("Hiányzik egy megtartott felirat típusa", "A kept subtitle has no type")}>
+                <p>{t(
+                  "A megtartott feliratok egyikénél sincs megengedve az „Ellenőrizendő” állapot. Mindegyiket sorold be „Teljes felirat” vagy „Forced / signs” típusba, illetve hagyd ki, ha nincs rá szükség.",
+                  "“Needs check” is not allowed for any kept subtitle. Classify each one as “Full subtitle” or “Forced / signs”, or omit it if it is not needed.",
+                )}</p>
+                <Button variant="secondary" onClick={() => setStep(2)}>{t("Feliratok megnyitása", "Open subtitles")}</Button>
               </Notice>
             )}
             {validate.isError && audioSubtitleFieldsApiIssue && (
-              <Notice tone="danger" title="A hangsáv hibás feliratjelölést tartalmazott">
-                <p>A „forced” és a felirattípus csak feliratokhoz használható. A felület ezeket most automatikusan eltávolítja a hangsávokból.</p>
-                <Button variant="secondary" onClick={() => validate.mutate()} loading={validate.isPending}>Terv újraellenőrzése</Button>
+              <Notice tone="danger" title={t("A hangsáv hibás feliratjelölést tartalmazott", "An audio track carried subtitle flags")}>
+                <p>{t(
+                  "A „forced” és a felirattípus csak feliratokhoz használható. A felület ezeket most automatikusan eltávolítja a hangsávokból.",
+                  "“Forced” and the subtitle type apply to subtitles only. The interface now removes them from the audio tracks automatically.",
+                )}</p>
+                <Button variant="secondary" onClick={() => validate.mutate()} loading={validate.isPending}>{t("Terv újraellenőrzése", "Check plan again")}</Button>
               </Notice>
             )}
-            {save.isError && <Notice tone="danger" title="A jóváhagyás nem menthető">{save.error instanceof ApiError ? save.error.detail : save.error.message}</Notice>}
+            {save.isError && <Notice tone="danger" title={t("A jóváhagyás nem menthető", "The approval cannot be saved")}>{save.error instanceof ApiError ? save.error.detail : save.error.message}</Notice>}
           </Card>
 
           <Card className={validation ? "validation-card validation-card--success" : "validation-card"}>
             <span className="validation-card__icon">{validation ? <Check size={26} /> : <SlidersHorizontal size={26} />}</span>
-            <span className="eyebrow">Szerveroldali planner</span>
-            <h3>{validation ? "A terv érvényes" : "Ellenőrzésre vár"}</h3>
-            <p>{validation ? "A tényleges effektív profil elkészült. Jóváhagyás után a munka kész paraméterekkel beáll a kódolási sorba." : "A backend ugyanazzal a logikával ellenőriz, amelyet a worker kódoláskor használ."}</p>
+            <span className="eyebrow">{t("Szerveroldali planner", "Server-side planner")}</span>
+            <h3>{validation ? t("A terv érvényes", "The plan is valid") : t("Ellenőrzésre vár", "Waiting for check")}</h3>
+            <p>{validation
+              ? t("A tényleges effektív profil elkészült. Jóváhagyás után a munka kész paraméterekkel beáll a kódolási sorba.", "The effective profile is ready. Once approved, the job joins the encoding queue with its final parameters.")
+              : t("A backend ugyanazzal a logikával ellenőriz, amelyet a worker kódoláskor használ.", "The backend checks with the same logic the worker uses when encoding.")}</p>
             {validation && (
               <>
                 <dl className="summary-list">
-                  <div><dt>Kódoló</dt><dd>{validation.encoder}</dd></div>
+                  <div><dt>{t("Kódoló", "Encoder")}</dt><dd>{validation.encoder}</dd></div>
                   <div><dt>CRF</dt><dd>{String(validation.settings.crf)}</dd></div>
                   <div><dt>Preset</dt><dd>{String(validation.settings.preset)}</dd></div>
-                  <div><dt>Profil</dt><dd>{String(validation.settings.profile)}</dd></div>
+                  <div><dt>{t("Profil", "Profile")}</dt><dd>{String(validation.settings.profile)}</dd></div>
                   <div><dt>Crop</dt><dd>{Object.values(validation.crop).join(" / ")}</dd></div>
                 </dl>
                 {validation.advisory_warnings.length > 0 && <Notice tone="warning"><ul>{validation.advisory_warnings.map((item) => <li key={item}>{item}</li>)}</ul></Notice>}
                 {(validation.tracker_findings?.length ?? 0) > 0 && (
-                  <Notice tone="warning" title={`${TRACKER_PROFILE_LABELS[(validation.tracker_profile as TrackerProfile) ?? trackerProfile] ?? "Tracker"}-szabályok`}>
+                  <Notice tone="warning" title={t(`${TRACKER_PROFILE_LABELS[(validation.tracker_profile as TrackerProfile) ?? trackerProfile] ?? "Tracker"}-szabályok`, `${TRACKER_PROFILE_LABELS[(validation.tracker_profile as TrackerProfile) ?? trackerProfile] ?? "Tracker"} rules`)}>
                     <ul>{validation.tracker_findings?.map((item) => <li key={item.code + item.message}>{item.severity === "info" ? "ℹ️ " : ""}{item.message}</li>)}</ul>
                   </Notice>
                 )}
                 {validation.tracker_profile && validation.tracker_profile !== "none" && (validation.tracker_findings?.length ?? 0) === 0 && (
-                  <Notice tone="success">A sávterv megfelel a(z) {TRACKER_PROFILE_LABELS[validation.tracker_profile as TrackerProfile] ?? validation.tracker_profile} szabályainak.</Notice>
+                  <Notice tone="success">{t(`A sávterv megfelel a(z) ${TRACKER_PROFILE_LABELS[validation.tracker_profile as TrackerProfile] ?? validation.tracker_profile} szabályainak.`, `The track plan meets the ${TRACKER_PROFILE_LABELS[validation.tracker_profile as TrackerProfile] ?? validation.tracker_profile} rules.`)}</Notice>
                 )}
-                <details className="command-preview"><summary><Copy size={15} /> FFmpeg videóparaméterek</summary><code>{validation.ffmpeg_video_args.join(" ")}</code></details>
+                <details className="command-preview"><summary><Copy size={15} /> {t("FFmpeg videóparaméterek", "FFmpeg video parameters")}</summary><code>{validation.ffmpeg_video_args.join(" ")}</code></details>
               </>
             )}
             {!validation ? (
-              <Button icon={<Check size={17} />} onClick={() => validate.mutate()} loading={validate.isPending} disabled={needsColorConfirmation && !colorConfirmed}>Terv ellenőrzése</Button>
+              <Button icon={<Check size={17} />} onClick={() => validate.mutate()} loading={validate.isPending} disabled={needsColorConfirmation && !colorConfirmed}>{t("Terv ellenőrzése", "Check plan")}</Button>
             ) : (
-              <Button icon={<Clapperboard size={18} />} onClick={() => save.mutate()} loading={save.isPending}>Jóváhagyás és automatikus indítás</Button>
+              <Button icon={<Clapperboard size={18} />} onClick={() => save.mutate()} loading={save.isPending}>{t("Jóváhagyás és automatikus indítás", "Approve and start automatically")}</Button>
             )}
           </Card>
         </div>
       )}
 
       <div className="wizard-footer">
-        <Button variant="ghost" icon={<ArrowLeft size={17} />} onClick={() => setStep((value) => Math.max(1, value - 1))} disabled={step === 1}>Vissza</Button>
-        {step < 4 && <Button icon={<ArrowRight size={17} />} onClick={() => { setStep((value) => Math.min(4, value + 1)); setValidation(null); }} disabled={!canNext}>Tovább</Button>}
+        <Button variant="ghost" icon={<ArrowLeft size={17} />} onClick={() => setStep((value) => Math.max(1, value - 1))} disabled={step === 1}>{t("Vissza", "Back")}</Button>
+        {step < 4 && <Button icon={<ArrowRight size={17} />} onClick={() => { setStep((value) => Math.min(4, value + 1)); setValidation(null); }} disabled={!canNext}>{t("Tovább", "Next")}</Button>}
       </div>
     </div>
   );
 }
 
-const SOURCE_COLOR_OPTIONS: Record<SourceColorField, Array<{ value: string; label: string }>> = {
-  primaries: [
-    { value: "bt709", label: "BT.709" },
-    { value: "bt2020", label: "BT.2020" },
-    { value: "smpte170m", label: "SMPTE 170M" },
-    { value: "smpte240m", label: "SMPTE 240M" },
-    { value: "bt470m", label: "BT.470 M" },
-    { value: "bt470bg", label: "BT.470 BG" },
-  ],
-  transfer: [
-    { value: "bt709", label: "BT.709" },
-    { value: "smpte2084", label: "PQ / SMPTE ST 2084" },
-    { value: "arib-std-b67", label: "HLG / ARIB STD-B67" },
-    { value: "smpte170m", label: "SMPTE 170M" },
-    { value: "smpte240m", label: "SMPTE 240M" },
-    { value: "bt470m", label: "BT.470 M" },
-    { value: "bt470bg", label: "BT.470 BG" },
-    { value: "linear", label: "Lineáris" },
-  ],
-  matrix: [
-    { value: "bt709", label: "BT.709" },
-    { value: "bt2020nc", label: "BT.2020 nem konstans fényesség" },
-    { value: "bt2020c", label: "BT.2020 konstans fényesség" },
-    { value: "smpte170m", label: "SMPTE 170M" },
-    { value: "bt470bg", label: "BT.470 BG" },
-    { value: "rgb", label: "RGB" },
-  ],
-  range: [
-    { value: "limited", label: "Korlátozott / TV" },
-    { value: "full", label: "Teljes / PC" },
-  ],
-  chroma_location: [
-    { value: "left", label: "Bal" },
-    { value: "center", label: "Közép" },
-    { value: "topleft", label: "Bal felső" },
-    { value: "top", label: "Felső" },
-    { value: "bottomleft", label: "Bal alsó" },
-    { value: "bottom", label: "Alsó" },
-  ],
-};
+function sourceColorOptions(): Record<SourceColorField, Array<{ value: string; label: string }>> {
+  return {
+    primaries: [
+      { value: "bt709", label: "BT.709" },
+      { value: "bt2020", label: "BT.2020" },
+      { value: "smpte170m", label: "SMPTE 170M" },
+      { value: "smpte240m", label: "SMPTE 240M" },
+      { value: "bt470m", label: "BT.470 M" },
+      { value: "bt470bg", label: "BT.470 BG" },
+    ],
+    transfer: [
+      { value: "bt709", label: "BT.709" },
+      { value: "smpte2084", label: "PQ / SMPTE ST 2084" },
+      { value: "arib-std-b67", label: "HLG / ARIB STD-B67" },
+      { value: "smpte170m", label: "SMPTE 170M" },
+      { value: "smpte240m", label: "SMPTE 240M" },
+      { value: "bt470m", label: "BT.470 M" },
+      { value: "bt470bg", label: "BT.470 BG" },
+      { value: "linear", label: t("Lineáris", "Linear") },
+    ],
+    matrix: [
+      { value: "bt709", label: "BT.709" },
+      { value: "bt2020nc", label: t("BT.2020 nem konstans fényesség", "BT.2020 non-constant luminance") },
+      { value: "bt2020c", label: t("BT.2020 konstans fényesség", "BT.2020 constant luminance") },
+      { value: "smpte170m", label: "SMPTE 170M" },
+      { value: "bt470bg", label: "BT.470 BG" },
+      { value: "rgb", label: "RGB" },
+    ],
+    range: [
+      { value: "limited", label: t("Korlátozott / TV", "Limited / TV") },
+      { value: "full", label: t("Teljes / PC", "Full / PC") },
+    ],
+    chroma_location: [
+      { value: "left", label: t("Bal", "Left") },
+      { value: "center", label: t("Közép", "Centre") },
+      { value: "topleft", label: t("Bal felső", "Top left") },
+      { value: "top", label: t("Felső", "Top") },
+      { value: "bottomleft", label: t("Bal alsó", "Bottom left") },
+      { value: "bottom", label: t("Alsó", "Bottom") },
+    ],
+  };
+}
 
 function SourceColorConfirmation({
   video,
@@ -1090,10 +1166,11 @@ function SourceColorConfirmation({
     ? "HDR10 UHD Blu-ray · BT.2020 / PQ"
     : "SDR Blu-ray · BT.709";
   const fields = Object.keys(SOURCE_COLOR_FIELD_LABELS) as SourceColorField[];
+  const colorOptions = sourceColorOptions();
   const complete = Object.values(value).every((item) => Boolean(item));
   const manualReason = discKind === "uhd" && !video?.hdr10
-    ? "Az SDR UHD-forrás színtere nem következtethető ki biztonságosan a lemeztípusból."
-    : "Automatikus BT.709 csak legalább 1280×720-as, 8 bites SDR Blu-ray forráshoz használható biztonságosan.";
+    ? t("Az SDR UHD-forrás színtere nem következtethető ki biztonságosan a lemeztípusból.", "The colour space of an SDR UHD source cannot be inferred safely from the disc type.")
+    : t("Automatikus BT.709 csak legalább 1280×720-as, 8 bites SDR Blu-ray forráshoz használható biztonságosan.", "Automatic BT.709 is only safe for an 8-bit SDR Blu-ray source of at least 1280×720.");
 
   return (
     <Card className={confirmed ? "source-color-card source-color-card--confirmed" : "source-color-card"}>
@@ -1101,45 +1178,45 @@ function SourceColorConfirmation({
         <div>
           <span className="section-heading__icon"><Palette size={19} /></span>
           <div>
-            <h3>Forrás színinformációjának megerősítése</h3>
-            <p>A scan nem tudott minden kötelező jelölést kiolvasni</p>
+            <h3>{t("Forrás színinformációjának megerősítése", "Confirm source colour information")}</h3>
+            <p>{t("A scan nem tudott minden kötelező jelölést kiolvasni", "The scan could not read every required flag")}</p>
           </div>
         </div>
-        <Badge tone={confirmed ? "success" : "warning"}>{confirmed ? "Jóváhagyva" : "Teendő"}</Badge>
+        <Badge tone={confirmed ? "success" : "warning"}>{confirmed ? t("Jóváhagyva", "Approved") : t("Teendő", "To do")}</Badge>
       </div>
 
-      <div className="source-color-missing" aria-label="Hiányzó forrásadatok">
-        <strong>Hiányzik a lemezből:</strong>
+      <div className="source-color-missing" aria-label={t("Hiányzó forrásadatok", "Missing source data")}>
+        <strong>{t("Hiányzik a lemezből:", "Missing from the disc:")}</strong>
         <div>{missing.map((field) => <Badge key={field} tone="warning">{SOURCE_COLOR_FIELD_LABELS[field]}</Badge>)}</div>
       </div>
 
-      <Notice tone={confirmed ? "success" : safeRecommendation ? "info" : "warning"} title={confirmed ? "A színjelölés megerősítve" : safeRecommendation ? `Ajánlott alapérték: ${profileName}` : "Kézi ellenőrzés szükséges"}>
+      <Notice tone={confirmed ? "success" : safeRecommendation ? "info" : "warning"} title={confirmed ? t("A színjelölés megerősítve", "Colour flags confirmed") : safeRecommendation ? t(`Ajánlott alapérték: ${profileName}`, `Recommended default: ${profileName}`) : t("Kézi ellenőrzés szükséges", "Manual check required")}>
         {confirmed
-          ? "A kódoló a jóváhagyott jelölést írja a kimenetbe. Színkonverzió nem történik."
+          ? t("A kódoló a jóváhagyott jelölést írja a kimenetbe. Színkonverzió nem történik.", "The encoder writes the approved flags into the output. No colour conversion happens.")
           : safeRecommendation
-            ? "A lemeztípus, a felbontás, a bitmélység és a HDR-jelzés alapján töltöttük ki. Nézd át, majd hagyd jóvá; ettől még nem indul el a kódolás."
-            : `${manualReason} Válaszd ki a lemez dokumentációjával vagy hiteles elemzéssel ellenőrzött értékeket.`}
+            ? t("A lemeztípus, a felbontás, a bitmélység és a HDR-jelzés alapján töltöttük ki. Nézd át, majd hagyd jóvá; ettől még nem indul el a kódolás.", "Filled in from the disc type, resolution, bit depth and HDR flag. Review, then approve; this does not start encoding yet.")
+            : t(`${manualReason} Válaszd ki a lemez dokumentációjával vagy hiteles elemzéssel ellenőrzött értékeket.`, `${manualReason} Choose values verified against the disc's documentation or a reliable analysis.`)}
       </Notice>
 
       <details className="source-color-details" open={!confirmed}>
-        <summary>{confirmed ? "Jóváhagyott értékek megtekintése" : "Ajánlott értékek ellenőrzése"}</summary>
+        <summary>{confirmed ? t("Jóváhagyott értékek megtekintése", "View approved values") : t("Ajánlott értékek ellenőrzése", "Review recommended values")}</summary>
         <div className="source-color-fields">
           {fields.map((field) => {
             const editable = missing.includes(field);
-            const options = SOURCE_COLOR_OPTIONS[field];
+            const options = colorOptions[field];
             const knownOption = options.some((option) => option.value === value[field]);
             return (
               <label key={field} className="source-color-field">
                 <span>
                   <strong>{SOURCE_COLOR_FIELD_LABELS[field]}</strong>
-                  <small>{editable ? "Hiányzott · ajánlott érték" : "A scanből rögzítve / BD-alapérték"}</small>
+                  <small>{editable ? t("Hiányzott · ajánlott érték", "Was missing · recommended value") : t("A scanből rögzítve / BD-alapérték", "Fixed by the scan / BD default")}</small>
                 </span>
                 <select
                   value={value[field]}
                   disabled={!editable}
                   onChange={(event) => onChange({ ...value, [field]: event.target.value })}
                 >
-                  {!value[field] && <option value="">— Válassz ellenőrzött értéket —</option>}
+                  {!value[field] && <option value="">{t("— Válassz ellenőrzött értéket —", "— Choose a verified value —")}</option>}
                   {!knownOption && value[field] && <option value={value[field]}>{value[field]}</option>}
                   {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                 </select>
@@ -1151,7 +1228,7 @@ function SourceColorConfirmation({
 
       {!confirmed && (
         <Button className="source-color-confirm" icon={<Check size={17} />} onClick={onConfirm} disabled={!complete}>
-          {safeRecommendation ? "Ezeknek az értékeknek a jóváhagyása" : "A kézzel ellenőrzött értékek jóváhagyása"}
+          {safeRecommendation ? t("Ezeknek az értékeknek a jóváhagyása", "Approve these values") : t("A kézzel ellenőrzött értékek jóváhagyása", "Approve the manually verified values")}
         </Button>
       )}
     </Card>
@@ -1173,66 +1250,66 @@ function TrackTable({
 }) {
   return (
     <Card className="track-card">
-      <div className="section-heading"><div><span className="section-heading__icon">{icon}</span><div><h3>{title}</h3><p>{streams.length} sáv a kiválasztott playlistben</p></div></div></div>
-      {!streams.length ? <p className="muted">Nincs ilyen sáv.</p> : (
+      <div className="section-heading"><div><span className="section-heading__icon">{icon}</span><div><h3>{title}</h3><p>{t(`${streams.length} sáv a kiválasztott playlistben`, `${streams.length} track(s) in the selected playlist`)}</p></div></div></div>
+      {!streams.length ? <p className="muted">{t("Nincs ilyen sáv.", "No such tracks.")}</p> : (
         <div className="track-table">
           {streams.map((stream) => {
             const selection = selections.find((item) => item.stream_id === stream.id);
             if (!selection) {
-              return <Notice key={stream.id} tone="danger">A(z) {stream.id} sávhoz nem készült választási terv. Válaszd ki újra a playlistet.</Notice>;
+              return <Notice key={stream.id} tone="danger">{t(`A(z) ${stream.id} sávhoz nem készült választási terv. Válaszd ki újra a playlistet.`, `No selection plan was made for track ${stream.id}. Select the playlist again.`)}</Notice>;
             }
             const declaredLanguage = detectedLanguage(stream);
             const uncertain = !declaredLanguage || stream.language?.needs_review;
-            const actionDetails = AUDIO_ACTION_DETAILS[selection.action];
+            const actionDetails = audioActionDetails(selection.action);
             const sourceDetails = [
               stream.codec.toUpperCase(),
               stream.codec_profile,
-              stream.channels ? `${stream.channels} csatorna` : null,
+              stream.channels ? t(`${stream.channels} csatorna`, `${stream.channels} channels`) : null,
               stream.channel_layout,
               stream.sample_rate ? `${stream.sample_rate / 1000} kHz` : null,
               stream.bit_depth ? `${stream.bit_depth} bit` : null,
-              stream.object_audio ? "objektumalapú hang" : null,
+              stream.object_audio ? t("objektumalapú hang", "object-based audio") : null,
             ].filter(Boolean).join(" · ");
             return (
               <div key={stream.id} className={selection.action === "omit" ? "track-row track-row--omitted" : "track-row"}>
                 <div className="track-row__identity">
                   <span className="track-row__type">{stream.kind === "audio" ? <Music size={17} /> : <Subtitles size={17} />}</span>
-                  <span><strong>{stream.title || `${stream.codec.toUpperCase()} sáv`}</strong><small>{sourceDetails}</small></span>
+                  <span><strong>{stream.title || t(`${stream.codec.toUpperCase()} sáv`, `${stream.codec.toUpperCase()} track`)}</strong><small>{sourceDetails}</small></span>
                 </div>
                 <label className="track-language">
                   <Languages size={16} aria-hidden="true" />
                   <input
                     value={selection.language || ""}
                     onChange={(event) => onUpdate(stream.id, { language: event.target.value.trim() || null })}
-                    placeholder={declaredLanguage ? `forrás: ${declaredLanguage}` : "pl. hun / yue / cmn"}
+                    placeholder={declaredLanguage ? t(`forrás: ${declaredLanguage}`, `source: ${declaredLanguage}`) : t("pl. hun / yue / cmn", "e.g. hun / yue / cmn")}
                     maxLength={35}
-                    aria-label={`${stream.title || stream.id} nyelve`}
+                    aria-label={t(`${stream.title || stream.id} nyelve`, `${stream.title || stream.id} language`)}
                   />
-                  {uncertain && <span role="img" aria-label="Bizonytalan vagy hiányzó nyelv" title="Bizonytalan vagy hiányzó nyelv"><AlertTriangle size={15} aria-hidden="true" /></span>}
+                  {uncertain && <span role="img" aria-label={t("Bizonytalan vagy hiányzó nyelv", "Uncertain or missing language")} title={t("Bizonytalan vagy hiányzó nyelv", "Uncertain or missing language")}><AlertTriangle size={15} aria-hidden="true" /></span>}
                 </label>
                 <label className="track-language">
                   <input
                     value={selection.name || ""}
                     onChange={(event) => onUpdate(stream.id, { name: event.target.value.trim() || null })}
-                    placeholder={stream.kind === "audio" ? "pl. Cantonese Original Mix" : "pl. English Forced / SDH"}
+                    placeholder={stream.kind === "audio" ? t("pl. Cantonese Original Mix", "e.g. Cantonese Original Mix") : t("pl. English Forced / SDH", "e.g. English Forced / SDH")}
                     maxLength={120}
-                    aria-label={`${stream.title || stream.id} sávneve`}
+                    aria-label={t(`${stream.title || stream.id} sávneve`, `${stream.title || stream.id} track name`)}
                   />
                 </label>
-                <div className={stream.kind === "audio" ? "track-actions track-actions--audio" : "track-actions"} role="group" aria-label={`${stream.title || stream.id} kezelése`}>
+                <div className={stream.kind === "audio" ? "track-actions track-actions--audio" : "track-actions"} role="group" aria-label={t(`${stream.title || stream.id} kezelése`, `${stream.title || stream.id} handling`)}>
                   {(stream.kind === "audio" ? AUDIO_TRACK_ACTIONS : ["copy", "omit"] as TrackAction[]).map((action) => (
                     <button type="button" key={action} className={selection.action === action ? "active" : ""} aria-pressed={selection.action === action} onClick={() => onUpdate(stream.id, { action: action as TrackAction })}>
-                      {AUDIO_ACTION_DETAILS[action].label}
+                      {audioActionDetails(action).label}
                     </button>
                   ))}
                 </div>
                 {stream.kind === "audio" && <div className="track-target-note"><strong>{actionDetails.label}:</strong> {actionDetails.description}</div>}
                 {selection.action !== "omit" && (
                   <div className="track-flags">
-                    <label><input type="checkbox" checked={selection.default} onChange={(event) => onUpdate(stream.id, { default: event.target.checked })} /> Alapértelmezett</label>
+                    <label><input type="checkbox" checked={selection.default} onChange={(event) => onUpdate(stream.id, { default: event.target.checked })} /> {t("Alapértelmezett", "Default")}</label>
                     {stream.kind === "subtitle" && (
                       <label>
-                        Felirattípus
+                        {t("Felirattípus", "Subtitle type")}
                         <select
                           value={selection.subtitle_kind || "unknown"}
                           onChange={(event) => {
@@ -1242,10 +1319,10 @@ function TrackTable({
                               forced: kind === "forced",
                             });
                           }}
-                          aria-label={`${stream.title || stream.id} felirattípusa`}
+                          aria-label={t(`${stream.title || stream.id} felirattípusa`, `${stream.title || stream.id} subtitle type`)}
                         >
-                          <option value="unknown">Ellenőrizendő</option>
-                          <option value="full">Teljes felirat</option>
+                          <option value="unknown">{t("Ellenőrizendő", "Needs check")}</option>
+                          <option value="full">{t("Teljes felirat", "Full subtitle")}</option>
                           <option value="forced">Forced / signs</option>
                         </select>
                       </label>
@@ -1253,11 +1330,11 @@ function TrackTable({
                   </div>
                 )}
                 {stream.kind === "subtitle" && selection.action !== "omit" && selection.subtitle_kind === "unknown" && (
-                  <div className="track-warning">A forced/full besorolást tartalmi ellenőrzés után kötelező megadni; a forrás flagje önmagában nem elég.</div>
+                  <div className="track-warning">{t("A forced/full besorolást tartalmi ellenőrzés után kötelező megadni; a forrás flagje önmagában nem elég.", "The forced/full classification must be set after checking the content; the source flag alone is not enough.")}</div>
                 )}
-                {stream.object_audio && AUDIO_TRANSCODE_ACTIONS.has(selection.action) && <div className="track-warning">Átalakításkor az Atmos/DTS:X objektum-metaadat elvész; a csatornaalapú hangsáv marad meg.</div>}
-                {stream.kind === "audio" && stream.channels && stream.channels > 6 && ["ac3", "eac3", "dts"].includes(selection.action) && <div className="track-warning">A {stream.channels} csatornás forrás ennél a célnál ellenőrzötten 5.1-re lesz keverve.</div>}
-                {stream.kind === "audio" && selection.action === "dts" && /dts/i.test(`${stream.codec} ${stream.codec_profile || ""}`) && /hd/i.test(`${stream.codec} ${stream.codec_profile || ""}`) && <div className="track-target-note">A beágyazott DTS core újrakódolás nélkül lesz kinyerve.</div>}
+                {stream.object_audio && AUDIO_TRANSCODE_ACTIONS.has(selection.action) && <div className="track-warning">{t("Átalakításkor az Atmos/DTS:X objektum-metaadat elvész; a csatornaalapú hangsáv marad meg.", "Converting drops the Atmos/DTS:X object metadata; the channel-based audio is kept.")}</div>}
+                {stream.kind === "audio" && stream.channels && stream.channels > 6 && ["ac3", "eac3", "dts"].includes(selection.action) && <div className="track-warning">{t(`A ${stream.channels} csatornás forrás ennél a célnál ellenőrzötten 5.1-re lesz keverve.`, `The ${stream.channels}-channel source is downmixed to 5.1 (verified) for this target.`)}</div>}
+                {stream.kind === "audio" && selection.action === "dts" && /dts/i.test(`${stream.codec} ${stream.codec_profile || ""}`) && /hd/i.test(`${stream.codec} ${stream.codec_profile || ""}`) && <div className="track-target-note">{t("A beágyazott DTS core újrakódolás nélkül lesz kinyerve.", "The embedded DTS core is extracted without re-encoding.")}</div>}
               </div>
             );
           })}
@@ -1299,12 +1376,12 @@ function ProfileFields({
   return (
     <>
       {fields.length > 14 && (
-        <label className="search-field settings-search"><Search size={16} aria-hidden="true" /><input aria-label="Kódolóparaméter keresése" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Paraméter keresése…" /></label>
+        <label className="search-field settings-search"><Search size={16} aria-hidden="true" /><input aria-label={t("Kódolóparaméter keresése", "Search encoder parameters")} value={search} onChange={(event) => onSearch(event.target.value)} placeholder={t("Paraméter keresése…", "Search parameters…")} /></label>
       )}
       <div className="profile-groups">
         {groups.map(([group, groupFields]) => (
           <ProfileGroup key={group} initiallyOpen={group === "rate_control" || group === "gop" || fields.length < 15}>
-            <summary><span>{GROUP_LABELS[group] || humanize(group)}</span><Badge>{groupFields.length}</Badge><ChevronDown size={17} /></summary>
+            <summary><span>{groupLabel(group)}</span><Badge>{groupFields.length}</Badge><ChevronDown size={17} /></summary>
             <div className="profile-fields">
               {groupFields.map((field) => field.name === "vbv" ? (
                 <VbvField key={field.name} value={settings.vbv} onChange={(value) => onSettings((current) => ({ ...current, vbv: value }))} />
@@ -1331,7 +1408,8 @@ function ProfileGroup({ initiallyOpen, children }: { initiallyOpen: boolean; chi
 function ProfileField({ field, value, encoder, onUpdate }: { field: FieldSpec; value: unknown; encoder: "x264" | "x265"; onUpdate: (field: FieldSpec, raw: string | boolean) => void }) {
   const inputId = useId();
   const label = fieldLabel(field.name);
-  const description = encoderHelp(field.name)?.what || FIELD_HELP[field.name] || field.description;
+  const help = FIELD_HELP[field.name];
+  const description = encoderHelp(field.name)?.what || (help ? tx(help) : "") || field.description;
   // The help button stays outside the <label>: a button inside it would
   // become the label's control instead of the input.
   const heading = (
@@ -1346,9 +1424,9 @@ function ProfileField({ field, value, encoder, onUpdate }: { field: FieldSpec; v
       <div className="parameter-field">
         {heading}
         <select id={inputId} value={value === true ? "true" : value === false ? "false" : ""} onChange={(event) => onUpdate(field, event.target.value)}>
-          <option value="">Preset szerint</option>
-          <option value="true">Be</option>
-          <option value="false">Ki</option>
+          <option value="">{t("Preset szerint", "Preset default")}</option>
+          <option value="true">{t("Be", "On")}</option>
+          <option value="false">{t("Ki", "Off")}</option>
         </select>
       </div>
     );
@@ -1375,7 +1453,7 @@ function ProfileField({ field, value, encoder, onUpdate }: { field: FieldSpec; v
           id={inputId}
           type={field.value_type === "number" || field.value_type === "integer" ? "number" : "text"}
           value={String(value ?? "")}
-          placeholder={field.optional ? "preset szerint" : undefined}
+          placeholder={field.optional ? t("preset szerint", "preset default") : undefined}
           min={field.minimum ?? undefined}
           max={field.maximum ?? undefined}
           step={field.value_type === "integer" ? 1 : field.value_type === "number" ? 0.05 : undefined}
@@ -1392,13 +1470,13 @@ function VbvField({ value, onChange }: { value: unknown; onChange: (value: unkno
   return (
     <div className="parameter-field parameter-field--object">
       <label className="toggle-row toggle-row--compact">
-        <span><strong>VBV korlátozás</strong><small>Csak konkrét lejátszói/level kompatibilitási igénynél szükséges.</small></span>
+        <span><strong>{t("VBV korlátozás", "VBV limit")}</strong><small>{t("Csak konkrét lejátszói/level kompatibilitási igénynél szükséges.", "Only needed for a specific player or level compatibility requirement.")}</small></span>
         <input type="checkbox" checked={enabled} onChange={(event) => onChange(event.target.checked ? { maxrate_kbps: 40000, bufsize_kbps: 50000, initial_fullness: 0.9 } : null)} /><span className="toggle" />
       </label>
       {enabled && <div className="object-fields">
         <label>Maxrate (kb/s)<input type="number" value={String(current.maxrate_kbps ?? 40000)} onChange={(event) => onChange({ ...current, maxrate_kbps: Number(event.target.value) })} /></label>
         <label>Buffer (kb)<input type="number" value={String(current.bufsize_kbps ?? 50000)} onChange={(event) => onChange({ ...current, bufsize_kbps: Number(event.target.value) })} /></label>
-        <label>Kezdeti telítettség<input type="number" min="0" max="1" step="0.05" value={String(current.initial_fullness ?? 0.9)} onChange={(event) => onChange({ ...current, initial_fullness: Number(event.target.value) })} /></label>
+        <label>{t("Kezdeti telítettség", "Initial fullness")}<input type="number" min="0" max="1" step="0.05" value={String(current.initial_fullness ?? 0.9)} onChange={(event) => onChange({ ...current, initial_fullness: Number(event.target.value) })} /></label>
       </div>}
     </div>
   );
@@ -1428,12 +1506,12 @@ function CropEditor({
     <div className="crop-editor">
       <div className="crop-mode" role="status">
         {automatic ? (
-          <Badge tone="success">Automatikus crop — a worker a teljes filmből méri</Badge>
+          <Badge tone="success">{t("Automatikus crop — a worker a teljes filmből méri", "Automatic crop — the worker measures it over the whole film")}</Badge>
         ) : (
           <>
-            <Badge tone="warning">Kézi crop — felülírja az automatikus mérést</Badge>
+            <Badge tone="warning">{t("Kézi crop — felülírja az automatikus mérést", "Manual crop — overrides the automatic measurement")}</Badge>
             <Button variant="ghost" onClick={() => onChange({ left: 0, top: 0, right: 0, bottom: 0 })}>
-              Vissza automatikusra
+              {t("Vissza automatikusra", "Back to automatic")}
             </Button>
           </>
         )}
@@ -1448,21 +1526,21 @@ function CropEditor({
           <span>{Math.round(sourceWidth - crop.left - crop.right)} × {Math.round(sourceHeight - crop.top - crop.bottom)}</span>
         </div>
         <div className="crop-preview__grid" />
-        <small>{innerWidth.toFixed(0)}% × {innerHeight.toFixed(0)}% megmarad</small>
+        <small>{t(`${innerWidth.toFixed(0)}% × ${innerHeight.toFixed(0)}% megmarad`, `${innerWidth.toFixed(0)}% × ${innerHeight.toFixed(0)}% kept`)}</small>
       </div>
       <div className="crop-controls">
         {(["top", "bottom", "left", "right"] as const).map((side) => {
           const max = side === "top" || side === "bottom" ? maxVertical : maxHorizontal;
-          const label = side === "top" ? "Fent" : side === "bottom" ? "Lent" : side === "left" ? "Bal" : "Jobb";
+          const label = side === "top" ? t("Fent", "Top") : side === "bottom" ? t("Lent", "Bottom") : side === "left" ? t("Bal", "Left") : t("Jobb", "Right");
           return (
             <div className="crop-control" key={side}>
-              <span>{label}<input aria-label={`${label} crop pixelben`} type="number" min="0" max={max} step="2" value={crop[side]} onChange={(event) => onChange({ ...crop, [side]: normalizeCrop(event.target.value, max) })} /></span>
-              <input aria-label={`${label} crop csúszka`} type="range" min="0" max={max} step="2" value={crop[side]} onChange={(event) => onChange({ ...crop, [side]: normalizeCrop(event.target.value, max) })} />
+              <span>{label}<input aria-label={t(`${label} crop pixelben`, `${label} crop in pixels`)} type="number" min="0" max={max} step="2" value={crop[side]} onChange={(event) => onChange({ ...crop, [side]: normalizeCrop(event.target.value, max) })} /></span>
+              <input aria-label={t(`${label} crop csúszka`, `${label} crop slider`)} type="range" min="0" max={max} step="2" value={crop[side]} onChange={(event) => onChange({ ...crop, [side]: normalizeCrop(event.target.value, max) })} />
             </div>
           );
         })}
       </div>
-      <small className="field-help">0 / 0 / 0 / 0 = automatikus crop. A kézi értékek páros pixelekre állnak; a backend minden esetben ellenőrzi a forrásméretet és a kimeneti kompatibilitást.</small>
+      <small className="field-help">{t("0 / 0 / 0 / 0 = automatikus crop. A kézi értékek páros pixelekre állnak; a backend minden esetben ellenőrzi a forrásméretet és a kimeneti kompatibilitást.", "0 / 0 / 0 / 0 = automatic crop. Manual values snap to even pixels; the backend always checks the source size and output compatibility.")}</small>
     </div>
   );
 }

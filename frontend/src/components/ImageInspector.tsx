@@ -1,15 +1,18 @@
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
+import { t } from "../i18n";
 import { Button, Modal } from "./ui";
 
 export type InspectorZoom = "fit" | "1" | "2";
 
-const ZOOM_LABELS: Array<[InspectorZoom, string]> = [
-  ["fit", "Illesztés"],
-  ["1", "100%"],
-  ["2", "200%"],
-];
+function zoomLabels(): Array<[InspectorZoom, string]> {
+  return [
+    ["fit", t("Illesztés", "Fit")],
+    ["1", "100%"],
+    ["2", "200%"],
+  ];
+}
 
 /**
  * Pixel-level before/after viewer.  Both images sit in ONE scroll container, so
@@ -86,11 +89,11 @@ export function ImageInspector({
       title={title}
       size="wide"
       onClose={onClose}
-      footer={<Button variant="ghost" onClick={onClose}>Bezárás</Button>}
+      footer={<Button variant="ghost" onClick={onClose}>{t("Bezárás", "Close")}</Button>}
     >
       <div className="inspector-toolbar">
-        <div className="compare-mode" role="group" aria-label="Nagyítás">
-          {ZOOM_LABELS.map(([value, label]) => (
+        <div className="compare-mode" role="group" aria-label={t("Nagyítás", "Zoom")}>
+          {zoomLabels().map(([value, label]) => (
             <button
               type="button"
               key={value}
@@ -102,9 +105,9 @@ export function ImageInspector({
             </button>
           ))}
         </div>
-        <div className="inspector-nav" role="group" aria-label="Képpárok között">
-          <Button variant="ghost" icon={<ChevronLeft size={16} />} disabled={!onPrevious} onClick={onPrevious}>Előző</Button>
-          <Button variant="ghost" icon={<ChevronRight size={16} />} disabled={!onNext} onClick={onNext}>Következő</Button>
+        <div className="inspector-nav" role="group" aria-label={t("Képpárok között", "Between image pairs")}>
+          <Button variant="ghost" icon={<ChevronLeft size={16} />} disabled={!onPrevious} onClick={onPrevious}>{t("Előző", "Previous")}</Button>
+          <Button variant="ghost" icon={<ChevronRight size={16} />} disabled={!onNext} onClick={onNext}>{t("Következő", "Next")}</Button>
         </div>
       </div>
 
@@ -128,7 +131,7 @@ export function ImageInspector({
           <img
             className={scale && scale >= 2 ? "inspector-image inspector-image--pixelated inspector-image--source" : "inspector-image inspector-image--source"}
             src={sourceUrl}
-            alt="Forrás"
+            alt={t("Forrás", "Source")}
             draggable={false}
             style={{ clipPath: `inset(0 ${100 - position}% 0 0)` }}
           />
@@ -144,10 +147,10 @@ export function ImageInspector({
           max={100}
           value={position}
           onChange={(event) => setPosition(Number(event.target.value))}
-          aria-label="Source és encode elválasztása (nagyított nézet)"
+          aria-label={t("Source és encode elválasztása (nagyított nézet)", "Source/encode divider (zoomed view)")}
         />
       </label>
-      <p className="muted inspector-hint">Billentyűk: Z – nagyítás váltása · [ és ] – előző/következő pár · nagyítva húzással mozgatható</p>
+      <p className="muted inspector-hint">{t("Billentyűk: Z – nagyítás váltása · [ és ] – előző/következő pár · nagyítva húzással mozgatható", "Keys: Z – cycle zoom · [ and ] – previous/next pair · drag to pan when zoomed")}</p>
     </Modal>
   );
 }

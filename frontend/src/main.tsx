@@ -3,6 +3,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router";
 import { App } from "./App";
+import { t } from "./i18n";
 import "./styles.css";
 import "./extras.css";
 
@@ -20,7 +21,7 @@ const basename = import.meta.env.BASE_URL.replace(/\/$/, "");
 const rootElement = document.getElementById("root");
 
 if (!rootElement) {
-  throw new Error("A BDEncode gyökéreleme (#root) hiányzik az oldalról.");
+  throw new Error(t("A BDEncode gyökéreleme (#root) hiányzik az oldalról.", "The BDEncode root element (#root) is missing from the page."));
 }
 
 createRoot(rootElement).render(

@@ -20,6 +20,7 @@ import type {
   VmafWindow,
 } from "../api/types";
 import { artifactContentUrl, fetchArtifactJson, fetchArtifactText } from "../api/client";
+import { t } from "../i18n";
 import { copyText, formatDuration } from "../utils";
 import { ImageInspector } from "./ImageInspector";
 import { Badge, Button, Card, EmptyState, LoadingPanel, Notice } from "./ui";
@@ -103,27 +104,27 @@ export function ComparisonPanel({ artifacts }: { artifacts: Artifact[] }) {
     : null;
 
   if (!videoManifestArtifact && !audioManifestArtifact) {
-    return <EmptyState icon={<Images size={30} />} title="A comparison még nem készült el" description="Az I/P/B framek és az audióspektrumok a QC után jelennek meg ezen a lapon." />;
+    return <EmptyState icon={<Images size={30} />} title={t("A comparison még nem készült el", "The comparison is not ready yet")} description={t("Az I/P/B framek és az audióspektrumok a QC után jelennek meg ezen a lapon.", "The I/P/B frames and the audio spectra appear on this tab after QC.")} />;
   }
 
   return (
     <div className="comparison-panel">
       {bbcodeArtifact && (
         <Card className="bbcode-card">
-          <div><span className="eyebrow">Megosztás</span><h3>BBCode csomag</h3><p>Az ellenőrzött képtárhelyre feltöltött source/encode párok fórumba illeszthető kódja.</p></div>
-          <Button variant="secondary" icon={copied ? <Check size={17} /> : <Clipboard size={17} />} onClick={() => void copyBbcode()} disabled={!bbcode.data}>{copied ? "Másolva" : "BBCode másolása"}</Button>
+          <div><span className="eyebrow">{t("Megosztás", "Sharing")}</span><h3>{t("BBCode csomag", "BBCode package")}</h3><p>{t("Az ellenőrzött képtárhelyre feltöltött source/encode párok fórumba illeszthető kódja.", "Forum-ready code for the source/encode pairs uploaded to the verified image host.")}</p></div>
+          <Button variant="secondary" icon={copied ? <Check size={17} /> : <Clipboard size={17} />} onClick={() => void copyBbcode()} disabled={!bbcode.data}>{copied ? t("Másolva", "Copied") : t("BBCode másolása", "Copy BBCode")}</Button>
         </Card>
       )}
 
       <section className="comparison-section">
         <div className="section-heading">
-          <div><span className="section-heading__icon"><Images size={19} /></span><div><h2>Videó-összehasonlítás</h2><p>Azonos presentation index, külön source/encode PTS, veszteségmentes PNG</p></div></div>
+          <div><span className="section-heading__icon"><Images size={19} /></span><div><h2>{t("Videó-összehasonlítás", "Video comparison")}</h2><p>{t("Azonos presentation index, külön source/encode PTS, veszteségmentes PNG", "Same presentation index, separate source/encode PTS, lossless PNG")}</p></div></div>
           {video.data && <div className="frame-counts">{["I", "P", "B"].map((type) => <Badge key={type}>{type}: {video.data?.counts[type] ?? 0}</Badge>)}</div>}
         </div>
         {video.data?.metrics?.aggregate && (
           <Card className="video-metrics-card">
             <div className="section-heading">
-              <div><span className="section-heading__icon"><Eye size={18} /></span><div><h3>Mintavételezett képmetrikák</h3><p>{video.data.metrics.sample_count ?? video.data.pairs.length} lossless PNG-pár átlaga · nem teljes filmes mérés</p></div></div>
+              <div><span className="section-heading__icon"><Eye size={18} /></span><div><h3>{t("Mintavételezett képmetrikák", "Sampled image metrics")}</h3><p>{t(`${video.data.metrics.sample_count ?? video.data.pairs.length} lossless PNG-pár átlaga · nem teljes filmes mérés`, `Mean of ${video.data.metrics.sample_count ?? video.data.pairs.length} lossless PNG pairs · not a full-film measurement`)}</p></div></div>
               <div className="frame-counts">
                 <Badge tone="info">SSIM: {formatMetric(video.data.metrics.aggregate.ssim_all_mean, 6)}</Badge>
                 <Badge tone="info">PSNR: {formatMetric(video.data.metrics.aggregate.psnr_average_db_mean, 2, " dB")}</Badge>
@@ -132,7 +133,7 @@ export function ComparisonPanel({ artifacts }: { artifacts: Artifact[] }) {
           </Card>
         )}
         {video.data?.vmaf && <VmafWindowsCard vmaf={video.data.vmaf} windows={scoredWindows} />}
-        {video.isLoading ? <LoadingPanel label="Videó comparison betöltése…" /> : video.isError ? <Notice tone="danger">A videó comparison manifestje nem olvasható.</Notice> : (
+        {video.isLoading ? <LoadingPanel label={t("Videó comparison betöltése…", "Loading video comparison…")} /> : video.isError ? <Notice tone="danger">{t("A videó comparison manifestje nem olvasható.", "The video comparison manifest cannot be read.")}</Notice> : (
           <div className="frame-pair-grid">
             {video.data?.pairs.map((pair, index) => (
               <FramePairCard key={`${pair.category}-${pair.presentation_index}-${index}`} pair={pair} images={imagesByName} nearWeak={nearbyWeakWindow(pair, weakWindows)} onInspect={() => setInspect(index)} />
@@ -143,19 +144,19 @@ export function ComparisonPanel({ artifacts }: { artifacts: Artifact[] }) {
 
       <section className="comparison-section">
         <div className="section-heading">
-          <div><span className="section-heading__icon"><AudioWaveform size={19} /></span><div><h2>Hang-összehasonlítás</h2><p>Azonos skálájú source/encode spektrum és bitpontos ellenőrzések</p></div></div>
+          <div><span className="section-heading__icon"><AudioWaveform size={19} /></span><div><h2>{t("Hang-összehasonlítás", "Audio comparison")}</h2><p>{t("Azonos skálájú source/encode spektrum és bitpontos ellenőrzések", "Source/encode spectra on the same scale and bit-exact checks")}</p></div></div>
         </div>
-        {audio.isLoading ? <LoadingPanel label="Audióelemzés betöltése…" /> : audio.isError ? <Notice tone="danger">Az audió comparison manifestje nem olvasható.</Notice> : audio.data?.tracks.length ? (
+        {audio.isLoading ? <LoadingPanel label={t("Audióelemzés betöltése…", "Loading audio analysis…")} /> : audio.isError ? <Notice tone="danger">{t("Az audió comparison manifestje nem olvasható.", "The audio comparison manifest cannot be read.")}</Notice> : audio.data?.tracks.length ? (
           <div className="audio-comparison-list">
             {audio.data.tracks.map((track) => <AudioTrackComparison key={track.stream_id} track={track} images={imagesByName} />)}
           </div>
-        ) : <EmptyState title="Nincs megtartott hangsáv" description="Ehhez a munkához nem készült audióspektrum." />}
+        ) : <EmptyState title={t("Nincs megtartott hangsáv", "No audio track kept")} description={t("Ehhez a munkához nem készült audióspektrum.", "No audio spectrum was made for this job.")} />}
       </section>
 
       {inspected && (
         <ImageInspector
           open
-          title={`${inspected.pair.category}-frame #${inspected.pair.presentation_index} — pixelnézet`}
+          title={`${inspected.pair.category}-frame #${inspected.pair.presentation_index} — ${t("pixelnézet", "pixel view")}`}
           sourceUrl={artifactContentUrl(inspected.source.id)}
           encodeUrl={artifactContentUrl(inspected.encode.id)}
           onClose={() => setInspect(null)}
@@ -169,7 +170,7 @@ export function ComparisonPanel({ artifacts }: { artifacts: Artifact[] }) {
 
 function VmafWindowsCard({ vmaf, windows }: { vmaf: NonNullable<VideoComparisonManifest["vmaf"]>; windows: MeasuredWindow[] }) {
   if (vmaf.status !== "measured") {
-    return <Notice tone="info" title="A kész fájl VMAF-mérése nem készült el">A mérés tájékoztató jellegű; az SSIM/PSNR-ellenőrzés és a képpárok ettől függetlenül érvényesek.</Notice>;
+    return <Notice tone="info" title={t("A kész fájl VMAF-mérése nem készült el", "The VMAF measurement of the finished file was not made")}>{t("A mérés tájékoztató jellegű; az SSIM/PSNR-ellenőrzés és a képpárok ettől függetlenül érvényesek.", "The measurement is informative only; the SSIM/PSNR check and the image pairs are valid regardless.")}</Notice>;
   }
   const lowest = windows[0]?.mean ?? vmaf.minimum ?? 0;
   // The bars start a little below the weakest window so differences stay visible.
@@ -179,16 +180,16 @@ function VmafWindowsCard({ vmaf, windows }: { vmaf: NonNullable<VideoComparisonM
       <div className="section-heading">
         <div>
           <span className="section-heading__icon"><Gauge size={18} /></span>
-          <div><h3>VMAF a kész fájlon</h3><p>{vmaf.frames ?? "—"} képkocka {windows.length} mintaszakaszból · {vmaf.model ?? "VMAF"} · tájékoztató mérés</p></div>
+          <div><h3>{t("VMAF a kész fájlon", "VMAF on the finished file")}</h3><p>{t(`${vmaf.frames ?? "—"} képkocka ${windows.length} mintaszakaszból`, `${vmaf.frames ?? "—"} frames from ${windows.length} sample windows`)} · {vmaf.model ?? "VMAF"} · {t("tájékoztató mérés", "informative measurement")}</p></div>
         </div>
         <div className="frame-counts">
-          <Badge tone="info">Átlag: {formatMetric(vmaf.mean, 2)}</Badge>
-          <Badge tone="info">Harmonikus: {formatMetric(vmaf.harmonic_mean, 2)}</Badge>
+          <Badge tone="info">{t("Átlag", "Mean")}: {formatMetric(vmaf.mean, 2)}</Badge>
+          <Badge tone="info">{t("Harmonikus", "Harmonic")}: {formatMetric(vmaf.harmonic_mean, 2)}</Badge>
           <Badge tone="info">1% low: {formatMetric(vmaf.percentile_1, 2)}</Badge>
         </div>
       </div>
       {windows.length > 0 && (
-        <ol className="vmaf-windows" aria-label="Mintaszakaszok a leggyengébbtől">
+        <ol className="vmaf-windows" aria-label={t("Mintaszakaszok a leggyengébbtől", "Sample windows from the weakest")}>
           {windows.map((window, index) => {
             const weak = index < WEAK_WINDOW_COUNT;
             const share = Math.max(0, Math.min(1, (window.mean - floor) / Math.max(1, 100 - floor)));
@@ -198,7 +199,7 @@ function VmafWindowsCard({ vmaf, windows }: { vmaf: NonNullable<VideoComparisonM
                 <span className="vmaf-window__bar" aria-hidden="true"><span style={{ width: `${(share * 100).toFixed(1)}%` }} /></span>
                 <strong>{window.mean.toFixed(2)}</strong>
                 <small>{typeof window.minimum === "number" ? `min ${window.minimum.toFixed(2)}` : ""}</small>
-                {weak ? <Badge tone="warning">gyenge</Badge> : <span />}
+                {weak ? <Badge tone="warning">{t("gyenge", "weak")}</Badge> : <span />}
               </li>
             );
           })}
@@ -224,7 +225,7 @@ function FramePairCard({ pair, images, nearWeak, onInspect }: { pair: VideoCompa
   }, [mode]);
 
   if (!source || !encode) return (
-    <Notice tone="warning">A(z) {pair.category}-frame egyik PNG melléklete hiányzik.</Notice>
+    <Notice tone="warning">{t(`A(z) ${pair.category}-frame egyik PNG melléklete hiányzik.`, `A PNG attachment of the ${pair.category}-frame is missing.`)}</Notice>
   );
 
   const sourceUrl = artifactContentUrl(source.id);
@@ -235,42 +236,42 @@ function FramePairCard({ pair, images, nearWeak, onInspect }: { pair: VideoCompa
         <div>
           <Badge tone={pair.category === "I" ? "success" : pair.category === "P" ? "info" : "warning"}>{pair.category}-frame</Badge>
           <span>#{pair.presentation_index} · Source PTS {String(pair.reference_pts_seconds)} · Encode PTS {String(pair.encoded_pts_seconds)}</span>
-          {nearWeak && <Badge tone="warning">{`Gyenge VMAF-szakasz közelében · ${windowTime(nearWeak) ?? nearWeak.mean.toFixed(2)}`}</Badge>}
+          {nearWeak && <Badge tone="warning">{`${t("Gyenge VMAF-szakasz közelében", "Near a weak VMAF window")} · ${windowTime(nearWeak) ?? nearWeak.mean.toFixed(2)}`}</Badge>}
           {pair.source_pict_type === null ? (
-            <Badge tone="neutral">Source képtípus nem értelmezhető · azonos frame</Badge>
+            <Badge tone="neutral">{t("Source képtípus nem értelmezhető · azonos frame", "Source picture type not applicable · same frame")}</Badge>
           ) : (
             <Badge tone={pair.dual_type_match ? "success" : "danger"}>
-              {pair.source_pict_type} ↔ {pair.encoded_pict_type}{pair.dual_type_match ? " · azonos típus" : " · eltérő típus"}
+              {pair.source_pict_type} ↔ {pair.encoded_pict_type}{pair.dual_type_match ? ` · ${t("azonos típus", "same type")}` : ` · ${t("eltérő típus", "different type")}`}
             </Badge>
           )}
         </div>
-        <div className="compare-mode" role="group" aria-label="Összehasonlítási mód">
+        <div className="compare-mode" role="group" aria-label={t("Összehasonlítási mód", "Comparison mode")}>
           {(["slider", "side", "blink", "difference"] as CompareMode[]).map((value) => (
-            <button type="button" key={value} className={mode === value ? "active" : ""} aria-pressed={mode === value} onClick={() => setMode(value)} title={value === "slider" ? "Húzható elválasztó" : value === "side" ? "Egymás mellett" : value === "blink" ? "A/B villogtatás" : "Különbségkiemelés"}>
-              {value === "slider" ? "Csúszka" : value === "side" ? "A/B" : value === "blink" ? "Villog" : "Diff"}
+            <button type="button" key={value} className={mode === value ? "active" : ""} aria-pressed={mode === value} onClick={() => setMode(value)} title={value === "slider" ? t("Húzható elválasztó", "Draggable divider") : value === "side" ? t("Egymás mellett", "Side by side") : value === "blink" ? t("A/B villogtatás", "A/B blink") : t("Különbségkiemelés", "Difference highlight")}>
+              {value === "slider" ? t("Csúszka", "Slider") : value === "side" ? "A/B" : value === "blink" ? t("Villog", "Blink") : "Diff"}
             </button>
           ))}
         </div>
       </div>
       <div className={`image-compare image-compare--${mode}`}>
         {mode === "side" ? (
-          <><figure><img src={sourceUrl} alt={`${pair.category}-frame forrás`} loading="lazy" /><figcaption>Source</figcaption></figure><figure><img src={encodeUrl} alt={`${pair.category}-frame encode`} loading="lazy" /><figcaption>Encode</figcaption></figure></>
+          <><figure><img src={sourceUrl} alt={`${pair.category}-frame ${t("forrás", "source")}`} loading="lazy" /><figcaption>Source</figcaption></figure><figure><img src={encodeUrl} alt={`${pair.category}-frame encode`} loading="lazy" /><figcaption>Encode</figcaption></figure></>
         ) : mode === "blink" ? (
-          <figure><img src={blinkSource ? sourceUrl : encodeUrl} alt={`${pair.category}-frame ${blinkSource ? "forrás" : "encode"}`} /><figcaption>{blinkSource ? "Source" : "Encode"}</figcaption></figure>
+          <figure><img src={blinkSource ? sourceUrl : encodeUrl} alt={`${pair.category}-frame ${blinkSource ? t("forrás", "source") : "encode"}`} /><figcaption>{blinkSource ? "Source" : "Encode"}</figcaption></figure>
         ) : mode === "difference" ? (
-          <figure className="difference-view"><img src={sourceUrl} alt="Forrás" /><img src={encodeUrl} alt="Különbségkiemelés" /><figcaption>CSS difference nézet</figcaption></figure>
+          <figure className="difference-view"><img src={sourceUrl} alt={t("Forrás", "Source")} /><img src={encodeUrl} alt={t("Különbségkiemelés", "Difference highlight")} /><figcaption>{t("CSS difference nézet", "CSS difference view")}</figcaption></figure>
         ) : (
           <div className="slider-compare">
             <img src={encodeUrl} alt={`${pair.category}-frame encode`} loading="lazy" />
-            <img className="slider-compare__source-image" src={sourceUrl} alt={`${pair.category}-frame forrás`} loading="lazy" style={{ clipPath: `inset(0 ${100 - position}% 0 0)` }} />
+            <img className="slider-compare__source-image" src={sourceUrl} alt={`${pair.category}-frame ${t("forrás", "source")}`} loading="lazy" style={{ clipPath: `inset(0 ${100 - position}% 0 0)` }} />
             <span className="slider-compare__line" style={{ left: `${position}%` }} aria-hidden="true"><Eye size={17} /></span>
-            <input type="range" min="0" max="100" value={position} onChange={(event) => setPosition(Number(event.target.value))} aria-label="Source és encode elválasztása" />
+            <input type="range" min="0" max="100" value={position} onChange={(event) => setPosition(Number(event.target.value))} aria-label={t("Source és encode elválasztása", "Source/encode divider")} />
             <span className="slider-label slider-label--left">Source</span><span className="slider-label slider-label--right">Encode</span>
           </div>
         )}
       </div>
       <div className="frame-pair-card__footer">
-        <button type="button" className="link-button" onClick={onInspect}><ZoomIn size={15} aria-hidden="true" /> Nagyítás és pixelnézet</button>
+        <button type="button" className="link-button" onClick={onInspect}><ZoomIn size={15} aria-hidden="true" /> {t("Nagyítás és pixelnézet", "Zoom and pixel view")}</button>
         <a href={sourceUrl} target="_blank" rel="noreferrer"><Maximize2 size={15} aria-hidden="true" /> Source PNG</a>
         <a href={encodeUrl} target="_blank" rel="noreferrer"><Maximize2 size={15} aria-hidden="true" /> Encode PNG</a>
       </div>
@@ -284,14 +285,16 @@ function formatMetric(value: number | null | undefined, digits: number, suffix =
     : "—";
 }
 
-const AUDIO_COMPARISON_LABELS: Record<AudioComparisonTrack["action"], string> = {
-  copy: "Veszteségmentes másolás",
-  flac: "FLAC konverzió",
-  ac3: "AC-3 konverzió",
-  eac3: "E-AC-3 konverzió",
-  dts: "DTS core kimenet",
-  omit: "Kihagyott sáv",
-};
+function audioComparisonLabels(): Record<AudioComparisonTrack["action"], string> {
+  return {
+    copy: t("Veszteségmentes másolás", "Lossless copy"),
+    flac: t("FLAC konverzió", "FLAC conversion"),
+    ac3: t("AC-3 konverzió", "AC-3 conversion"),
+    eac3: t("E-AC-3 konverzió", "E-AC-3 conversion"),
+    dts: t("DTS core kimenet", "DTS core output"),
+    omit: t("Kihagyott sáv", "Omitted track"),
+  };
+}
 
 function AudioTrackComparison({ track, images }: { track: AudioComparisonTrack; images: Map<string, Artifact> }) {
   const source = images.get(track.source_spectrum);
@@ -301,21 +304,21 @@ function AudioTrackComparison({ track, images }: { track: AudioComparisonTrack; 
   return (
     <Card className="audio-track-card">
       <div className="audio-track-card__header">
-        <div><span className="audio-track-card__icon"><AudioWaveform size={20} /></span><div><h3>{track.stream_id}</h3><p>{AUDIO_COMPARISON_LABELS[track.action]}</p></div></div>
+        <div><span className="audio-track-card__icon"><AudioWaveform size={20} /></span><div><h3>{track.stream_id}</h3><p>{audioComparisonLabels()[track.action]}</p></div></div>
         <div className="audio-checks">
           {pcmRequired
-            ? <Badge tone={track.decoded_pcm_sha256_match ? "success" : "danger"}>{track.decoded_pcm_sha256_match ? "PCM egyezik" : "PCM eltérés"}</Badge>
-            : <Badge tone="info">Veszteséges cél · PCM hash nem elvárt</Badge>}
-          <Badge tone={timingMatch ? "success" : "danger"}>{timingMatch ? "Időzítés rendben" : "Időzítési eltérés"}</Badge>
+            ? <Badge tone={track.decoded_pcm_sha256_match ? "success" : "danger"}>{track.decoded_pcm_sha256_match ? t("PCM egyezik", "PCM matches") : t("PCM eltérés", "PCM mismatch")}</Badge>
+            : <Badge tone="info">{t("Veszteséges cél · PCM hash nem elvárt", "Lossy target · PCM hash not expected")}</Badge>}
+          <Badge tone={timingMatch ? "success" : "danger"}>{timingMatch ? t("Időzítés rendben", "Timing OK") : t("Időzítési eltérés", "Timing mismatch")}</Badge>
         </div>
       </div>
       {source && encode ? (
         <div className="spectrum-pair">
-          <figure><a href={artifactContentUrl(source.id)} target="_blank" rel="noreferrer"><img src={artifactContentUrl(source.id)} alt={`${track.stream_id} source spektrum`} loading="lazy" /></a><figcaption>Source <ExternalLink size={13} /></figcaption></figure>
-          <figure><a href={artifactContentUrl(encode.id)} target="_blank" rel="noreferrer"><img src={artifactContentUrl(encode.id)} alt={`${track.stream_id} encode spektrum`} loading="lazy" /></a><figcaption>Encode <ExternalLink size={13} /></figcaption></figure>
+          <figure><a href={artifactContentUrl(source.id)} target="_blank" rel="noreferrer"><img src={artifactContentUrl(source.id)} alt={`${track.stream_id} ${t("source spektrum", "source spectrum")}`} loading="lazy" /></a><figcaption>Source <ExternalLink size={13} /></figcaption></figure>
+          <figure><a href={artifactContentUrl(encode.id)} target="_blank" rel="noreferrer"><img src={artifactContentUrl(encode.id)} alt={`${track.stream_id} ${t("encode spektrum", "encode spectrum")}`} loading="lazy" /></a><figcaption>Encode <ExternalLink size={13} /></figcaption></figure>
         </div>
-      ) : <Notice tone="warning">A spektrumképek még nem érhetők el mellékletként.</Notice>}
-      <details className="metric-details"><summary>Mérési részletek</summary><pre>{JSON.stringify({ effective_target: track.effective_target, verification: track.verification, comparison: track.comparison }, null, 2)}</pre></details>
+      ) : <Notice tone="warning">{t("A spektrumképek még nem érhetők el mellékletként.", "The spectrum images are not available as attachments yet.")}</Notice>}
+      <details className="metric-details"><summary>{t("Mérési részletek", "Measurement details")}</summary><pre>{JSON.stringify({ effective_target: track.effective_target, verification: track.verification, comparison: track.comparison }, null, 2)}</pre></details>
     </Card>
   );
 }

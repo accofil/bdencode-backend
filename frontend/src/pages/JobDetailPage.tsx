@@ -42,6 +42,7 @@ import { LanguageReviewCard, UploadReviewCard } from "../components/ReviewPanels
 import { ReleasePanel } from "../components/ReleasePanel";
 import { SelectionWizard } from "../components/SelectionWizard";
 import { Badge, Button, Card, EmptyState, LoadingPanel, Modal, Notice, PageHeader, ProgressBar } from "../components/ui";
+import { t } from "../i18n";
 import { normalizeStoredSelection } from "../selection";
 import { UPLOAD_IMAGE_SET_LABELS } from "../uploads";
 import { contentLabel, formatBytes, formatDate, formatEventMessage, formatStatusMessage, formatWorkerError, humanize, isFastComparisonTimeoutReview, isRunningState, stageProgress, stateLabel, stateTone } from "../utils";
@@ -63,15 +64,19 @@ interface CompletedReleaseDeleteSnapshot {
   preparationVersions: Record<string, number>;
 }
 
-const tabs: Array<{ value: Tab; label: string; icon: typeof Info }> = [
-  { value: "overview", label: "Áttekintés", icon: Gauge },
-  { value: "settings", label: "Beállítások", icon: Settings2 },
-  { value: "comparison", label: "Comparison", icon: Images },
-  { value: "player", label: "Lejátszó", icon: Play },
-  { value: "release", label: "Release", icon: PackageCheck },
-  { value: "events", label: "Események", icon: ClipboardList },
-  { value: "files", label: "Fájlok és logok", icon: FolderOpen },
-];
+const TAB_VALUES: readonly Tab[] = ["overview", "settings", "comparison", "player", "release", "events", "files"];
+
+function jobTabs(): Array<{ value: Tab; label: string; icon: typeof Info }> {
+  return [
+    { value: "overview", label: t("Áttekintés", "Overview"), icon: Gauge },
+    { value: "settings", label: t("Beállítások", "Settings"), icon: Settings2 },
+    { value: "comparison", label: "Comparison", icon: Images },
+    { value: "player", label: t("Lejátszó", "Player"), icon: Play },
+    { value: "release", label: "Release", icon: PackageCheck },
+    { value: "events", label: t("Események", "Events"), icon: ClipboardList },
+    { value: "files", label: t("Fájlok és logok", "Files and logs"), icon: FolderOpen },
+  ];
+}
 
 const RETRYABLE_FAILED_STATES = new Set(["READY", "ENCODING", "MUXING", "QC", "COMPARISON"]);
 
@@ -99,10 +104,10 @@ function operationsFor(job: Job): Set<string> {
 }
 
 function controlStatus(job: Job): { label: string; message: string; tone: "neutral" | "info" | "success" | "warning" | "danger" } {
-  if (job.control_state === "PAUSED") return { label: "Szüneteltetve", message: job.control_message || "A munka biztonságos ponton vár a folytatásra.", tone: "warning" };
-  if (job.control_state === "PAUSE_REQUESTED") return { label: "Szüneteltetés folyamatban", message: job.control_message || "A worker a következő biztonságos ponton állítja meg a munkát.", tone: "warning" };
-  if (job.control_state === "CANCEL_REQUESTED") return { label: "Megszakítás folyamatban", message: job.control_message || "A worker rendezetten lezárja a futó folyamatot.", tone: "danger" };
-  return { label: stateLabel(job.state), message: formatStatusMessage(job.status_message, "Állapotfrissítésre vár"), tone: stateTone(job.state) };
+  if (job.control_state === "PAUSED") return { label: t("Szüneteltetve", "Paused"), message: job.control_message || t("A munka biztonságos ponton vár a folytatásra.", "The job waits at a safe point to be resumed."), tone: "warning" };
+  if (job.control_state === "PAUSE_REQUESTED") return { label: t("Szüneteltetés folyamatban", "Pausing"), message: job.control_message || t("A worker a következő biztonságos ponton állítja meg a munkát.", "The worker stops the job at the next safe point."), tone: "warning" };
+  if (job.control_state === "CANCEL_REQUESTED") return { label: t("Megszakítás folyamatban", "Cancelling"), message: job.control_message || t("A worker rendezetten lezárja a futó folyamatot.", "The worker shuts the running process down cleanly."), tone: "danger" };
+  return { label: stateLabel(job.state), message: formatStatusMessage(job.status_message, t("Állapotfrissítésre vár", "Waiting for a status update")), tone: stateTone(job.state) };
 }
 
 function latestSuccessfulScan(scans: Scan[]): Scan | undefined {
@@ -110,10 +115,10 @@ function latestSuccessfulScan(scans: Scan[]): Scan | undefined {
 }
 
 function imageUploadLabel(value: string | null): string {
-  if (value === "imgbb") return "Csak ImgBB";
-  if (value === "catbox") return "Csak Catbox";
-  if (value === "freeimage") return "Csak Freeimage";
-  return "Automatikus tartalékkal";
+  if (value === "imgbb") return t("Csak ImgBB", "ImgBB only");
+  if (value === "catbox") return t("Csak Catbox", "Catbox only");
+  if (value === "freeimage") return t("Csak Freeimage", "Freeimage only");
+  return t("Automatikus tartalékkal", "Automatic with fallback");
 }
 
 function releasePreparationsFrom(
@@ -166,7 +171,7 @@ export function JobDetailPage() {
   const requestedParams = new URLSearchParams(location.search);
   const requestedTab = requestedParams.get("tab") as Tab | null;
   const requestedAction = requestedParams.get("action");
-  const [tab, setTab] = useState<Tab>(requestedTab && tabs.some((item) => item.value === requestedTab) ? requestedTab : "overview");
+  const [tab, setTab] = useState<Tab>(requestedTab && TAB_VALUES.includes(requestedTab) ? requestedTab : "overview");
   const [cancelOpen, setCancelOpen] = useState(false);
   const [retryOpen, setRetryOpen] = useState(false);
   const [restartOpen, setRestartOpen] = useState(false);
@@ -339,13 +344,13 @@ export function JobDetailPage() {
     setRetryOpen(false);
   }
 
-  if (jobQuery.isLoading) return <div className="page"><LoadingPanel label="Munka betöltése…" /></div>;
+  if (jobQuery.isLoading) return <div className="page"><LoadingPanel label={t("Munka betöltése…", "Loading job…")} /></div>;
   if (jobQuery.isError || !jobQuery.data) return (
-    <div className="page"><Notice tone="danger" title="A munka nem nyitható meg">{jobQuery.error instanceof Error ? jobQuery.error.message : "Ismeretlen hiba"}</Notice><Link className="button button--secondary" to="/queue"><ArrowLeft size={17} /> Vissza</Link></div>
+    <div className="page"><Notice tone="danger" title={t("A munka nem nyitható meg", "The job cannot be opened")}>{jobQuery.error instanceof Error ? jobQuery.error.message : t("Ismeretlen hiba", "Unknown error")}</Notice><Link className="button button--secondary" to="/queue"><ArrowLeft size={17} /> {t("Vissza", "Back")}</Link></div>
   );
 
   const job = jobQuery.data;
-  const visibleTabs = tabs.filter((item) => item.value !== "player" || job.state === "COMPLETED");
+  const visibleTabs = jobTabs().filter((item) => item.value !== "player" || job.state === "COMPLETED");
   const scanRow = latestSuccessfulScan(scansQuery.data?.items ?? []);
   const scan = scanRow?.result && "playlists" in scanRow.result ? scanRow.result as DiscScanResult : null;
   const artifacts = artifactsQuery.data?.items ?? [];
@@ -390,7 +395,7 @@ export function JobDetailPage() {
 
   return (
     <div className="page page--job-detail">
-      <Link className="back-link" to={terminal ? "/archive" : "/queue"}><ArrowLeft size={16} /> {terminal ? "Vissza az archívumhoz" : "Vissza a várólistához"}</Link>
+      <Link className="back-link" to={terminal ? "/archive" : "/queue"}><ArrowLeft size={16} /> {terminal ? t("Vissza az archívumhoz", "Back to the archive") : t("Vissza a várólistához", "Back to the queue")}</Link>
       <PageHeader
         eyebrow={`${contentLabel(job.content_type)} · ${job.disc_type}`}
         title={job.name}
@@ -398,20 +403,20 @@ export function JobDetailPage() {
         actions={
           <div className="header-actions">
             <Badge tone={currentControlStatus.tone}>{currentControlStatus.label}</Badge>
-            {allowedOperations.has("resume") && <Button icon={<Play size={17} />} loading={control.isPending && control.variables?.action === "resume"} disabled={control.isPending} onClick={() => control.mutate({ action: "resume", revision: controlRevision })}>Folytatás</Button>}
-            {allowedOperations.has("pause") && <Button icon={<Pause size={17} />} loading={control.isPending && control.variables?.action === "pause"} disabled={control.isPending} onClick={() => control.mutate({ action: "pause", revision: controlRevision })}>Szüneteltetés</Button>}
+            {allowedOperations.has("resume") && <Button icon={<Play size={17} />} loading={control.isPending && control.variables?.action === "resume"} disabled={control.isPending} onClick={() => control.mutate({ action: "resume", revision: controlRevision })}>{t("Folytatás", "Resume")}</Button>}
+            {allowedOperations.has("pause") && <Button icon={<Pause size={17} />} loading={control.isPending && control.variables?.action === "pause"} disabled={control.isPending} onClick={() => control.mutate({ action: "pause", revision: controlRevision })}>{t("Szüneteltetés", "Pause")}</Button>}
             {(allowedOperations.size > (allowedOperations.has("pause") || allowedOperations.has("resume") ? 1 : 0) || job.state === "UPLOAD_FAILED" || canDeleteRelease) && (
               <details ref={operationMenuRef} className="action-menu">
-                <summary className="button button--secondary"><MoreHorizontal size={17} /><span>Műveletek</span></summary>
-                <div className="action-menu__popover" aria-label="Munka műveletei">
-                  {retryableFailure && <button type="button" onClick={() => { operationMenuRef.current?.removeAttribute("open"); openRetryConfirmation(); }}><RotateCcw size={16} />Folytatás a hibától</button>}
-                  {allowedOperations.has("restart_cancelled") && <button type="button" onClick={() => { operationMenuRef.current?.removeAttribute("open"); restartJob.reset(); setRestartOpen(true); }}><RotateCcw size={16} />Újraindítás</button>}
-                  {job.state === "UPLOAD_FAILED" && <button type="button" disabled={retryUpload.isPending} onClick={() => { operationMenuRef.current?.removeAttribute("open"); retryUpload.mutate(); }}><RefreshCw size={16} />Feltöltés újra</button>}
-                  {allowedOperations.has("prepare_release") && <button type="button" onClick={() => { operationMenuRef.current?.removeAttribute("open"); setTab("release"); }}><PackageCheck size={16} />Release előkészítése</button>}
-                  {canCleanup && <button type="button" onClick={() => { operationMenuRef.current?.removeAttribute("open"); cleanupJob.reset(); setCleanupOpen(true); }}><HardDrive size={16} />Ideiglenes fájlok takarítása</button>}
-                  {allowedOperations.has("cancel") && <button className="action-menu__danger" type="button" onClick={() => { operationMenuRef.current?.removeAttribute("open"); control.reset(); setCancelOpen(true); }}><StopCircle size={16} />Megszakítás kérése</button>}
-                  {allowedOperations.has("delete") && <button className="action-menu__danger" type="button" onClick={() => { operationMenuRef.current?.removeAttribute("open"); purgeJob.reset(); setPurgeConfirmation(""); setPurgeOpen(true); }}><Trash2 size={16} />Munka törlése</button>}
-                  {allowedOperations.has("delete_release") && canDeleteRelease && <button className="action-menu__danger" type="button" disabled={!completedOutputSha256 || releasePreparationsQuery.data === undefined} onClick={() => { operationMenuRef.current?.removeAttribute("open"); openCompletedReleaseDelete(); }}><Trash2 size={16} />Completed release törlése</button>}
+                <summary className="button button--secondary"><MoreHorizontal size={17} /><span>{t("Műveletek", "Actions")}</span></summary>
+                <div className="action-menu__popover" aria-label={t("Munka műveletei", "Job actions")}>
+                  {retryableFailure && <button type="button" onClick={() => { operationMenuRef.current?.removeAttribute("open"); openRetryConfirmation(); }}><RotateCcw size={16} />{t("Folytatás a hibától", "Continue from the error")}</button>}
+                  {allowedOperations.has("restart_cancelled") && <button type="button" onClick={() => { operationMenuRef.current?.removeAttribute("open"); restartJob.reset(); setRestartOpen(true); }}><RotateCcw size={16} />{t("Újraindítás", "Restart")}</button>}
+                  {job.state === "UPLOAD_FAILED" && <button type="button" disabled={retryUpload.isPending} onClick={() => { operationMenuRef.current?.removeAttribute("open"); retryUpload.mutate(); }}><RefreshCw size={16} />{t("Feltöltés újra", "Retry upload")}</button>}
+                  {allowedOperations.has("prepare_release") && <button type="button" onClick={() => { operationMenuRef.current?.removeAttribute("open"); setTab("release"); }}><PackageCheck size={16} />{t("Release előkészítése", "Prepare release")}</button>}
+                  {canCleanup && <button type="button" onClick={() => { operationMenuRef.current?.removeAttribute("open"); cleanupJob.reset(); setCleanupOpen(true); }}><HardDrive size={16} />{t("Ideiglenes fájlok takarítása", "Clean up temporary files")}</button>}
+                  {allowedOperations.has("cancel") && <button className="action-menu__danger" type="button" onClick={() => { operationMenuRef.current?.removeAttribute("open"); control.reset(); setCancelOpen(true); }}><StopCircle size={16} />{t("Megszakítás kérése", "Request cancel")}</button>}
+                  {allowedOperations.has("delete") && <button className="action-menu__danger" type="button" onClick={() => { operationMenuRef.current?.removeAttribute("open"); purgeJob.reset(); setPurgeConfirmation(""); setPurgeOpen(true); }}><Trash2 size={16} />{t("Munka törlése", "Delete job")}</button>}
+                  {allowedOperations.has("delete_release") && canDeleteRelease && <button className="action-menu__danger" type="button" disabled={!completedOutputSha256 || releasePreparationsQuery.data === undefined} onClick={() => { operationMenuRef.current?.removeAttribute("open"); openCompletedReleaseDelete(); }}><Trash2 size={16} />{t("Completed release törlése", "Delete completed release")}</button>}
                 </div>
               </details>
             )}
@@ -419,50 +424,50 @@ export function JobDetailPage() {
         }
       />
 
-      {control.isError && <Notice tone="danger" title="A vezérlési kérés sikertelen">{control.error instanceof ApiError ? control.error.detail : control.error.message}</Notice>}
-      {job.control_state === "PAUSE_REQUESTED" && <Notice tone="warning" title="A szüneteltetés kérése rögzítve">A worker a futó eszközt biztonságosan lezárja. A félkész szakasz folytatáskor újraindulhat.</Notice>}
-      {job.control_state === "PAUSED" && <Notice tone="info" title="A munka szünetel">Az ellenőrzött checkpointok és munkafájlok megmaradtak. A Folytatás visszaadja a munkát a workernek.</Notice>}
-      {job.control_state === "CANCEL_REQUESTED" && <Notice tone="warning" title="Rendezett megszakítás folyamatban">A job csak a futó folyamat lezárása után kerül Megszakítva állapotba.</Notice>}
+      {control.isError && <Notice tone="danger" title={t("A vezérlési kérés sikertelen", "The control request failed")}>{control.error instanceof ApiError ? control.error.detail : control.error.message}</Notice>}
+      {job.control_state === "PAUSE_REQUESTED" && <Notice tone="warning" title={t("A szüneteltetés kérése rögzítve", "Pause request recorded")}>{t("A worker a futó eszközt biztonságosan lezárja. A félkész szakasz folytatáskor újraindulhat.", "The worker closes the running tool safely. The half-done stage may start again on resume.")}</Notice>}
+      {job.control_state === "PAUSED" && <Notice tone="info" title={t("A munka szünetel", "The job is paused")}>{t("Az ellenőrzött checkpointok és munkafájlok megmaradtak. A Folytatás visszaadja a munkát a workernek.", "The verified checkpoints and work files are kept. Resume hands the job back to the worker.")}</Notice>}
+      {job.control_state === "CANCEL_REQUESTED" && <Notice tone="warning" title={t("Rendezett megszakítás folyamatban", "Clean cancel in progress")}>{t("A job csak a futó folyamat lezárása után kerül Megszakítva állapotba.", "The job becomes Cancelled only after the running process has closed.")}</Notice>}
 
       {locationState?.newlyCreated && job.state === "QUEUED" && (
-        <Notice tone="success" title="A munka létrejött">A worker hamarosan elkezdi a lemez scanjét. Ezután itt választhatod ki a playlistet és a sávokat.</Notice>
+        <Notice tone="success" title={t("A munka létrejött", "The job was created")}>{t("A worker hamarosan elkezdi a lemez scanjét. Ezután itt választhatod ki a playlistet és a sávokat.", "The worker will scan the disc shortly. Then you can choose the playlist and the tracks here.")}</Notice>
       )}
       {locationState?.retryStarted && !terminal && (
-        <Notice tone="success" title="A munka folytatása elindult">A worker az ellenőrzött checkpointok alapján folytatja a feldolgozást.</Notice>
+        <Notice tone="success" title={t("A munka folytatása elindult", "The job has resumed")}>{t("A worker az ellenőrzött checkpointok alapján folytatja a feldolgozást.", "The worker continues from the verified checkpoints.")}</Notice>
       )}
-      {job.error && <Notice tone="danger" title="A feldolgozás hibát jelzett"><p>{formatWorkerError(job.error)}</p><details><summary>Technikai részletek</summary><pre>{job.error}</pre></details></Notice>}
+      {job.error && <Notice tone="danger" title={t("A feldolgozás hibát jelzett", "Processing reported an error")}><p>{formatWorkerError(job.error)}</p><details><summary>{t("Technikai részletek", "Technical details")}</summary><pre>{job.error}</pre></details></Notice>}
       {retryableFailure && (
-        <Notice tone="warning" title="A munkafájlok a biztonságos folytatáshoz megmaradtak">
-          A takarítás szándékosan vár: a rendszer megőrzi az érvényes checkpointokat és az elkészült részeredményeket. Folytatáskor csak a hiányzó vagy érvénytelen szakaszok futnak újra. Sikeres véglegesítés után a nagyméretű ideiglenes <code>work</code> mappa automatikusan törlődik; a logok, elemzések és comparison mellékletek megmaradnak.
+        <Notice tone="warning" title={t("A munkafájlok a biztonságos folytatáshoz megmaradtak", "The work files are kept for a safe resume")}>
+          {t("A takarítás szándékosan vár: a rendszer megőrzi az érvényes checkpointokat és az elkészült részeredményeket. Folytatáskor csak a hiányzó vagy érvénytelen szakaszok futnak újra. Sikeres véglegesítés után a nagyméretű ideiglenes ", "Clean-up waits on purpose: the valid checkpoints and finished partial results are kept. On resume only the missing or invalid stages run again. After a successful finish the large temporary ")}<code>work</code>{t(" mappa automatikusan törlődik; a logok, elemzések és comparison mellékletek megmaradnak.", " folder is deleted automatically; the logs, analyses and comparison attachments are kept.")}
         </Notice>
       )}
       {job.state === "COMPLETED" && workspaceCleaned && (
-        <Notice tone="success" title="A kódolás lezárult és a munkaterület kitakarítva">
-          A végleges MKV és a kiadható comparison bizonyítékok a completed mappába kerültek. A belső logok, útvonalak és teljes manifest kizárólag a privát munka auditjában maradtak meg; a nagyméretű ideiglenes fájlok törlődtek.
+        <Notice tone="success" title={t("A kódolás lezárult és a munkaterület kitakarítva", "The encode is finished and the workspace cleaned up")}>
+          {t("A végleges MKV és a kiadható comparison bizonyítékok a completed mappába kerültek. A belső logok, útvonalak és teljes manifest kizárólag a privát munka auditjában maradtak meg; a nagyméretű ideiglenes fájlok törlődtek.", "The final MKV and the publishable comparison evidence went to the completed folder. The internal logs, paths and full manifest stay only in the job's private audit; the large temporary files were deleted.")}
         </Notice>
       )}
       {job.state === "COMPLETED" && workspaceCleanupWarning && (
-        <Notice tone="warning" title="A kódolás elkészült, de maradtak ideiglenes fájlok">
-          A végleges MKV biztonságban van. A munkaterület takarítása nem sikerült; a részletek az eseménynaplóban találhatók.
+        <Notice tone="warning" title={t("A kódolás elkészült, de maradtak ideiglenes fájlok", "The encode is finished, but temporary files remain")}>
+          {t("A végleges MKV biztonságban van. A munkaterület takarítása nem sikerült; a részletek az eseménynaplóban találhatók.", "The final MKV is safe. Cleaning up the workspace failed; the details are in the event log.")}
         </Notice>
       )}
       {comparisonTimeoutReview && (
-        <Notice tone="warning" title="A gyors comparison időkorlátja lejárt">
-          <p>{formatStatusMessage(job.status_message, "A comparison biztonságosan folytatható.")}</p>
-          <p>A már elkészült képpárok és ellenőrzött checkpointok megmaradtak; a kódolást és a muxot nem kell újrafuttatni.</p>
-          <Button icon={<RefreshCw size={17} />} loading={resumeComparison.isPending} onClick={() => resumeComparison.mutate()}>Folytatás a comparisontól</Button>
+        <Notice tone="warning" title={t("A gyors comparison időkorlátja lejárt", "The fast comparison timed out")}>
+          <p>{formatStatusMessage(job.status_message, t("A comparison biztonságosan folytatható.", "The comparison can be resumed safely."))}</p>
+          <p>{t("A már elkészült képpárok és ellenőrzött checkpointok megmaradtak; a kódolást és a muxot nem kell újrafuttatni.", "The finished image pairs and verified checkpoints are kept; the encode and the mux do not need to run again.")}</p>
+          <Button icon={<RefreshCw size={17} />} loading={resumeComparison.isPending} onClick={() => resumeComparison.mutate()}>{t("Folytatás a comparisontól", "Continue from the comparison")}</Button>
           {resumeComparison.isError && <p>{resumeComparison.error instanceof ApiError ? resumeComparison.error.detail : resumeComparison.error.message}</p>}
         </Notice>
       )}
-      {retryUpload.isError && <Notice tone="danger" title="A feltöltés nem indítható újra">{retryUpload.error instanceof ApiError ? retryUpload.error.detail : retryUpload.error.message}</Notice>}
+      {retryUpload.isError && <Notice tone="danger" title={t("A feltöltés nem indítható újra", "The upload cannot be restarted")}>{retryUpload.error instanceof ApiError ? retryUpload.error.detail : retryUpload.error.message}</Notice>}
       {reviewKind === "language" && reviewQuery.data?.language && <LanguageReviewCard key={`language-${job.version}`} job={job} review={reviewQuery.data} />}
       {uploadReview && reviewQuery.data && <UploadReviewCard key={`upload-${job.version}`} job={job} review={reviewQuery.data} credentials={runtimeQuery.data?.image_upload_credentials} />}
-      {job.state === "NEEDS_REVIEW" && !comparisonTimeoutReview && reviewKind !== "language" && !uploadReview && <Notice tone="warning" title="Operátori ellenőrzés szükséges">{formatStatusMessage(job.status_message, "A munkafolyamat csak a beállítások felülvizsgálata után folytatható.")}</Notice>}
+      {job.state === "NEEDS_REVIEW" && !comparisonTimeoutReview && reviewKind !== "language" && !uploadReview && <Notice tone="warning" title={t("Operátori ellenőrzés szükséges", "Operator review needed")}>{formatStatusMessage(job.status_message, t("A munkafolyamat csak a beállítások felülvizsgálata után folytatható.", "The workflow can continue only after the settings are reviewed."))}</Notice>}
 
       <Card className="job-progress-card">
         <div className="job-progress-card__top">
-          <div><span className="job-progress-card__disc"><Disc3 size={23} /></span><div><strong>{currentControlStatus.label}</strong><span>{currentControlStatus.message}</span>{job.control_requested_at && job.control_state !== "RUNNING" && <small>Kérés ideje: {formatDate(job.control_requested_at)}</small>}</div></div>
-          <div className="job-progress-card__percent"><strong>{Math.round(stageProgress(job) * 100)}%</strong><small>teljes folyamat</small></div>
+          <div><span className="job-progress-card__disc"><Disc3 size={23} /></span><div><strong>{currentControlStatus.label}</strong><span>{currentControlStatus.message}</span>{job.control_requested_at && job.control_state !== "RUNNING" && <small>{t("Kérés ideje", "Requested at")}: {formatDate(job.control_requested_at)}</small>}</div></div>
+          <div className="job-progress-card__percent"><strong>{Math.round(stageProgress(job) * 100)}%</strong><small>{t("teljes folyamat", "overall")}</small></div>
         </div>
         <ProgressBar value={stageProgress(job)} label={`${Math.round(stageProgress(job) * 100)}% · ${currentControlStatus.label}`} />
         {running && liveQuery.data?.step && <LiveStepPanel live={liveQuery.data} />}
@@ -519,7 +524,7 @@ export function JobDetailPage() {
           ) : job.selection ? (
             <SavedSelection job={job} scan={scan} />
           ) : (
-            <EmptyState icon={job.state === "SCANNING" ? <LoaderCircle className="spin" size={28} /> : <Settings2 size={28} />} title={job.state === "SCANNING" ? "A scan folyamatban van" : "Még nincs jóváhagyott beállítás"} description="A playlist- és sávválasztó a scan befejezése után jelenik meg." />
+            <EmptyState icon={job.state === "SCANNING" ? <LoaderCircle className="spin" size={28} /> : <Settings2 size={28} />} title={job.state === "SCANNING" ? t("A scan folyamatban van", "The scan is in progress") : t("Még nincs jóváhagyott beállítás", "No approved settings yet")} description={t("A playlist- és sávválasztó a scan befejezése után jelenik meg.", "The playlist and track picker appears once the scan is finished.")} />
           )
         )}
         {tab === "comparison" && <ComparisonPanel artifacts={artifacts} />}
@@ -531,92 +536,92 @@ export function JobDetailPage() {
 
       <Modal
         open={cancelOpen}
-        title="Biztosan megszakítod?"
+        title={t("Biztosan megszakítod?", "Cancel this job?")}
         busy={control.isPending}
         ariaDescribedBy="cancel-job-description"
         onClose={() => { if (!control.isPending) setCancelOpen(false); }}
-        footer={<><Button variant="ghost" disabled={control.isPending} onClick={() => setCancelOpen(false)}>Mégse</Button><Button variant="danger" icon={<StopCircle size={17} />} loading={control.isPending} onClick={() => control.mutate({ action: "cancel", revision: controlRevision })}>Megszakítás kérése</Button></>}
+        footer={<><Button variant="ghost" disabled={control.isPending} onClick={() => setCancelOpen(false)}>{t("Mégse", "Close")}</Button><Button variant="danger" icon={<StopCircle size={17} />} loading={control.isPending} onClick={() => control.mutate({ action: "cancel", revision: controlRevision })}>{t("Megszakítás kérése", "Request cancel")}</Button></>}
       >
-        <div id="cancel-job-description"><Notice tone="warning">A worker rendezetten lezárja a futó programot; a job csak ezután lesz Megszakítva. A már elkészült munkafájlok és naplók megmaradnak.</Notice></div>
+        <div id="cancel-job-description"><Notice tone="warning">{t("A worker rendezetten lezárja a futó programot; a job csak ezután lesz Megszakítva. A már elkészült munkafájlok és naplók megmaradnak.", "The worker shuts the running program down cleanly; only then is the job Cancelled. The finished work files and logs are kept.")}</Notice></div>
         {control.isError && <Notice tone="danger">{control.error instanceof ApiError ? control.error.detail : control.error.message}</Notice>}
       </Modal>
 
       <Modal
         open={retryOpen}
-        title="Folytatod a hibától?"
+        title={t("Folytatod a hibától?", "Continue from the error?")}
         busy={retryJob.isPending}
         onClose={closeRetryConfirmation}
-        footer={<><Button variant="ghost" disabled={retryJob.isPending} onClick={closeRetryConfirmation}>Mégse</Button><Button icon={<RotateCcw size={17} />} loading={retryJob.isPending} onClick={() => retryJob.mutate(job.version)}>Folytatás a hibától</Button></>}
+        footer={<><Button variant="ghost" disabled={retryJob.isPending} onClick={closeRetryConfirmation}>{t("Mégse", "Cancel")}</Button><Button icon={<RotateCcw size={17} />} loading={retryJob.isPending} onClick={() => retryJob.mutate(job.version)}>{t("Folytatás a hibától", "Continue from the error")}</Button></>}
       >
-        <Notice tone="warning" title="A kész munka nem vész el">
-          Az újraindítás az érvényes szakasz-checkpointokat és a már elkészült munkafájlokat újrahasználja. A worker az első hiányzó vagy érvénytelen szakasztól folytatja, a hibás szakaszt pedig szükség szerint újrafuttatja.
+        <Notice tone="warning" title={t("A kész munka nem vész el", "Finished work is not lost")}>
+          {t("Az újraindítás az érvényes szakasz-checkpointokat és a már elkészült munkafájlokat újrahasználja. A worker az első hiányzó vagy érvénytelen szakasztól folytatja, a hibás szakaszt pedig szükség szerint újrafuttatja.", "The restart reuses the valid stage checkpoints and the finished work files. The worker continues from the first missing or invalid stage and reruns the failed stage as needed.")}
         </Notice>
-        {retryJob.isError && <Notice tone="danger" title="A folytatás nem indítható">{retryJob.error instanceof ApiError ? retryJob.error.detail : retryJob.error.message}</Notice>}
+        {retryJob.isError && <Notice tone="danger" title={t("A folytatás nem indítható", "Cannot continue")}>{retryJob.error instanceof ApiError ? retryJob.error.detail : retryJob.error.message}</Notice>}
       </Modal>
 
       <Modal
         open={restartOpen}
-        title="Újraindítod a megszakított munkát?"
+        title={t("Újraindítod a megszakított munkát?", "Restart the cancelled job?")}
         busy={restartJob.isPending}
         onClose={() => { if (!restartJob.isPending) setRestartOpen(false); }}
         footer={<>
-          <Button variant="ghost" disabled={restartJob.isPending} onClick={() => setRestartOpen(false)}>Mégse</Button>
-          {job.selection && <Button variant="secondary" icon={<Settings2 size={17} />} disabled={restartJob.isPending} onClick={() => restartJob.mutate({ expectedVersion: job.version, reconfigure: true })}>Beállítások módosítása</Button>}
-          <Button icon={<RotateCcw size={17} />} loading={restartJob.isPending} onClick={() => restartJob.mutate({ expectedVersion: job.version, reconfigure: false })}>{job.selection ? "Újraindítás ugyanígy" : "Újraindítás"}</Button>
+          <Button variant="ghost" disabled={restartJob.isPending} onClick={() => setRestartOpen(false)}>{t("Mégse", "Cancel")}</Button>
+          {job.selection && <Button variant="secondary" icon={<Settings2 size={17} />} disabled={restartJob.isPending} onClick={() => restartJob.mutate({ expectedVersion: job.version, reconfigure: true })}>{t("Beállítások módosítása", "Change settings")}</Button>}
+          <Button icon={<RotateCcw size={17} />} loading={restartJob.isPending} onClick={() => restartJob.mutate({ expectedVersion: job.version, reconfigure: false })}>{job.selection ? t("Újraindítás ugyanígy", "Restart unchanged") : t("Újraindítás", "Restart")}</Button>
         </>}
       >
         {job.selection ? (
-          <Notice tone="info" title="Ugyanígy vagy módosított beállításokkal">
-            <strong>Újraindítás ugyanígy:</strong> a munka a jóváhagyott beállításokkal visszakerül a várólistára. <strong>Beállítások módosítása:</strong> a beállítóvarázsló nyílik meg a korábbi beállításokkal kitöltve; a kódolás csak az új beállítások jóváhagyása után indul. Mindkét esetben megmarad, amit a változás nem érint (remux, crop, forrás-ellenőrzés); amit érint, az újrafut.
+          <Notice tone="info" title={t("Ugyanígy vagy módosított beállításokkal", "Unchanged or with changed settings")}>
+            <strong>{t("Újraindítás ugyanígy:", "Restart unchanged:")}</strong>{t(" a munka a jóváhagyott beállításokkal visszakerül a várólistára. ", " the job goes back to the queue with the approved settings. ")}<strong>{t("Beállítások módosítása:", "Change settings:")}</strong>{t(" a beállítóvarázsló nyílik meg a korábbi beállításokkal kitöltve; a kódolás csak az új beállítások jóváhagyása után indul. Mindkét esetben megmarad, amit a változás nem érint (remux, crop, forrás-ellenőrzés); amit érint, az újrafut.", " the setup wizard opens filled in with the earlier settings; the encode starts only after the new settings are approved. Either way, whatever the change does not affect is kept (remux, crop, source check); whatever it affects runs again.")}
           </Notice>
         ) : (
-          <Notice tone="info" title="A korábbi eredmények megmaradnak">
-            Ha a scan már elkészült, a munka a beállítóvarázslóhoz kerül vissza. Korábbi megszakításnál a scan indul újra.
+          <Notice tone="info" title={t("A korábbi eredmények megmaradnak", "Earlier results are kept")}>
+            {t("Ha a scan már elkészült, a munka a beállítóvarázslóhoz kerül vissza. Korábbi megszakításnál a scan indul újra.", "If the scan was finished, the job goes back to the setup wizard. If it was cancelled earlier, the scan starts again.")}
           </Notice>
         )}
-        {restartJob.isError && <Notice tone="danger" title="A munka nem indítható újra">{restartJob.error instanceof ApiError ? restartJob.error.detail : restartJob.error.message}</Notice>}
+        {restartJob.isError && <Notice tone="danger" title={t("A munka nem indítható újra", "The job cannot be restarted")}>{restartJob.error instanceof ApiError ? restartJob.error.detail : restartJob.error.message}</Notice>}
       </Modal>
 
       <Modal
         open={purgeOpen}
-        title="Végleg törlöd ezt a munkát?"
+        title={t("Végleg törlöd ezt a munkát?", "Delete this job permanently?")}
         busy={purgeJob.isPending}
         ariaDescribedBy="purge-job-description"
         onClose={() => { if (!purgeJob.isPending) setPurgeOpen(false); }}
-        footer={<><Button variant="ghost" disabled={purgeJob.isPending} onClick={() => setPurgeOpen(false)}>Mégse</Button><Button variant="danger" icon={<Trash2 size={17} />} loading={purgeJob.isPending} disabled={purgeConfirmation !== job.name} onClick={() => purgeJob.mutate(job.version)}>Munka végleges törlése</Button></>}
+        footer={<><Button variant="ghost" disabled={purgeJob.isPending} onClick={() => setPurgeOpen(false)}>{t("Mégse", "Cancel")}</Button><Button variant="danger" icon={<Trash2 size={17} />} loading={purgeJob.isPending} disabled={purgeConfirmation !== job.name} onClick={() => purgeJob.mutate(job.version)}>{t("Munka végleges törlése", "Delete job permanently")}</Button></>}
       >
-        <div id="purge-job-description"><Notice tone="danger" title="Ez nem vonható vissza">A privát jobrekord, munkafájlok, checkpointok, logok és mellékletek törlődnek. A forráslemezhez és a completed release-hez a rendszer nem nyúl.</Notice></div>
-        <label className="field confirmation-field">A megerősítéshez írd be a munka nevét:<input autoComplete="off" value={purgeConfirmation} onChange={(event) => setPurgeConfirmation(event.target.value)} /><small><code>{job.name}</code></small></label>
-        {purgeJob.isError && <Notice tone="danger" title="A munka nem törölhető">{purgeJob.error instanceof ApiError ? purgeJob.error.detail : purgeJob.error.message}</Notice>}
+        <div id="purge-job-description"><Notice tone="danger" title={t("Ez nem vonható vissza", "This cannot be undone")}>{t("A privát jobrekord, munkafájlok, checkpointok, logok és mellékletek törlődnek. A forráslemezhez és a completed release-hez a rendszer nem nyúl.", "The private job record, work files, checkpoints, logs and attachments are deleted. The source disc and the completed release are not touched.")}</Notice></div>
+        <label className="field confirmation-field">{t("A megerősítéshez írd be a munka nevét:", "Type the job name to confirm:")}<input autoComplete="off" value={purgeConfirmation} onChange={(event) => setPurgeConfirmation(event.target.value)} /><small><code>{job.name}</code></small></label>
+        {purgeJob.isError && <Notice tone="danger" title={t("A munka nem törölhető", "The job cannot be deleted")}>{purgeJob.error instanceof ApiError ? purgeJob.error.detail : purgeJob.error.message}</Notice>}
       </Modal>
 
       <Modal
         open={cleanupOpen}
-        title="Kitakarítod az ideiglenes fájlokat?"
+        title={t("Kitakarítod az ideiglenes fájlokat?", "Clean up the temporary files?")}
         busy={cleanupJob.isPending}
         ariaDescribedBy="cleanup-job-description"
         onClose={() => { if (!cleanupJob.isPending) setCleanupOpen(false); }}
-        footer={<><Button variant="ghost" disabled={cleanupJob.isPending} onClick={() => setCleanupOpen(false)}>Mégse</Button><Button icon={<HardDrive size={17} />} loading={cleanupJob.isPending} disabled={(storageQuery.data?.reclaimable_bytes ?? 0) <= 0} onClick={() => cleanupJob.mutate(job.version)}>Takarítás</Button></>}
+        footer={<><Button variant="ghost" disabled={cleanupJob.isPending} onClick={() => setCleanupOpen(false)}>{t("Mégse", "Cancel")}</Button><Button icon={<HardDrive size={17} />} loading={cleanupJob.isPending} disabled={(storageQuery.data?.reclaimable_bytes ?? 0) <= 0} onClick={() => cleanupJob.mutate(job.version)}>{t("Takarítás", "Clean up")}</Button></>}
       >
-        <div id="cleanup-job-description"><Notice tone="info" title={`${formatBytes(storageQuery.data?.reclaimable_bytes)} szabadítható fel`}>Csak a sikeresen lezárt munka nagyméretű ideiglenes <code>work</code> tartalma törlődik. A jobrekord, logok, audit, comparison és completed release megmarad.</Notice></div>
-        {cleanupJob.isError && <Notice tone="danger" title="A takarítás sikertelen">{cleanupJob.error instanceof ApiError ? cleanupJob.error.detail : cleanupJob.error.message}</Notice>}
+        <div id="cleanup-job-description"><Notice tone="info" title={t(`${formatBytes(storageQuery.data?.reclaimable_bytes)} szabadítható fel`, `${formatBytes(storageQuery.data?.reclaimable_bytes)} can be freed`)}>{t("Csak a sikeresen lezárt munka nagyméretű ideiglenes ", "Only the large temporary ")}<code>work</code>{t(" tartalma törlődik. A jobrekord, logok, audit, comparison és completed release megmarad.", " contents of a successfully closed job are deleted. The job record, logs, audit, comparison and completed release are kept.")}</Notice></div>
+        {cleanupJob.isError && <Notice tone="danger" title={t("A takarítás sikertelen", "Clean-up failed")}>{cleanupJob.error instanceof ApiError ? cleanupJob.error.detail : cleanupJob.error.message}</Notice>}
       </Modal>
 
       <Modal
         open={releaseDeleteTarget !== null}
-        title="Végleg törlöd a completed release-t?"
+        title={t("Végleg törlöd a completed release-t?", "Delete the completed release permanently?")}
         busy={deleteRelease.isPending}
         ariaDescribedBy="delete-release-description"
         onClose={() => { if (!deleteRelease.isPending) setReleaseDeleteTarget(null); }}
-        footer={<><Button variant="ghost" disabled={deleteRelease.isPending} onClick={() => setReleaseDeleteTarget(null)}>Mégse</Button><Button variant="danger" icon={<Trash2 size={17} />} loading={deleteRelease.isPending} disabled={!releaseDeleteTarget || releaseDeleteConfirmation !== releaseDeleteTarget.manifest.releaseName || !canDeleteRelease} onClick={() => releaseDeleteTarget && deleteRelease.mutate({ confirmation: releaseDeleteTarget.manifest.releaseName, expected_sha256: releaseDeleteTarget.manifest.sha256, force_if_seeded: forceSeededReleaseDelete, preparation_versions: releaseDeleteTarget.preparationVersions })}>Release végleges törlése</Button></>}
+        footer={<><Button variant="ghost" disabled={deleteRelease.isPending} onClick={() => setReleaseDeleteTarget(null)}>{t("Mégse", "Cancel")}</Button><Button variant="danger" icon={<Trash2 size={17} />} loading={deleteRelease.isPending} disabled={!releaseDeleteTarget || releaseDeleteConfirmation !== releaseDeleteTarget.manifest.releaseName || !canDeleteRelease} onClick={() => releaseDeleteTarget && deleteRelease.mutate({ confirmation: releaseDeleteTarget.manifest.releaseName, expected_sha256: releaseDeleteTarget.manifest.sha256, force_if_seeded: forceSeededReleaseDelete, preparation_versions: releaseDeleteTarget.preparationVersions })}>{t("Release végleges törlése", "Delete release permanently")}</Button></>}
       >
-        <div id="delete-release-description"><Notice tone="danger" title="Ez a kész MKV-t is törli">A completed release teljes publikus csomagja eltűnik. A forráslemez és a privát job auditja megmarad; a korábbi release-előkészítések érvénytelenné válhatnak.</Notice></div>
-        {releaseDeleteTarget && <dl className="summary-list summary-list--stacked"><div><dt>Rögzített release</dt><dd>{releaseDeleteTarget.manifest.releaseName}</dd></div><div><dt>Állapot / job revízió</dt><dd>{releaseDeleteTarget.state} · v{releaseDeleteTarget.version}</dd></div><div><dt>OUTPUT SHA-256</dt><dd><code>{releaseDeleteTarget.manifest.sha256}</code></dd></div><div><dt>Rögzített előkészítések</dt><dd><code>{JSON.stringify(releaseDeleteTarget.preparationVersions)}</code></dd></div></dl>}
-        <label className="field confirmation-field">A megerősítéshez írd be a release nevét:<input autoComplete="off" value={releaseDeleteConfirmation} onChange={(event) => setReleaseDeleteConfirmation(event.target.value)} /><small><code>{releaseDeleteTarget?.manifest.releaseName ?? releaseName}</code></small></label>
-        <label className="toggle-row toggle-row--compact"><span><strong>Kényszerített törlés külső vagy seedelt eredmény ellenére</strong><small>Csak akkor kapcsold be, ha a bizonytalan dupe check vagy egy 3.0 előtti qBittorrent-/trackerművelet eredményét ellenőrizted, és a külső példányokat is tudatosan kezeled.</small></span><input type="checkbox" checked={forceSeededReleaseDelete} onChange={(event) => setForceSeededReleaseDelete(event.target.checked)} /><span className="toggle" aria-hidden="true" /></label>
-        {!storageQuery.isLoading && !canDeleteRelease && <Notice tone="warning">A completed release már nem található, ezért nincs törölhető cél.</Notice>}
-        {!releaseDeleteTarget?.manifest.sha256 && <Notice tone="warning">A törlés le van tiltva, mert a kimeneti MKV elvárt SHA-256 értéke nem érhető el.</Notice>}
-        {deleteRelease.isError && <Notice tone="danger" title="A release nem törölhető">{deleteRelease.error instanceof ApiError ? deleteRelease.error.detail : deleteRelease.error.message}</Notice>}
+        <div id="delete-release-description"><Notice tone="danger" title={t("Ez a kész MKV-t is törli", "This also deletes the finished MKV")}>{t("A completed release teljes publikus csomagja eltűnik. A forráslemez és a privát job auditja megmarad; a korábbi release-előkészítések érvénytelenné válhatnak.", "The whole public package of the completed release is removed. The source disc and the job's private audit are kept; earlier release preparations may become invalid.")}</Notice></div>
+        {releaseDeleteTarget && <dl className="summary-list summary-list--stacked"><div><dt>{t("Rögzített release", "Recorded release")}</dt><dd>{releaseDeleteTarget.manifest.releaseName}</dd></div><div><dt>{t("Állapot / job revízió", "State / job revision")}</dt><dd>{releaseDeleteTarget.state} · v{releaseDeleteTarget.version}</dd></div><div><dt>OUTPUT SHA-256</dt><dd><code>{releaseDeleteTarget.manifest.sha256}</code></dd></div><div><dt>{t("Rögzített előkészítések", "Recorded preparations")}</dt><dd><code>{JSON.stringify(releaseDeleteTarget.preparationVersions)}</code></dd></div></dl>}
+        <label className="field confirmation-field">{t("A megerősítéshez írd be a release nevét:", "Type the release name to confirm:")}<input autoComplete="off" value={releaseDeleteConfirmation} onChange={(event) => setReleaseDeleteConfirmation(event.target.value)} /><small><code>{releaseDeleteTarget?.manifest.releaseName ?? releaseName}</code></small></label>
+        <label className="toggle-row toggle-row--compact"><span><strong>{t("Kényszerített törlés külső vagy seedelt eredmény ellenére", "Force delete despite an external or seeded result")}</strong><small>{t("Csak akkor kapcsold be, ha a bizonytalan dupe check vagy egy 3.0 előtti qBittorrent-/trackerművelet eredményét ellenőrizted, és a külső példányokat is tudatosan kezeled.", "Turn this on only if you have checked the uncertain dupe check or the result of a pre-3.0 qBittorrent/tracker action, and you handle the external copies deliberately.")}</small></span><input type="checkbox" checked={forceSeededReleaseDelete} onChange={(event) => setForceSeededReleaseDelete(event.target.checked)} /><span className="toggle" aria-hidden="true" /></label>
+        {!storageQuery.isLoading && !canDeleteRelease && <Notice tone="warning">{t("A completed release már nem található, ezért nincs törölhető cél.", "The completed release is no longer there, so there is nothing to delete.")}</Notice>}
+        {!releaseDeleteTarget?.manifest.sha256 && <Notice tone="warning">{t("A törlés le van tiltva, mert a kimeneti MKV elvárt SHA-256 értéke nem érhető el.", "Deletion is blocked because the expected SHA-256 of the output MKV is not available.")}</Notice>}
+        {deleteRelease.isError && <Notice tone="danger" title={t("A release nem törölhető", "The release cannot be deleted")}>{deleteRelease.error instanceof ApiError ? deleteRelease.error.detail : deleteRelease.error.message}</Notice>}
       </Modal>
     </div>
   );
@@ -642,22 +647,22 @@ function StorageCard({
   return (
     <Card className="job-storage-card">
       <div className="section-heading">
-        <div><span className="section-heading__icon"><HardDrive size={19} /></span><div><h2>Tárhely és takarítás</h2><p>A job privát munkaterülete és a külön kezelt completed release</p></div></div>
-        {report && <Badge tone={report.reclaimable_bytes > 0 ? "warning" : "success"}>{report.reclaimable_bytes > 0 ? `${formatBytes(report.reclaimable_bytes)} felszabadítható` : "Nincs maradék"}</Badge>}
+        <div><span className="section-heading__icon"><HardDrive size={19} /></span><div><h2>{t("Tárhely és takarítás", "Storage and clean-up")}</h2><p>{t("A job privát munkaterülete és a külön kezelt completed release", "The job's private workspace and the separately kept completed release")}</p></div></div>
+        {report && <Badge tone={report.reclaimable_bytes > 0 ? "warning" : "success"}>{report.reclaimable_bytes > 0 ? t(`${formatBytes(report.reclaimable_bytes)} felszabadítható`, `${formatBytes(report.reclaimable_bytes)} reclaimable`) : t("Nincs maradék", "Nothing left over")}</Badge>}
       </div>
-      {loading ? <LoadingPanel label="Tárhely számítása…" /> : error ? (
-        <Notice tone="warning" title="A tárhelyadat nem olvasható"><Button variant="ghost" icon={<RefreshCw size={15} />} onClick={onRefresh}>Újrapróbálás</Button></Notice>
+      {loading ? <LoadingPanel label={t("Tárhely számítása…", "Measuring storage…")} /> : error ? (
+        <Notice tone="warning" title={t("A tárhelyadat nem olvasható", "The storage data cannot be read")}><Button variant="ghost" icon={<RefreshCw size={15} />} onClick={onRefresh}>{t("Újrapróbálás", "Retry")}</Button></Notice>
       ) : report ? (
         <>
           <div className="storage-facts">
-            <div><small>Privát munkaterület</small><strong>{formatBytes(report.workspace_bytes)}</strong></div>
-            <div><small>Ideiglenes, törölhető</small><strong>{formatBytes(report.reclaimable_bytes)}</strong></div>
+            <div><small>{t("Privát munkaterület", "Private workspace")}</small><strong>{formatBytes(report.workspace_bytes)}</strong></div>
+            <div><small>{t("Ideiglenes, törölhető", "Temporary, deletable")}</small><strong>{formatBytes(report.reclaimable_bytes)}</strong></div>
             <div><small>Completed release</small><strong>{formatBytes(report.completed_release_bytes)}</strong></div>
           </div>
-          <div className="storage-category-list" aria-label="Munkaterület kategóriái">
-            {report.categories.filter((item) => item.present).map((item) => <span key={item.name}><strong>{humanize(item.name)}</strong><small>{formatBytes(item.bytes)} · {item.file_count} fájl{item.reclaimable ? " · takarítható" : ""}</small></span>)}
+          <div className="storage-category-list" aria-label={t("Munkaterület kategóriái", "Workspace categories")}>
+            {report.categories.filter((item) => item.present).map((item) => <span key={item.name}><strong>{humanize(item.name)}</strong><small>{formatBytes(item.bytes)} · {item.file_count} {t("fájl", "files")}{item.reclaimable ? ` · ${t("takarítható", "can be cleaned")}` : ""}</small></span>)}
           </div>
-          {canCleanup && <Button variant="secondary" icon={<HardDrive size={16} />} loading={cleanupPending} disabled={report.reclaimable_bytes <= 0} onClick={onCleanup}>Ideiglenes fájlok takarítása</Button>}
+          {canCleanup && <Button variant="secondary" icon={<HardDrive size={16} />} loading={cleanupPending} disabled={report.reclaimable_bytes <= 0} onClick={onCleanup}>{t("Ideiglenes fájlok takarítása", "Clean up temporary files")}</Button>}
         </>
       ) : null}
     </Card>
@@ -672,29 +677,29 @@ function Overview({ job, scan, events, artifacts, live, running, reviewCardShown
         {["AWAITING_SELECTION", "NEEDS_REVIEW"].includes(job.state) && !isFastComparisonTimeoutReview(job.status_message) && !reviewCardShown && scan && (
           <Card className="action-callout">
             <span className="action-callout__icon"><ListChecks size={25} /></span>
-            <div><span className="eyebrow">Te következel</span><h2>{job.state === "AWAITING_SELECTION" ? "Válaszd ki a filmet és a sávokat" : "Vizsgáld felül a beállításokat"}</h2><p>{scan.playlists.length} playlistet találtam. A kódolás addig nem indul el, amíg a tervet jóvá nem hagyod.</p></div>
-            <Button icon={<Play size={17} />} onClick={onConfigure}>Beállítások megnyitása</Button>
+            <div><span className="eyebrow">{t("Te következel", "Your turn")}</span><h2>{job.state === "AWAITING_SELECTION" ? t("Válaszd ki a filmet és a sávokat", "Choose the film and the tracks") : t("Vizsgáld felül a beállításokat", "Review the settings")}</h2><p>{t(`${scan.playlists.length} playlistet találtam. A kódolás addig nem indul el, amíg a tervet jóvá nem hagyod.`, `Found ${scan.playlists.length} playlists. The encode does not start until you approve the plan.`)}</p></div>
+            <Button icon={<Play size={17} />} onClick={onConfigure}>{t("Beállítások megnyitása", "Open settings")}</Button>
           </Card>
         )}
         <StepTimelineCard live={live} showStep={running} />
         <Card>
-          <div className="section-heading"><div><span className="section-heading__icon"><ClipboardList size={19} /></span><div><h2>Legutóbbi események</h2><p>Sanitizált, tartós állapotnapló</p></div></div></div>
-          {newest.length ? <div className="mini-timeline">{newest.map((event) => <EventItem key={event.id} event={event} compact />)}</div> : <p className="muted">Még nincs naplózott esemény.</p>}
+          <div className="section-heading"><div><span className="section-heading__icon"><ClipboardList size={19} /></span><div><h2>{t("Legutóbbi események", "Recent events")}</h2><p>{t("Sanitizált, tartós állapotnapló", "Sanitized, durable state log")}</p></div></div></div>
+          {newest.length ? <div className="mini-timeline">{newest.map((event) => <EventItem key={event.id} event={event} compact />)}</div> : <p className="muted">{t("Még nincs naplózott esemény.", "No events logged yet.")}</p>}
         </Card>
       </div>
       <aside className="overview-side">
         <Card>
-          <span className="eyebrow">Munka adatai</span>
+          <span className="eyebrow">{t("Munka adatai", "Job details")}</span>
           <dl className="summary-list summary-list--stacked">
-            <div><dt>Forrás</dt><dd title={job.source_path}>{job.source_path}</dd></div>
-            <div><dt>Létrehozva</dt><dd>{formatDate(job.created_at)}</dd></div>
-            <div><dt>Frissítve</dt><dd>{formatDate(job.updated_at)}</dd></div>
-            <div><dt>Azonosító</dt><dd><code>{job.id}</code></dd></div>
-            <div><dt>Mellékletek</dt><dd>{artifacts.length}</dd></div>
+            <div><dt>{t("Forrás", "Source")}</dt><dd title={job.source_path}>{job.source_path}</dd></div>
+            <div><dt>{t("Létrehozva", "Created")}</dt><dd>{formatDate(job.created_at)}</dd></div>
+            <div><dt>{t("Frissítve", "Updated")}</dt><dd>{formatDate(job.updated_at)}</dd></div>
+            <div><dt>{t("Azonosító", "ID")}</dt><dd><code>{job.id}</code></dd></div>
+            <div><dt>{t("Mellékletek", "Attachments")}</dt><dd>{artifacts.length}</dd></div>
           </dl>
         </Card>
         {job.state === "COMPLETED" && <JobStatisticsCard jobId={job.id} />}
-        {scan && <Card><span className="eyebrow">Lemez scan</span><dl className="summary-list summary-list--stacked"><div><dt>Típus</dt><dd>{scan.disc_kind.toUpperCase()}</dd></div><div><dt>Playlistek</dt><dd>{scan.playlists.length}</dd></div><div><dt>Több változat</dt><dd>{scan.has_multiple_editions ? "Igen" : "Nem"}</dd></div><div><dt>3D észlelve</dt><dd>{scan.has_three_d ? "Igen — nem támogatott" : "Nem"}</dd></div></dl></Card>}
+        {scan && <Card><span className="eyebrow">{t("Lemez scan", "Disc scan")}</span><dl className="summary-list summary-list--stacked"><div><dt>{t("Típus", "Type")}</dt><dd>{scan.disc_kind.toUpperCase()}</dd></div><div><dt>{t("Playlistek", "Playlists")}</dt><dd>{scan.playlists.length}</dd></div><div><dt>{t("Több változat", "Multiple editions")}</dt><dd>{scan.has_multiple_editions ? t("Igen", "Yes") : t("Nem", "No")}</dd></div><div><dt>{t("3D észlelve", "3D detected")}</dt><dd>{scan.has_three_d ? t("Igen — nem támogatott", "Yes — not supported") : t("Nem", "No")}</dd></div></dl></Card>}
       </aside>
     </div>
   );
@@ -703,16 +708,16 @@ function Overview({ job, scan, events, artifacts, live, running, reviewCardShown
 function SavedSelection({ job, scan }: { job: Job; scan: DiscScanResult | null }) {
   const selection = normalizeStoredSelection(job.selection);
   if (!selection) {
-    return <Notice tone="warning" title="A mentett selection nem olvasható">A nyers selection JSON nem objektum. A worker operátori ellenőrzést fog kérni.</Notice>;
+    return <Notice tone="warning" title={t("A mentett selection nem olvasható", "The saved selection cannot be read")}>{t("A nyers selection JSON nem objektum. A worker operátori ellenőrzést fog kérni.", "The raw selection JSON is not an object. The worker will ask for an operator review.")}</Notice>;
   }
   const settings = selection.settings;
   return (
     <div className="saved-selection">
-      <Notice tone={isFastComparisonTimeoutReview(job.status_message) ? "info" : "success"} title={isFastComparisonTimeoutReview(job.status_message) ? "A jóváhagyott terv változatlan" : "A terv jóváhagyva"}>{isFastComparisonTimeoutReview(job.status_message) ? "A selection módosítása nem szükséges. A comparison az áttekintő lapon folytatható az érvényes checkpointoktól." : "Nincs külön indítógomb: a munka kész paraméterekkel vár a sorára, majd a worker automatikusan végigviszi. A comparison adatok külön mellékletek maradnak."}</Notice>
+      <Notice tone={isFastComparisonTimeoutReview(job.status_message) ? "info" : "success"} title={isFastComparisonTimeoutReview(job.status_message) ? t("A jóváhagyott terv változatlan", "The approved plan is unchanged") : t("A terv jóváhagyva", "Plan approved")}>{isFastComparisonTimeoutReview(job.status_message) ? t("A selection módosítása nem szükséges. A comparison az áttekintő lapon folytatható az érvényes checkpointoktól.", "The selection does not need changing. The comparison can be resumed on the Overview tab from the valid checkpoints.") : t("Nincs külön indítógomb: a munka kész paraméterekkel vár a sorára, majd a worker automatikusan végigviszi. A comparison adatok külön mellékletek maradnak.", "There is no separate start button: the job waits its turn with its settings ready, then the worker runs it through automatically. The comparison data stay separate attachments.")}</Notice>
       <div className="saved-selection-grid">
-        <Card><span className="eyebrow">Kép és kódoló</span><dl className="summary-list summary-list--stacked"><div><dt>Playlist</dt><dd>{selection.playlistId ?? "—"}</dd></div><div><dt>Kódoló</dt><dd>{scan?.disc_kind === "uhd" ? "x265" : "x264"}</dd></div><div><dt>Részletesség</dt><dd>{selection.detailLevel ?? "—"}</dd></div><div><dt>CRF</dt><dd>{String(settings.crf ?? "ajánlott")}</dd></div><div><dt>Preset</dt><dd>{String(settings.preset ?? "ajánlott")}</dd></div><div><dt>Filter</dt><dd>{selection.temporalFilter ?? "—"}</dd></div></dl></Card>
-        <Card><span className="eyebrow">Kimenet</span><dl className="summary-list summary-list--stacked"><div><dt>Fájlnév</dt><dd>{selection.outputName ? `${selection.outputName}.mkv` : "—"}</dd></div><div><dt>Sávok</dt><dd>{selection.tracks.filter((track) => track.action !== "omit").length} megtartva</dd></div><div><dt>Képfeltöltés</dt><dd>{selection.uploadImages === null ? "—" : selection.uploadImages ? `${imageUploadLabel(selection.imageUploadProvider)} · ${UPLOAD_IMAGE_SET_LABELS[selection.uploadImageSet ?? "all"]}` : "Kikapcsolva"}</dd></div><div><dt>I/P/B egyezés</dt><dd>{selection.dualTypeMatch === false ? "Kötelező · régi mentés felülbírálva" : "Kötelező"}</dd></div></dl></Card>
-        <Card className="saved-json"><details><summary><Code2 size={17} /> Teljes selection JSON</summary><pre>{JSON.stringify(job.selection, null, 2)}</pre></details></Card>
+        <Card><span className="eyebrow">{t("Kép és kódoló", "Picture and encoder")}</span><dl className="summary-list summary-list--stacked"><div><dt>Playlist</dt><dd>{selection.playlistId ?? "—"}</dd></div><div><dt>{t("Kódoló", "Encoder")}</dt><dd>{scan?.disc_kind === "uhd" ? "x265" : "x264"}</dd></div><div><dt>{t("Részletesség", "Detail level")}</dt><dd>{selection.detailLevel ?? "—"}</dd></div><div><dt>CRF</dt><dd>{String(settings.crf ?? t("ajánlott", "recommended"))}</dd></div><div><dt>Preset</dt><dd>{String(settings.preset ?? t("ajánlott", "recommended"))}</dd></div><div><dt>Filter</dt><dd>{selection.temporalFilter ?? "—"}</dd></div></dl></Card>
+        <Card><span className="eyebrow">{t("Kimenet", "Output")}</span><dl className="summary-list summary-list--stacked"><div><dt>{t("Fájlnév", "File name")}</dt><dd>{selection.outputName ? `${selection.outputName}.mkv` : "—"}</dd></div><div><dt>{t("Sávok", "Tracks")}</dt><dd>{selection.tracks.filter((track) => track.action !== "omit").length} {t("megtartva", "kept")}</dd></div><div><dt>{t("Képfeltöltés", "Image upload")}</dt><dd>{selection.uploadImages === null ? "—" : selection.uploadImages ? `${imageUploadLabel(selection.imageUploadProvider)} · ${UPLOAD_IMAGE_SET_LABELS[selection.uploadImageSet ?? "all"]}` : t("Kikapcsolva", "Off")}</dd></div><div><dt>{t("I/P/B egyezés", "I/P/B match")}</dt><dd>{selection.dualTypeMatch === false ? t("Kötelező · régi mentés felülbírálva", "Required · old saved value overridden") : t("Kötelező", "Required")}</dd></div></dl></Card>
+        <Card className="saved-json"><details><summary><Code2 size={17} /> {t("Teljes selection JSON", "Full selection JSON")}</summary><pre>{JSON.stringify(job.selection, null, 2)}</pre></details></Card>
       </div>
     </div>
   );
@@ -720,7 +725,7 @@ function SavedSelection({ job, scan }: { job: Job; scan: DiscScanResult | null }
 
 function EventTimeline({ events, loading }: { events: EventRecord[]; loading: boolean }) {
   if (loading) return <LoadingPanel />;
-  if (!events.length) return <EmptyState icon={<CalendarClock size={28} />} title="Még nincs esemény" description="A worker állapotváltásai és biztonságos összefoglalói itt jelennek meg." />;
+  if (!events.length) return <EmptyState icon={<CalendarClock size={28} />} title={t("Még nincs esemény", "No events yet")} description={t("A worker állapotváltásai és biztonságos összefoglalói itt jelennek meg.", "The worker's state changes and safe summaries appear here.")} />;
   return <div className="event-timeline">{[...events].reverse().map((event) => <EventItem key={event.id} event={event} />)}</div>;
 }
 
@@ -731,7 +736,7 @@ function EventItem({ event, compact = false }: { event: EventRecord; compact?: b
   return (
     <article className={isError ? "event-item event-item--error" : isSuccess ? "event-item event-item--success" : "event-item"}>
       <span className="event-item__marker">{isError ? <AlertTriangle size={15} /> : isSuccess ? <CheckCircle2 size={15} /> : <Info size={14} />}</span>
-      <div><div className="event-item__heading"><strong>{formatEventMessage(event.kind, event.message)}</strong><time>{formatDate(event.created_at)}</time></div>{event.state_from && event.state_to && <p>{stateLabel(event.state_from)} → {stateLabel(event.state_to)}</p>}{compact && uploadDetail && <p>{uploadDetail}</p>}{!compact && Object.keys(event.payload).length > 0 && <details><summary>Részletek</summary><pre>{JSON.stringify(event.payload, null, 2)}</pre></details>}</div>
+      <div><div className="event-item__heading"><strong>{formatEventMessage(event.kind, event.message)}</strong><time>{formatDate(event.created_at)}</time></div>{event.state_from && event.state_to && <p>{stateLabel(event.state_from)} → {stateLabel(event.state_to)}</p>}{compact && uploadDetail && <p>{uploadDetail}</p>}{!compact && Object.keys(event.payload).length > 0 && <details><summary>{t("Részletek", "Details")}</summary><pre>{JSON.stringify(event.payload, null, 2)}</pre></details>}</div>
     </article>
   );
 }
@@ -743,20 +748,20 @@ function ArtifactsPanel({ artifacts }: { artifacts: Artifact[] }) {
   const groups = useMemo(() => Object.entries(artifacts.reduce<Record<string, Artifact[]>>((result, artifact) => {
     (result[artifact.kind] ??= []).push(artifact); return result;
   }, {})), [artifacts]);
-  if (!artifacts.length) return <EmptyState icon={<File size={28} />} title="Még nincs melléklet" description="A scan manifestje, logok, elemzések és comparison képek munka közben folyamatosan jelennek meg." />;
+  if (!artifacts.length) return <EmptyState icon={<File size={28} />} title={t("Még nincs melléklet", "No attachments yet")} description={t("A scan manifestje, logok, elemzések és comparison képek munka közben folyamatosan jelennek meg.", "The scan manifest, logs, analyses and comparison images appear as the job runs.")} />;
   return (
     <div className="artifacts-panel">
       {output && (
         <Card className="mkv-analysis-card">
-          <div><span className="mkv-analysis-card__icon"><ShieldCheck size={22} /></span><span><strong>Elkészült MKV elemzése</strong><small>A konténerből kiolvassa a trackeket és a kódoló beállításait; comparison adatot nem keres az MKV-ban.</small></span></div>
-          <Button variant="secondary" icon={<RefreshCw size={16} />} loading={analyze.isPending} onClick={() => analyze.mutate()}>MKV elemzése</Button>
-          {analyze.isError && <Notice tone="danger">{analyze.error instanceof Error ? analyze.error.message : "Az elemzés sikertelen"}</Notice>}
-          {analysis && <details className="analysis-result" open><summary>Elemzési eredmény</summary><pre>{JSON.stringify(analysis, null, 2)}</pre></details>}
+          <div><span className="mkv-analysis-card__icon"><ShieldCheck size={22} /></span><span><strong>{t("Elkészült MKV elemzése", "Analyse the finished MKV")}</strong><small>{t("A konténerből kiolvassa a trackeket és a kódoló beállításait; comparison adatot nem keres az MKV-ban.", "Reads the tracks and the encoder settings from the container; it does not look for comparison data in the MKV.")}</small></span></div>
+          <Button variant="secondary" icon={<RefreshCw size={16} />} loading={analyze.isPending} onClick={() => analyze.mutate()}>{t("MKV elemzése", "Analyse MKV")}</Button>
+          {analyze.isError && <Notice tone="danger">{analyze.error instanceof Error ? analyze.error.message : t("Az elemzés sikertelen", "The analysis failed")}</Notice>}
+          {analysis && <details className="analysis-result" open><summary>{t("Elemzési eredmény", "Analysis result")}</summary><pre>{JSON.stringify(analysis, null, 2)}</pre></details>}
         </Card>
       )}
       {groups.map(([kind, items]) => (
         <section key={kind} className="artifact-group">
-          <div className="section-heading"><div><span className="section-heading__icon">{kind === "LOG" ? <FileText size={18} /> : kind.includes("COMPARISON") || kind === "SPECTROGRAM" ? <Images size={18} /> : <FileJson size={18} />}</span><div><h3>{artifactGroupLabel(kind)}</h3><p>{items.length} melléklet</p></div></div></div>
+          <div className="section-heading"><div><span className="section-heading__icon">{kind === "LOG" ? <FileText size={18} /> : kind.includes("COMPARISON") || kind === "SPECTROGRAM" ? <Images size={18} /> : <FileJson size={18} />}</span><div><h3>{artifactGroupLabel(kind)}</h3><p>{items.length} {t("melléklet", "attachments")}</p></div></div></div>
           <div className="artifact-list">
             {items.map((artifact) => <ArtifactRow key={artifact.id} artifact={artifact} />)}
           </div>
@@ -779,13 +784,25 @@ function ArtifactRow({ artifact }: { artifact: Artifact }) {
     <div className="artifact-row">
       <span className="artifact-row__icon">{artifact.mime_type === "image/png" ? <Images size={18} /> : artifact.kind === "LOG" ? <FileText size={18} /> : <File size={18} />}</span>
       <span className="artifact-row__name"><strong>{artifact.name}</strong><small>{artifact.mime_type || artifact.kind} · {formatBytes(artifact.size_bytes)}</small></span>
-      <div className="artifact-row__actions">{canPreview && <Button variant="ghost" onClick={() => void loadPreview()} loading={loading}>Előnézet</Button>}<a className="icon-button" href={artifactContentUrl(artifact.id)} target="_blank" rel="noreferrer" aria-label={`${artifact.name} letöltése`}><Download size={17} /></a></div>
+      <div className="artifact-row__actions">{canPreview && <Button variant="ghost" onClick={() => void loadPreview()} loading={loading}>{t("Előnézet", "Preview")}</Button>}<a className="icon-button" href={artifactContentUrl(artifact.id)} target="_blank" rel="noreferrer" aria-label={t(`${artifact.name} letöltése`, `Download ${artifact.name}`)}><Download size={17} /></a></div>
       {preview !== null && <pre className="artifact-preview">{preview}</pre>}
     </div>
   );
 }
 
 function artifactGroupLabel(kind: string): string {
-  const labels: Record<string, string> = { OUTPUT: "Kimeneti fájl", LOG: "Logok", MANIFEST: "Manifestek", MEDIAINFO: "MediaInfo", MKVINFO: "MKV elemzések", VIDEO_COMPARISON: "Videó comparison", AUDIO_COMPARISON: "Audió comparison", SPECTROGRAM: "Spektrumképek", REPORT: "Jelentések", BBCODE: "BBCode", OTHER: "Egyéb" };
+  const labels: Record<string, string> = {
+    OUTPUT: t("Kimeneti fájl", "Output file"),
+    LOG: t("Logok", "Logs"),
+    MANIFEST: t("Manifestek", "Manifests"),
+    MEDIAINFO: "MediaInfo",
+    MKVINFO: t("MKV elemzések", "MKV analyses"),
+    VIDEO_COMPARISON: t("Videó comparison", "Video comparison"),
+    AUDIO_COMPARISON: t("Audió comparison", "Audio comparison"),
+    SPECTROGRAM: t("Spektrumképek", "Spectrograms"),
+    REPORT: t("Jelentések", "Reports"),
+    BBCODE: "BBCode",
+    OTHER: t("Egyéb", "Other"),
+  };
   return labels[kind] || kind;
 }

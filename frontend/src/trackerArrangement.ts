@@ -1,4 +1,5 @@
 import type { MediaStream, Playlist, TrackSelection } from "./api/types";
+import { t } from "./i18n";
 import { audioCodecFamily, type TrackerProfile } from "./releaseName";
 
 /** Formats an nCore 1080p encode may not carry: they become E-AC3 (DD+) 5.1, 1024 kbps. */
@@ -20,7 +21,7 @@ interface Entry {
 
 export interface TrackerArrangement {
   tracks: TrackSelection[];
-  /** Hungarian notes on what changed, for the wizard. */
+  /** Notes on what changed, for the wizard, in the current interface language. */
   notes: string[];
 }
 
@@ -54,8 +55,19 @@ function originalLanguage(audio: Entry[]): string | null {
     ?? spoken[0])?.language ?? null;
 }
 
-const LANGUAGE_NAMES: Record<string, string> = { hu: "magyar", en: "angol", de: "német", fr: "francia", it: "olasz", es: "spanyol", ja: "japán" };
-const languageName = (code: string) => LANGUAGE_NAMES[code] ?? code;
+const LANGUAGE_NAMES: Record<string, { hu: string; en: string }> = {
+  hu: { hu: "magyar", en: "Hungarian" },
+  en: { hu: "angol", en: "English" },
+  de: { hu: "német", en: "German" },
+  fr: { hu: "francia", en: "French" },
+  it: { hu: "olasz", en: "Italian" },
+  es: { hu: "spanyol", en: "Spanish" },
+  ja: { hu: "japán", en: "Japanese" },
+};
+const languageName = (code: string) => {
+  const name = LANGUAGE_NAMES[code];
+  return name ? t(name.hu, name.en) : code;
+};
 
 /**
  * Rearrange a track plan for a tracker's rules: allowed languages and formats,
@@ -87,20 +99,30 @@ export function arrangeForTracker(
       ?? audio.find((item) => !item.commentary && item.language === language);
     if (!candidate) continue;
     update(candidate.track.stream_id, { action: "copy" });
-    notes.push(`A(z) ${languageName(language)} hang bekerült a tervbe${language === original ? " (az eredeti nyelvű hang kötelező)" : ""}.`);
+    notes.push(t(
+      `A(z) ${languageName(language)} hang bekerült a tervbe${language === original ? " (az eredeti nyelvű hang kötelező)" : ""}.`,
+      `The ${languageName(language)} audio was added to the plan${language === original ? " (the original-language audio is mandatory)" : ""}.`,
+    ));
   }
 
   for (const item of audio) {
     if (actionOf(item) === "omit") continue;
     if (!item.commentary && !permitted.has(item.language)) {
       update(item.track.stream_id, { action: "omit" });
-      notes.push(`A(z) ${languageName(item.language)} hang kimarad: ${profile === "ncore" ? "az nCore csak magyar, angol, német és eredeti nyelvű hangot enged" : "Aitheren csak az eredeti és az angol hang mehet"}.`);
+      notes.push(t(
+        `A(z) ${languageName(item.language)} hang kimarad: ${profile === "ncore" ? "az nCore csak magyar, angol, német és eredeti nyelvű hangot enged" : "Aitheren csak az eredeti és az angol hang mehet"}.`,
+        `The ${languageName(item.language)} audio is omitted: ${profile === "ncore" ? "nCore only allows Hungarian, English, German and original-language audio" : "Aither only allows the original and English audio"}.`,
+      ));
       continue;
     }
     const family = audioCodecFamily(item.stream.codec, item.stream.codec_profile);
     if (profile === "ncore" && encoder === "x264" && actionOf(item) === "copy" && NCORE_1080P_FORBIDDEN.has(family)) {
       update(item.track.stream_id, { action: "eac3" });
-      notes.push(`A(z) ${languageName(item.language)} ${item.stream.codec_profile || item.stream.codec} sáv E-AC3 (DD+) 5.1, 1024 kbps lesz: 1080p-n az nCore nem engedi a veszteségmentes hangot.${(item.stream.channels ?? 0) > 6 ? " A 7.1 5.1-re keveredik (FFmpeg-gel 7.1-es E-AC3 nem készíthető)." : ""}`);
+      const downmix = (item.stream.channels ?? 0) > 6;
+      notes.push(t(
+        `A(z) ${languageName(item.language)} ${item.stream.codec_profile || item.stream.codec} sáv E-AC3 (DD+) 5.1, 1024 kbps lesz: 1080p-n az nCore nem engedi a veszteségmentes hangot.${downmix ? " A 7.1 5.1-re keveredik (FFmpeg-gel 7.1-es E-AC3 nem készíthető)." : ""}`,
+        `The ${languageName(item.language)} ${item.stream.codec_profile || item.stream.codec} track becomes E-AC3 (DD+) 5.1, 1024 kbps: nCore does not allow lossless audio at 1080p.${downmix ? " The 7.1 is downmixed to 5.1 (FFmpeg cannot make 7.1 E-AC3)." : ""}`,
+      ));
     }
   }
 
@@ -114,7 +136,10 @@ export function arrangeForTracker(
     compatFor.set(item.track.stream_id, core);
     if (actionOf(core) !== "copy") {
       update(core.track.stream_id, { action: "copy" });
-      notes.push(`A(z) ${languageName(item.language)} TrueHD AC3-magja kompatibilitási sávként megmarad (újrakódolás nélkül).`);
+      notes.push(t(
+        `A(z) ${languageName(item.language)} TrueHD AC3-magja kompatibilitási sávként megmarad (újrakódolás nélkül).`,
+        `The AC3 core of the ${languageName(item.language)} TrueHD is kept as the compatibility track (without re-encoding).`,
+      ));
     }
   }
   const cores = new Set([...compatFor.values()].map((item) => item.track.stream_id));
@@ -135,7 +160,10 @@ export function arrangeForTracker(
     });
   orderedAudio.forEach((item, index) => update(item.track.stream_id, { order: index, default: index === 0 }));
   if (orderedAudio.length && orderedAudio[0].position !== Math.min(...kept.map((item) => item.position))) {
-    notes.push(`Az első és alapértelmezett hang: ${languageName(orderedAudio[0].language)}.`);
+    notes.push(t(
+      `Az első és alapértelmezett hang: ${languageName(orderedAudio[0].language)}.`,
+      `First and default audio: ${languageName(orderedAudio[0].language)}.`,
+    ));
   }
 
   const subtitles = entries(tracks, playlist, "subtitle");
@@ -151,7 +179,10 @@ export function arrangeForTracker(
     if (item.track.action === "omit") return false;
     if (profile === "ncore" && item.track.subtitle_kind === "forced" && !dubbed.has(item.language)) {
       update(item.track.stream_id, { action: "omit" });
-      notes.push(`A(z) ${languageName(item.language)} forced felirat kimarad: az nCore csak szinkronnal rendelkező nyelvhez enged forced feliratot.`);
+      notes.push(t(
+        `A(z) ${languageName(item.language)} forced felirat kimarad: az nCore csak szinkronnal rendelkező nyelvhez enged forced feliratot.`,
+        `The ${languageName(item.language)} forced subtitle is omitted: nCore only allows forced subtitles for a language with a dub.`,
+      ));
       return false;
     }
     return true;

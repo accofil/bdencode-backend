@@ -21,7 +21,7 @@ from . import __version__
 from .audio import AUDIO_ACTIONS, audio_presets_payload
 from .capabilities import dynamic_hdr_support
 from .crf_search import AutoCrfConfig
-from .i18n import parse_accept_language, reset_language, set_language
+from .i18n import parse_accept_language, reset_language, set_language, t
 from .ai_recommendation import (
     AIRecommendationError,
     AIRecommendationRequest,
@@ -612,8 +612,12 @@ def create_app(
         directory = credential_request_directory()
         if directory is None:
             raise ConfigurationError(
-                "Ezen a szerveren a kulcs a weboldalról nem állítható be; "
-                "használd a README 5.2.1. pontjában leírt parancsot.",
+                t(
+                    "Ezen a szerveren a kulcs a weboldalról nem állítható be; "
+                    "használd a README 5.2.1. pontjában leírt parancsot.",
+                    "The key cannot be set from the web page on this server; use the "
+                    "command described in README section 9 (docs/REFERENCE.md 5.2.1).",
+                ),
                 code="ai_key_management_unavailable",
             )
         try:

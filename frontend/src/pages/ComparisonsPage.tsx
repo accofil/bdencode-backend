@@ -4,6 +4,7 @@ import { Link } from "react-router";
 import { api } from "../api/client";
 import type { JobState } from "../api/types";
 import { Badge, Card, EmptyState, LoadingPanel, PageHeader } from "../components/ui";
+import { t } from "../i18n";
 import { formatDate } from "../utils";
 
 const states: JobState[] = ["COMPLETED", "UPLOAD_FAILED"];
@@ -13,9 +14,9 @@ export function ComparisonsPage() {
   return (
     <div className="page">
       <PageHeader
-        eyebrow="Minőség-ellenőrzés"
-        title="Összehasonlítások"
-        description="I/P/B framepárok, veszteségmentes PNG-k, spektrális hangelemzés és BBCode egy helyen."
+        eyebrow={t("Minőség-ellenőrzés", "Quality check")}
+        title={t("Összehasonlítások", "Comparisons")}
+        description={t("I/P/B framepárok, veszteségmentes PNG-k, spektrális hangelemzés és BBCode egy helyen.", "I/P/B frame pairs, lossless PNGs, spectral audio analysis and BBCode in one place.")}
       />
       {jobs.isLoading ? <LoadingPanel /> : jobs.data?.items.length ? (
         <div className="comparison-job-grid">
@@ -26,16 +27,16 @@ export function ComparisonsPage() {
                 <div className="comparison-job-card__frames"><b>I</b><b>P</b><b>B</b></div>
               </div>
               <div className="comparison-job-card__body">
-                <div><Badge tone={job.state === "COMPLETED" ? "success" : "warning"}>{job.state === "COMPLETED" ? "Elkészült" : "Feltöltésre vár"}</Badge><small>{formatDate(job.finished_at || job.updated_at)}</small></div>
+                <div><Badge tone={job.state === "COMPLETED" ? "success" : "warning"}>{job.state === "COMPLETED" ? t("Elkészült", "Finished") : t("Feltöltésre vár", "Waiting for upload")}</Badge><small>{formatDate(job.finished_at || job.updated_at)}</small></div>
                 <h2>{job.name}</h2>
-                <p>Source/encode képpárok és audióspektrumok</p>
-                <Link className="text-link" to={`/jobs/${job.id}?tab=comparison`}>Comparison megnyitása <ArrowRight size={15} /></Link>
+                <p>{t("Source/encode képpárok és audióspektrumok", "Source/encode image pairs and audio spectra")}</p>
+                <Link className="text-link" to={`/jobs/${job.id}?tab=comparison`}>{t("Comparison megnyitása", "Open comparison")} <ArrowRight size={15} /></Link>
               </div>
             </Card>
           ))}
         </div>
       ) : (
-        <EmptyState icon={<Images size={30} />} title="Még nincs elkészült comparison" description="Minden lezárt encode automatikusan ide kerül az I/P/B és audióelemzésekkel." action={<Link className="button button--secondary" to="/new"><CirclePlus size={17} /> Új kódolás</Link>} />
+        <EmptyState icon={<Images size={30} />} title={t("Még nincs elkészült comparison", "No finished comparison yet")} description={t("Minden lezárt encode automatikusan ide kerül az I/P/B és audióelemzésekkel.", "Every closed encode lands here automatically with its I/P/B and audio analyses.")} action={<Link className="button button--secondary" to="/new"><CirclePlus size={17} /> {t("Új kódolás", "New encode")}</Link>} />
       )}
     </div>
   );

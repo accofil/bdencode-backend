@@ -2,6 +2,7 @@ import { ArrowRight, Check, Clock3, Disc3, MoreHorizontal, Pause, Play } from "l
 import { useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router";
 import type { Job } from "../api/types";
+import { locale, t } from "../i18n";
 import { contentLabel, formatDate, formatStatusMessage, stageProgress, stateLabel, stateTone } from "../utils";
 import { Badge, ProgressBar } from "./ui";
 
@@ -18,17 +19,19 @@ export interface JobCardProps {
   pendingAction?: string | null;
 }
 
-const ACTION_LABELS: Record<string, string> = {
-  pause: "Szüneteltetés",
-  resume: "Folytatás",
-  cancel: "Megszakítás",
-  retry_failed: "Folytatás a hibától",
-  restart_cancelled: "Újraindítás",
-  cleanup: "Takarítás",
-  delete: "Törlés",
-  prepare_release: "Release előkészítése",
-  delete_release: "Completed release törlése",
-};
+function actionLabels(): Record<string, string> {
+  return {
+    pause: t("Szüneteltetés", "Pause"),
+    resume: t("Folytatás", "Resume"),
+    cancel: t("Megszakítás", "Cancel"),
+    retry_failed: t("Folytatás a hibától", "Continue from the error"),
+    restart_cancelled: t("Újraindítás", "Restart"),
+    cleanup: t("Takarítás", "Clean up"),
+    delete: t("Törlés", "Delete"),
+    prepare_release: t("Release előkészítése", "Prepare release"),
+    delete_release: t("Completed release törlése", "Delete completed release"),
+  };
+}
 
 function jobControl(job: Job): ControllableJob {
   return job as ControllableJob;
@@ -36,9 +39,9 @@ function jobControl(job: Job): ControllableJob {
 
 function statusPresentation(job: Job) {
   const controlState = jobControl(job).control_state;
-  if (controlState === "PAUSED") return { label: "Szüneteltetve", tone: "warning" as const };
-  if (controlState === "PAUSE_REQUESTED") return { label: "Szüneteltetés folyamatban", tone: "warning" as const };
-  if (controlState === "CANCEL_REQUESTED") return { label: "Megszakítás folyamatban", tone: "danger" as const };
+  if (controlState === "PAUSED") return { label: t("Szüneteltetve", "Paused"), tone: "warning" as const };
+  if (controlState === "PAUSE_REQUESTED") return { label: t("Szüneteltetés folyamatban", "Pausing"), tone: "warning" as const };
+  if (controlState === "CANCEL_REQUESTED") return { label: t("Megszakítás folyamatban", "Cancelling"), tone: "danger" as const };
   return { label: stateLabel(job.state), tone: stateTone(job.state) };
 }
 
@@ -66,6 +69,7 @@ function JobActionControls({
       : null;
   const menuActions = allowedOperations.filter((operation) => operation !== quickAction);
   const busy = pendingAction != null;
+  const labels = actionLabels();
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -106,8 +110,8 @@ function JobActionControls({
         <button
           type="button"
           className="job-card__quick icon-button"
-          aria-label={`${job.name}: ${ACTION_LABELS[quickAction].toLocaleLowerCase("hu-HU")}`}
-          title={ACTION_LABELS[quickAction]}
+          aria-label={`${job.name}: ${labels[quickAction].toLocaleLowerCase(locale())}`}
+          title={labels[quickAction]}
           disabled={busy}
           onClick={() => runAction(quickAction)}
         >
@@ -120,7 +124,7 @@ function JobActionControls({
             ref={triggerRef}
             type="button"
             className="job-card__menu-trigger icon-button"
-            aria-label={`${job.name}: további műveletek`}
+            aria-label={`${job.name}: ${t("további műveletek", "more actions")}`}
             aria-haspopup="menu"
             aria-expanded={menuOpen}
             aria-controls={menuId}
@@ -139,7 +143,7 @@ function JobActionControls({
             <MoreHorizontal size={17} aria-hidden="true" />
           </button>
           {menuOpen && (
-            <div id={menuId} className="job-card__menu" role="menu" aria-label={`${job.name} műveletei`}>
+            <div id={menuId} className="job-card__menu" role="menu" aria-label={t(`${job.name} műveletei`, `${job.name} actions`)}>
               {menuActions.map((action, index) => (
                 <button
                   key={action}
@@ -169,7 +173,7 @@ function JobActionControls({
                     }
                   }}
                 >
-                  {ACTION_LABELS[action] ?? action}
+                  {labels[action] ?? action}
                 </button>
               ))}
             </div>
@@ -186,7 +190,7 @@ export function JobCard({ job, compact = false, onAction, pendingAction }: JobCa
   const status = statusPresentation(job);
   return (
     <article className={compact ? "job-row" : "job-card"} aria-labelledby={titleId}>
-      <Link to={`/jobs/${encodeURIComponent(job.id)}`} className="job-card__details" aria-label={`${job.name} részletei`}>
+      <Link to={`/jobs/${encodeURIComponent(job.id)}`} className="job-card__details" aria-label={t(`${job.name} részletei`, `${job.name} details`)}>
         <div className="job-card__icon" aria-hidden="true">
           <Disc3 size={compact ? 20 : 24} />
         </div>
@@ -194,7 +198,7 @@ export function JobCard({ job, compact = false, onAction, pendingAction }: JobCa
           <div className="job-card__heading">
             <div>
               <strong id={titleId}>{job.name}</strong>
-              <span>{contentLabel(job.content_type)} · {job.disc_type === "AUTO" ? "Automatikus lemeztípus" : job.disc_type}</span>
+              <span>{contentLabel(job.content_type)} · {job.disc_type === "AUTO" ? t("Automatikus lemeztípus", "Automatic disc type") : job.disc_type}</span>
             </div>
             <Badge tone={status.tone}>{status.label}</Badge>
           </div>
@@ -203,7 +207,7 @@ export function JobCard({ job, compact = false, onAction, pendingAction }: JobCa
               <ProgressBar value={progress} />
               <div className="job-card__meta">
                 <span><Clock3 size={14} aria-hidden="true" /> {formatDate(job.updated_at)}</span>
-                <span className="job-card__message">{formatStatusMessage(job.status_message, "Munkafolyamat előkészítve")}</span>
+                <span className="job-card__message">{formatStatusMessage(job.status_message, t("Munkafolyamat előkészítve", "Workflow prepared"))}</span>
               </div>
             </>
           )}
@@ -218,13 +222,13 @@ export function JobCard({ job, compact = false, onAction, pendingAction }: JobCa
 export function PipelineSteps({ job }: { job: Job }) {
   const stages = [
     ["SCANNING", "Scan"],
-    ["READY", "Sorban áll"],
-    ["ENCODING", "Kódolás"],
+    ["READY", t("Sorban áll", "Queued")],
+    ["ENCODING", t("Kódolás", "Encode")],
     ["MUXING", "Mux"],
     ["QC", "QC"],
     ["COMPARISON", "Comparison"],
-    ["UPLOADING", "Feltöltés"],
-    ["COMPLETED", "Kész"],
+    ["UPLOADING", t("Feltöltés", "Upload")],
+    ["COMPLETED", t("Kész", "Done")],
   ] as const;
   const order = stages.map(([state]) => state);
   const controlState = jobControl(job).control_state;
@@ -243,7 +247,7 @@ export function PipelineSteps({ job }: { job: Job }) {
   const inferred = effectiveIndex >= 0 ? effectiveIndex : 0;
 
   return (
-    <ol className="pipeline" aria-label="Kódolási folyamat">
+    <ol className="pipeline" aria-label={t("Kódolási folyamat", "Encoding pipeline")}>
       {stages.map(([state, label], index) => {
         const complete = job.state === "COMPLETED" || inferred > index;
         const active = job.state !== "COMPLETED" && (paused ? index === inferred : state === job.state);
@@ -253,7 +257,7 @@ export function PipelineSteps({ job }: { job: Job }) {
             className={complete ? "pipeline__step pipeline__step--complete" : active ? "pipeline__step pipeline__step--active" : "pipeline__step"}
             aria-current={active ? "step" : undefined}
           >
-            <span {...(complete ? { role: "img", "aria-label": "Kész" } : {})}>{complete ? <Check size={13} aria-hidden="true" /> : index + 1}</span>
+            <span {...(complete ? { role: "img", "aria-label": t("Kész", "Done") } : {})}>{complete ? <Check size={13} aria-hidden="true" /> : index + 1}</span>
             <small>{label}</small>
           </li>
         );

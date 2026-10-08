@@ -5,7 +5,7 @@ nCore's wiki: upload rules, dupe rules and torrent names) and from the
 Hungarian release standard nCore points to (github.com/encoding-hun/
 rules-and-standards).  BDEncode never blocks a job on them: the wizard
 proposes a compliant plan, and these findings explain every remaining
-deviation in Hungarian, before the encode starts.
+deviation in the interface language, before the encode starts.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from typing import Sequence
 
 from .media.bluray import MediaStream, PlaylistCandidate, StreamKind, TrackRole
 from .media.planner import TrackAction, TrackSelection
+from .i18n import t
 from .release_naming import AUDIO_CODEC_LABELS, audio_codec_family, channel_layout
 
 
@@ -72,10 +73,25 @@ _LANGUAGE_NAMES = {
     "cs": "cseh",
     "und": "ismeretlen nyelvű",
 }
+_LANGUAGE_NAMES_EN = {
+    "hu": "Hungarian",
+    "en": "English",
+    "de": "German",
+    "fr": "French",
+    "it": "Italian",
+    "es": "Spanish",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "zh": "Chinese",
+    "ru": "Russian",
+    "pl": "Polish",
+    "cs": "Czech",
+    "und": "undetermined-language",
+}
 
 
 def _language_name(code: str) -> str:
-    return _LANGUAGE_NAMES.get(code, code)
+    return t(_LANGUAGE_NAMES.get(code, code), _LANGUAGE_NAMES_EN.get(code, code))
 
 
 def _planned(
@@ -159,25 +175,39 @@ def _ncore(encoder: str, planned: Sequence[_Planned]) -> list[TrackerFinding]:
             findings.append(
                 TrackerFinding(
                     "ncore_audio_format",
-                    f"{_label(item.codec)} hang ({name}) {resolution}-es nCore-encode-on nem "
-                    "engedett; javasolt: E-AC3 (DD+) 5.1, 1024 kbps."
+                    t(
+                        f"{_label(item.codec)} hang ({name}) {resolution}-es nCore-encode-on nem "
+                        "engedett; javasolt: E-AC3 (DD+) 5.1, 1024 kbps.",
+                        f"{_label(item.codec)} audio ({name}) is not allowed in a {resolution} "
+                        "nCore encode; suggested: E-AC3 (DD+) 5.1, 1024 kbps.",
+                    )
                     if not uhd
-                    else f"{_label(item.codec)} hang ({name}) az nCore-on nem engedett; "
-                    "a többcsatornás LPCM-et TrueHD-, DTS-HD MA- vagy E-AC3-sávvá kell alakítani.",
+                    else t(
+                        f"{_label(item.codec)} hang ({name}) az nCore-on nem engedett; "
+                        "a többcsatornás LPCM-et TrueHD-, DTS-HD MA- vagy E-AC3-sávvá kell alakítani.",
+                        f"{_label(item.codec)} audio ({name}) is not allowed on nCore; "
+                        "convert multichannel LPCM to TrueHD, DTS-HD MA or E-AC3.",
+                    ),
                 )
             )
         elif item.codec in {"FLAC", "AAC"} and (item.channels or 0) > 2:
             findings.append(
                 TrackerFinding(
                     "ncore_audio_format",
-                    f"{_label(item.codec)} hang ({name}) az nCore-on legfeljebb 2.0 lehet.",
+                    t(
+                        f"{_label(item.codec)} hang ({name}) az nCore-on legfeljebb 2.0 lehet.",
+                        f"{_label(item.codec)} audio ({name}) may be at most 2.0 on nCore.",
+                    ),
                 )
             )
         elif item.codec == "FLAC" and not uhd and not item.source_lossless_stereo:
             findings.append(
                 TrackerFinding(
                     "ncore_audio_format",
-                    f"FLAC ({name}) 1080p-n csak legfeljebb 2.0-s veszteségmentes forrásból mehet.",
+                    t(
+                        f"FLAC ({name}) 1080p-n csak legfeljebb 2.0-s veszteségmentes forrásból mehet.",
+                        f"FLAC ({name}) at 1080p is only allowed from a lossless source of at most 2.0.",
+                    ),
                 )
             )
         if item.codec in NCORE_NEEDS_COMPAT and not item.commentary:
@@ -191,8 +221,12 @@ def _ncore(encoder: str, planned: Sequence[_Planned]) -> list[TrackerFinding]:
                 findings.append(
                     TrackerFinding(
                         "ncore_compat_missing",
-                        f"{_label(item.codec)} ({name}) mellé kötelező egy DD@640 "
-                        "(2.0 esetén DD@256 vagy AAC) kompatibilitási sáv.",
+                        t(
+                            f"{_label(item.codec)} ({name}) mellé kötelező egy DD@640 "
+                            "(2.0 esetén DD@256 vagy AAC) kompatibilitási sáv.",
+                            f"{_label(item.codec)} ({name}) requires a DD@640 "
+                            "(for 2.0: DD@256 or AAC) compatibility track.",
+                        ),
                     )
                 )
         if (
@@ -215,16 +249,24 @@ def _ncore(encoder: str, planned: Sequence[_Planned]) -> list[TrackerFinding]:
             findings.append(
                 TrackerFinding(
                     "ncore_channels",
-                    f"A(z) {name} hang {channel_layout(item.source_channels) or item.source_channels} "
-                    f"helyett {channel_layout(item.channels) or item.channels} lett; az nCore a forrás "
-                    "csatornaszámát kéri (7.1-es E-AC3 FFmpeg-gel nem készíthető).",
+                    t(
+                        f"A(z) {name} hang {channel_layout(item.source_channels) or item.source_channels} "
+                        f"helyett {channel_layout(item.channels) or item.channels} lett; az nCore a forrás "
+                        "csatornaszámát kéri (7.1-es E-AC3 FFmpeg-gel nem készíthető).",
+                        f"The {name} audio became {channel_layout(item.channels) or item.channels} "
+                        f"instead of {channel_layout(item.source_channels) or item.source_channels}; "
+                        "nCore asks for the source channel count (FFmpeg cannot make 7.1 E-AC3).",
+                    ),
                 )
             )
         if item.commentary and (item.codec not in {"DD", "AAC"} or (item.channels or 0) > 2):
             findings.append(
                 TrackerFinding(
                     "ncore_commentary",
-                    "A magyar szabvány szerint a kommentár csak AC3 (DD) vagy AAC lehet, legfeljebb 2.0.",
+                    t(
+                        "A magyar szabvány szerint a kommentár csak AC3 (DD) vagy AAC lehet, legfeljebb 2.0.",
+                        "Under the Hungarian standard, commentary may only be AC3 (DD) or AAC, at most 2.0.",
+                    ),
                     "info",
                 )
             )
@@ -235,8 +277,12 @@ def _ncore(encoder: str, planned: Sequence[_Planned]) -> list[TrackerFinding]:
         findings.append(
             TrackerFinding(
                 "ncore_language",
-                f"{_language_name(language).capitalize()} hang az nCore-on nem mehet "
-                "(csak magyar, angol, német és az eredeti nyelv).",
+                t(
+                    f"{_language_name(language).capitalize()} hang az nCore-on nem mehet "
+                    "(csak magyar, angol, német és az eredeti nyelv).",
+                    f"{_language_name(language).capitalize()} audio is not allowed on nCore "
+                    "(only Hungarian, English, German and the original language).",
+                ),
             )
         )
     spoken = [item for item in audio if not item.commentary]
@@ -244,8 +290,12 @@ def _ncore(encoder: str, planned: Sequence[_Planned]) -> list[TrackerFinding]:
         findings.append(
             TrackerFinding(
                 "ncore_order",
-                "A magyar hangnak kell az első és alapértelmezett sávnak lennie; utána az eredeti, "
-                "az angol, végül a kommentár.",
+                t(
+                    "A magyar hangnak kell az első és alapértelmezett sávnak lennie; utána az eredeti, "
+                    "az angol, végül a kommentár.",
+                    "The Hungarian audio must be the first and default track, followed by the original, "
+                    "the English, and finally the commentary.",
+                ),
             )
         )
     total = 1 + len(audio) + len(subtitles)
@@ -253,8 +303,12 @@ def _ncore(encoder: str, planned: Sequence[_Planned]) -> list[TrackerFinding]:
         findings.append(
             TrackerFinding(
                 "ncore_track_count",
-                f"{total} sáv lenne a fájlban; az nCore legfeljebb {NCORE_MAX_TRACKS}-ot enged "
-                "(videó, hang és felirat együtt).",
+                t(
+                    f"{total} sáv lenne a fájlban; az nCore legfeljebb {NCORE_MAX_TRACKS}-ot enged "
+                    "(videó, hang és felirat együtt).",
+                    f"The file would have {total} tracks; nCore allows at most {NCORE_MAX_TRACKS} "
+                    "(video, audio and subtitles together).",
+                ),
             )
         )
 
@@ -263,8 +317,12 @@ def _ncore(encoder: str, planned: Sequence[_Planned]) -> list[TrackerFinding]:
         findings.append(
             TrackerFinding(
                 "ncore_forced_without_dub",
-                f"Kiegészítő (forced) {_language_name(language)} felirat csak akkor mehet, "
-                f"ha van {_language_name(language)} szinkron is.",
+                t(
+                    f"Kiegészítő (forced) {_language_name(language)} felirat csak akkor mehet, "
+                    f"ha van {_language_name(language)} szinkron is.",
+                    f"A forced {_language_name(language)} subtitle is only allowed "
+                    f"when there is a {_language_name(language)} dub too.",
+                ),
             )
         )
 
@@ -281,16 +339,24 @@ def _ncore(encoder: str, planned: Sequence[_Planned]) -> list[TrackerFinding]:
         findings.append(
             TrackerFinding(
                 "ncore_subtitle_order",
-                "Feliratsorrend: magyar forced, magyar, magyar SDH, eredeti forced, eredeti, "
-                "eredeti SDH, végül a többi.",
+                t(
+                    "Feliratsorrend: magyar forced, magyar, magyar SDH, eredeti forced, eredeti, "
+                    "eredeti SDH, végül a többi.",
+                    "Subtitle order: Hungarian forced, Hungarian, Hungarian SDH, original forced, "
+                    "original, original SDH, then the rest.",
+                ),
             )
         )
     if any(item.pgs for item in subtitles):
         findings.append(
             TrackerFinding(
                 "ncore_pgs",
-                "PGS felirat marad: az nCore elfogadja, de a magyar encode-szabvány SRT-t kér "
-                "(x264 HD-nél PGS nem is engedett).",
+                t(
+                    "PGS felirat marad: az nCore elfogadja, de a magyar encode-szabvány SRT-t kér "
+                    "(x264 HD-nél PGS nem is engedett).",
+                    "PGS subtitles remain: nCore accepts them, but the Hungarian encode standard asks "
+                    "for SRT (PGS is not even allowed for x264 HD).",
+                ),
                 "info",
             )
         )
@@ -307,8 +373,12 @@ def _aither(planned: Sequence[_Planned]) -> list[TrackerFinding]:
         findings.append(
             TrackerFinding(
                 "aither_language",
-                f"Aitheren csak az eredeti nyelvű és az angol hang mehet (plusz kommentár); "
-                f"a(z) {_language_name(language)} sávot ki kell hagyni.",
+                t(
+                    f"Aitheren csak az eredeti nyelvű és az angol hang mehet (plusz kommentár); "
+                    f"a(z) {_language_name(language)} sávot ki kell hagyni.",
+                    "Aither only allows original-language and English audio (plus commentary); "
+                    f"omit the {_language_name(language)} track.",
+                ),
             )
         )
     for item in audio:
@@ -322,8 +392,12 @@ def _aither(planned: Sequence[_Planned]) -> list[TrackerFinding]:
             findings.append(
                 TrackerFinding(
                     "aither_compat_missing",
-                    f"A TrueHD ({_language_name(item.language)}) mellé önálló DD vagy DD+ "
-                    "kompatibilitási sáv kell.",
+                    t(
+                        f"A TrueHD ({_language_name(item.language)}) mellé önálló DD vagy DD+ "
+                        "kompatibilitási sáv kell.",
+                        f"TrueHD ({_language_name(item.language)}) needs a separate DD or DD+ "
+                        "compatibility track.",
+                    ),
                 )
             )
     english_audio = any(item.language == "en" and not item.commentary for item in audio)
@@ -334,7 +408,10 @@ def _aither(planned: Sequence[_Planned]) -> list[TrackerFinding]:
         findings.append(
             TrackerFinding(
                 "aither_english_subtitles",
-                "Nincs angol hang, ezért angol (teljes) felirat kötelező.",
+                t(
+                    "Nincs angol hang, ezért angol (teljes) felirat kötelező.",
+                    "There is no English audio, so full English subtitles are required.",
+                ),
             )
         )
     return findings

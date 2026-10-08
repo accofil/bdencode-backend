@@ -2,7 +2,7 @@
 
 The worker writes two small JSON files below ``<job>/.live``:
 
-* ``step.json``: the running step (key, Hungarian label, fraction or ``None``
+* ``step.json``: the running step (key, label, fraction or ``None``
   when it cannot be measured, detail text, elapsed/ETA, optional metrics and
   side tasks running beside it, such as the source index or the integrity
   decode);
@@ -11,6 +11,11 @@ The worker writes two small JSON files below ``<job>/.live``:
 Files instead of database rows: updates arrive every second or two from
 long-running commands, and the API only needs to read them while a page is
 open.  Writing them is best effort: progress reporting never fails a job.
+
+Labels and details are stored in both interface languages (``{"hu": ..., "en":
+...}``, see :mod:`bdencode.i18n`) and resolved to the request's language when
+the API reads them; plain strings (language-neutral texts, and files written
+before 3.6) are served unchanged.
 """
 
 from __future__ import annotations
@@ -21,8 +26,9 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TypeAlias
 
+from .i18n import bilingual, pick
 from .utils import atomic_write_json
 
 LOG = logging.getLogger(__name__)
@@ -34,6 +40,17 @@ _OUT_TIME_US = re.compile(rb"out_time_(?:us|ms)=(\d+)")
 _STATS_TIME = re.compile(rb"time=(\d+):(\d{2}):(\d{2}(?:\.\d+)?)")
 _CROP_TIME = re.compile(rb"\bt:(\d+(?:\.\d+)?)")
 _PERCENT = re.compile(rb"(\d{1,3}(?:\.\d+)?)\s*%")
+
+# A live text: a ``(hungarian, english)`` pair, or a language-neutral string.
+LiveText: TypeAlias = str | tuple[str, str]
+
+
+def _stored(text: LiveText | None) -> str | dict[str, str] | None:
+    """The JSON form of a live text: both languages, or the plain string."""
+
+    if isinstance(text, tuple):
+        return bilingual(*text)
+    return text
 
 
 def _tail(path: Path, size: int = _TAIL_BYTES) -> bytes:
@@ -106,15 +123,15 @@ class LiveProgress:
         self._last_write = 0.0
 
     # -- the running step ---------------------------------------------------
-    def start(self, key: str, label: str, *, detail: str | None = None) -> None:
+    def start(self, key: str, label: LiveText, *, detail: LiveText | None = None) -> None:
         with self._lock:
             now = self.clock()
             self._step = {
                 "schema_version": LIVE_SCHEMA,
                 "key": key,
-                "label": label,
+                "label": _stored(label),
                 "fraction": None,
-                "detail": detail,
+                "detail": _stored(detail),
                 "started_at": now,
                 "updated_at": now,
                 "eta_seconds": None,
@@ -127,7 +144,7 @@ class LiveProgress:
         self,
         fraction: float | None = None,
         *,
-        detail: str | None = None,
+        detail: LiveText | None = None,
         metrics: dict[str, Any] | None = None,
         force: bool = False,
     ) -> None:
@@ -149,13 +166,15 @@ class LiveProgress:
                     else None
                 )
             if detail is not None:
-                step["detail"] = detail
+                step["detail"] = _stored(detail)
             if metrics:
                 step["metrics"].update(metrics)
             step["updated_at"] = now
             self._write(force=force)
 
-    def side(self, key: str, label: str, fraction: float | None, *, done: bool = False) -> None:
+    def side(
+        self, key: str, label: LiveText, fraction: float | None, *, done: bool = False
+    ) -> None:
         """A task running beside the step (shown as a secondary bar)."""
 
         with self._lock:
@@ -163,7 +182,7 @@ class LiveProgress:
             if step is None:
                 return
             step["side"][key] = {
-                "label": label,
+                "label": _stored(label),
                 "fraction": None if fraction is None else min(1.0, max(0.0, fraction)),
                 "done": done,
             }
@@ -246,8 +265,27 @@ class LiveProgress:
             LOG.debug("live progress write failed", exc_info=True)
 
 
+def _resolved_step(step: dict[str, Any]) -> dict[str, Any]:
+    """``step`` with its texts in the current interface language."""
+
+    resolved = {**step, "label": pick(step.get("label"))}
+    if "detail" in step:
+        resolved["detail"] = pick(step["detail"])
+    side = step.get("side")
+    if isinstance(side, dict):
+        resolved["side"] = {
+            key: {**item, "label": pick(item.get("label"))} if isinstance(item, dict) else item
+            for key, item in side.items()
+        }
+    return resolved
+
+
 def read_live(root: Path) -> dict[str, Any]:
-    """The live step (or ``None``) and the finished steps, for the API."""
+    """The live step (or ``None``) and the finished steps, for the API.
+
+    Bilingual labels and details come back as plain strings in the current
+    interface language.
+    """
 
     def load(name: str) -> Any:
         try:
@@ -259,6 +297,10 @@ def read_live(root: Path) -> dict[str, Any]:
     timeline = load(TIMELINE_FILE)
     steps = timeline.get("steps") if isinstance(timeline, dict) else None
     return {
-        "step": step if isinstance(step, dict) else None,
-        "timeline": steps if isinstance(steps, list) else [],
+        "step": _resolved_step(step) if isinstance(step, dict) else None,
+        "timeline": [
+            _resolved_step(item) if isinstance(item, dict) else item for item in steps
+        ]
+        if isinstance(steps, list)
+        else [],
     }

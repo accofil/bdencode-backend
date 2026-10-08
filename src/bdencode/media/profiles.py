@@ -9,6 +9,8 @@ import math
 import re
 from typing import Any, Mapping
 
+from ..i18n import t
+
 
 class VideoEncoder(StrEnum):
     X264 = "x264"
@@ -245,7 +247,8 @@ def ncore_encoder_policy(
     level 5.1/5.2 high tier, HRD, AUD, repeated headers, a 160 Mb/s VBV,
     limit-refs and lookahead-slices caps; x264: the level's maximum reference
     count).  Quality minimums are reported, never silently changed.  Messages
-    are Hungarian: they are shown to the operator as they are.
+    are in the interface language of the request (Hungarian by default): they
+    are shown to the operator as they are.
     """
 
     replacements: dict[str, Any] = {}
@@ -279,7 +282,13 @@ def ncore_encoder_policy(
             NCORE_X265_VBV_MINIMUM_KBPS <= settings.vbv.maxrate_kbps <= NCORE_X265_VBV_KBPS
             and NCORE_X265_VBV_MINIMUM_KBPS <= settings.vbv.bufsize_kbps <= NCORE_X265_VBV_KBPS
         ):
-            finding("ncore_vbv", "A magyar szabvány szerint a VBV maxrate és bufsize 100000 és 160000 között legyen.")
+            finding(
+                "ncore_vbv",
+                t(
+                    "A magyar szabvány szerint a VBV maxrate és bufsize 100000 és 160000 között legyen.",
+                    "Under the Hungarian standard, VBV maxrate and bufsize must be between 100000 and 160000.",
+                ),
+            )
         limit_refs_maximum = 2 if settings.rect and settings.amp else 1
         if settings.limit_refs is None or settings.limit_refs > limit_refs_maximum:
             change("limit_refs", limit_refs_maximum)
@@ -302,58 +311,180 @@ def ncore_encoder_policy(
                 change("ref", kept)
                 finding(
                     "ncore_ref_level",
-                    f"x265: a ref {settings.ref} helyett {kept} lett, mert a level {level} "
-                    "képpuffere ennél a képméretnél többet nem enged.",
+                    t(
+                        f"x265: a ref {settings.ref} helyett {kept} lett, mert a level {level} "
+                        "képpuffere ennél a képméretnél többet nem enged.",
+                        f"x265: ref became {kept} instead of {settings.ref} because the level {level} "
+                        "picture buffer allows no more at this picture size.",
+                    ),
                     "info",
                 )
         effective_ref = replacements.get("ref", settings.ref)
         if not (4 <= effective_ref <= 6) or (not uhd and effective_ref != 6):
-            finding("ncore_ref", "x265: a ref 4 és 6 között legyen (1080p-n pontosan 6).")
+            finding(
+                "ncore_ref",
+                t(
+                    "x265: a ref 4 és 6 között legyen (1080p-n pontosan 6).",
+                    "x265: ref must be between 4 and 6 (exactly 6 at 1080p).",
+                ),
+            )
         if settings.bframes < 4:
-            finding("ncore_bframes", "x265: legalább 4 egymás utáni B-frame kell (bframes ≥ 4).")
+            finding(
+                "ncore_bframes",
+                t(
+                    "x265: legalább 4 egymás utáni B-frame kell (bframes ≥ 4).",
+                    "x265: at least 4 consecutive B-frames are required (bframes ≥ 4).",
+                ),
+            )
         if settings.rd is not None and settings.rd < 3:
-            finding("ncore_rd", "x265: az rd legalább 3 legyen.")
+            finding(
+                "ncore_rd",
+                t(
+                    "x265: az rd legalább 3 legyen.",
+                    "x265: rd must be at least 3.",
+                ),
+            )
         if settings.max_merge is not None and settings.max_merge < 2:
-            finding("ncore_max_merge", "x265: a max-merge legalább 2 legyen.")
+            finding(
+                "ncore_max_merge",
+                t(
+                    "x265: a max-merge legalább 2 legyen.",
+                    "x265: max-merge must be at least 2.",
+                ),
+            )
         if settings.subme < 3:
-            finding("ncore_subme", "x265: a subme legalább 3 legyen.")
+            finding(
+                "ncore_subme",
+                t(
+                    "x265: a subme legalább 3 legyen.",
+                    "x265: subme must be at least 3.",
+                ),
+            )
         if settings.merange < 32:
-            finding("ncore_merange", "x265: a merange legalább 32 legyen.")
+            finding(
+                "ncore_merange",
+                t(
+                    "x265: a merange legalább 32 legyen.",
+                    "x265: merange must be at least 32.",
+                ),
+            )
         if settings.early_skip:
-            finding("ncore_early_skip", "x265: az early-skip nem lehet bekapcsolva.")
+            finding(
+                "ncore_early_skip",
+                t(
+                    "x265: az early-skip nem lehet bekapcsolva.",
+                    "x265: early-skip must not be enabled.",
+                ),
+            )
         if settings.psy_rd <= 0 or settings.psy_rdoq <= 0:
-            finding("ncore_psy", "x265: a psy-rd és a psy-rdoq nem kapcsolható ki.")
+            finding(
+                "ncore_psy",
+                t(
+                    "x265: a psy-rd és a psy-rdoq nem kapcsolható ki.",
+                    "x265: psy-rd and psy-rdoq cannot be turned off.",
+                ),
+            )
         if settings.weightp <= 0:
-            finding("ncore_weightp", "x265: a weightp kötelező.")
+            finding(
+                "ncore_weightp",
+                t(
+                    "x265: a weightp kötelező.",
+                    "x265: weightp is required.",
+                ),
+            )
         if settings.aq_mode == 0:
-            finding("ncore_aq", "x265: az adaptív kvantálás (aq-mode) kötelező.")
+            finding(
+                "ncore_aq",
+                t(
+                    "x265: az adaptív kvantálás (aq-mode) kötelező.",
+                    "x265: adaptive quantization (aq-mode) is required.",
+                ),
+            )
         if fps and settings.rc_lookahead < fps:
-            finding("ncore_rc_lookahead", "x265: az rc-lookahead nem lehet kisebb az FPS-nél.")
+            finding(
+                "ncore_rc_lookahead",
+                t(
+                    "x265: az rc-lookahead nem lehet kisebb az FPS-nél.",
+                    "x265: rc-lookahead cannot be lower than the FPS.",
+                ),
+            )
         if not settings.hdr10.enabled and settings.bit_depth != 8 and uhd:
-            finding("ncore_sdr_bit_depth", "2160p SDR videó a magyar szabvány szerint csak 8 bites lehet.")
+            finding(
+                "ncore_sdr_bit_depth",
+                t(
+                    "2160p SDR videó a magyar szabvány szerint csak 8 bites lehet.",
+                    "Under the Hungarian standard, 2160p SDR video may only be 8-bit.",
+                ),
+            )
     else:
         if max_reference_frames is not None and settings.ref < max_reference_frames:
             change("ref", max_reference_frames)
             finding(
                 "ncore_ref_raised",
-                f"x264: a ref {settings.ref} helyett {max_reference_frames} lett: a magyar szabvány "
-                "a level 4.1 szerinti legnagyobb referenciaszámot kéri.",
+                t(
+                    f"x264: a ref {settings.ref} helyett {max_reference_frames} lett: a magyar szabvány "
+                    "a level 4.1 szerinti legnagyobb referenciaszámot kéri.",
+                    f"x264: ref became {max_reference_frames} instead of {settings.ref}: the Hungarian "
+                    "standard asks for the largest reference count level 4.1 allows.",
+                ),
                 "info",
             )
         if settings.level not in {None, "4.1", "4.2"}:
-            finding("ncore_level", "x264 1080p: level 4.1 (30 fps felett 4.2) kell.")
+            finding(
+                "ncore_level",
+                t(
+                    "x264 1080p: level 4.1 (30 fps felett 4.2) kell.",
+                    "x264 1080p: level 4.1 (4.2 above 30 fps) is required.",
+                ),
+            )
         if settings.bframes < 5:
-            finding("ncore_bframes", "x264: legalább 5 egymás utáni B-frame kell (bframes ≥ 5).")
+            finding(
+                "ncore_bframes",
+                t(
+                    "x264: legalább 5 egymás utáni B-frame kell (bframes ≥ 5).",
+                    "x264: at least 5 consecutive B-frames are required (bframes ≥ 5).",
+                ),
+            )
         if settings.me not in {"umh", "esa", "tesa"}:
-            finding("ncore_me", "x264: a mozgásbecslés csak umh, esa vagy tesa lehet.")
+            finding(
+                "ncore_me",
+                t(
+                    "x264: a mozgásbecslés csak umh, esa vagy tesa lehet.",
+                    "x264: motion estimation may only be umh, esa or tesa.",
+                ),
+            )
         if settings.merange < 24:
-            finding("ncore_merange", "x264: a merange legalább 24 legyen.")
+            finding(
+                "ncore_merange",
+                t(
+                    "x264: a merange legalább 24 legyen.",
+                    "x264: merange must be at least 24.",
+                ),
+            )
         if settings.subme < 8:
-            finding("ncore_subme", "x264: a subme legalább 8 legyen.")
+            finding(
+                "ncore_subme",
+                t(
+                    "x264: a subme legalább 8 legyen.",
+                    "x264: subme must be at least 8.",
+                ),
+            )
         if fps and settings.rc_lookahead < 2 * fps:
-            finding("ncore_rc_lookahead", "x264: az rc-lookahead legalább az FPS kétszerese legyen.")
+            finding(
+                "ncore_rc_lookahead",
+                t(
+                    "x264: az rc-lookahead legalább az FPS kétszerese legyen.",
+                    "x264: rc-lookahead must be at least twice the FPS.",
+                ),
+            )
         if settings.aq_mode == 0:
-            finding("ncore_aq", "x264: az adaptív kvantálás (aq-mode) kötelező.")
+            finding(
+                "ncore_aq",
+                t(
+                    "x264: az adaptív kvantálás (aq-mode) kötelező.",
+                    "x264: adaptive quantization (aq-mode) is required.",
+                ),
+            )
     effective = replace(settings, **replacements) if replacements else settings
     return effective, {"profile": "ncore", "adjusted": adjusted, "findings": findings}
 

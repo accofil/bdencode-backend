@@ -1,4 +1,5 @@
 import type { DiscScanResult, VideoProperties } from "./api/types";
+import { t } from "./i18n";
 
 export type SourceColorField =
   | "primaries"
@@ -15,12 +16,13 @@ export interface SourceColorMetadata {
   chroma_location: string;
 }
 
+// Getters: every read returns the label in the current interface language.
 export const SOURCE_COLOR_FIELD_LABELS: Record<SourceColorField, string> = {
-  primaries: "Színprimerek",
-  transfer: "Átviteli karakterisztika",
-  matrix: "Mátrixegyütthatók",
-  range: "Jeltartomány",
-  chroma_location: "Chroma-elhelyezés",
+  get primaries() { return t("Színprimerek", "Colour primaries"); },
+  get transfer() { return t("Átviteli karakterisztika", "Transfer characteristics"); },
+  get matrix() { return t("Mátrixegyütthatók", "Matrix coefficients"); },
+  get range() { return t("Jeltartomány", "Signal range"); },
+  get chroma_location() { return t("Chroma-elhelyezés", "Chroma location"); },
 };
 
 const BLOCKING_SOURCE_FIELDS = ["primaries", "transfer", "matrix"] as const;

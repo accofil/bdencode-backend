@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { Route, Routes } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "../api/client";
+import { setLanguage } from "../i18n";
 import { makeJob } from "../test/fixtures";
 import { renderApp } from "../test/render";
 import { JobDetailPage } from "./JobDetailPage";
@@ -216,6 +217,31 @@ describe("JobDetailPage failed-job retry", () => {
     await user.click(within(purgeDialog).getByRole("button", { name: "Munka végleges törlése" }));
     await waitFor(() => expect(api.purgeJob).toHaveBeenCalledWith("job-1", 6));
     second.unmount();
+  });
+
+  it("shows the tabs, the Actions menu and the restart dialog in English", async () => {
+    setLanguage("en", { persist: false });
+    const user = userEvent.setup();
+    vi.mocked(api.job).mockResolvedValue(makeJob({
+      state: "CANCELLED",
+      status_message: "cancelled",
+      error: null,
+      resume_state: null,
+      version: 6,
+    }));
+    renderFailedJob();
+
+    await user.click(await screen.findByText("Actions"));
+    expect(screen.getByRole("tab", { name: "Overview" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Files and logs" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Delete job" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Restart" }));
+    const dialog = screen.getByRole("dialog", { name: "Restart the cancelled job?" });
+    expect(within(dialog).getByText("Earlier results are kept")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Restart" })).toBeInTheDocument();
+    expect(screen.queryByText("Műveletek")).not.toBeInTheDocument();
   });
 
   it("offers a dedicated comparison continuation instead of the selection wizard", async () => {

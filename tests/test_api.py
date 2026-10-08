@@ -268,7 +268,7 @@ def test_health_capabilities_and_job_flow(tmp_path):
     with make_client(tmp_path) as client:
         capabilities = client.get("/api/v1/capabilities")
         assert capabilities.status_code == 200
-        assert capabilities.json()["backend_version"] == "3.5.0"
+        assert capabilities.json()["backend_version"] == "3.6.0"
         assert capabilities.json()["constraints"]["max_active_jobs"] == 1
         assert capabilities.json()["output_video_codecs"] == ["x264", "x265"]
         assert capabilities.json()["audio_actions"] == [
@@ -340,7 +340,7 @@ def test_progress_endpoint_honors_expected_state_and_event_control(tmp_path):
             f"/api/v1/jobs/{job['id']}/progress",
             json={
                 "progress": 0.5,
-                "message": "Videó kódolása: 55.6%",
+                "message": "Encoding video: 55.6%",
                 "expected_state": "ENCODING",
                 "emit_event": False,
             },

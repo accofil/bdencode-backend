@@ -180,7 +180,7 @@ def test_pipeline_progress_baselines_and_updates_are_monotonic(database):
     advanced = database.record_progress(
         job.id,
         0.5,
-        message="Videó kódolása: 55.6%",
+        message="Encoding video: 55.6%",
         expected_state=JobState.ENCODING,
     )
     regressed = database.record_progress(

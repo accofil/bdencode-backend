@@ -2,6 +2,7 @@ import { AlertTriangle, CheckCircle2, Info, LoaderCircle, XCircle } from "lucide
 import { useEffect, useId, useRef } from "react";
 import type { ButtonHTMLAttributes, PropsWithChildren, ReactNode } from "react";
 import clsx from "clsx";
+import { t } from "../i18n";
 
 export function Card({
   children,
@@ -65,7 +66,7 @@ export function ProgressBar({
     <div
       className={clsx("progress-wrap", className)}
       role="progressbar"
-      aria-label={label || ariaLabel || "Folyamat"}
+      aria-label={label || ariaLabel || t("Folyamat", "Progress")}
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={indeterminate ? undefined : percent}
@@ -124,7 +125,7 @@ export function Skeleton({ className }: { className?: string }) {
   return <span className={clsx("skeleton", className)} aria-hidden="true" />;
 }
 
-export function LoadingPanel({ label = "Betöltés…" }: { label?: string }) {
+export function LoadingPanel({ label = t("Betöltés…", "Loading…") }: { label?: string }) {
   return (
     <div className="loading-panel" role="status">
       <LoaderCircle className="spin" size={22} aria-hidden="true" />
@@ -268,7 +269,7 @@ export function Modal({
             type="button"
             className="icon-button"
             onClick={requestClose}
-            aria-label="Bezárás"
+            aria-label={t("Bezárás", "Close")}
             disabled={busy}
           >
             ×
