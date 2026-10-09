@@ -7,7 +7,7 @@ import re
 from dataclasses import asdict, dataclass
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from ..audio import (
     EffectiveAudioPolicy,
@@ -1184,6 +1184,7 @@ def _packet_tail_duration(
     stream_index = _optional_int(stream.get("index"))
     first_pts: Decimal | None = None
     last_end: Decimal | None = None
+    fallback_duration = _mean_packet_spacing(packets_value)
     for index, packet in enumerate(packets_value):
         if not isinstance(packet, Mapping):
             raise ValueError(f"audio packet {index} is malformed")
@@ -1198,6 +1199,11 @@ def _packet_tail_duration(
         if pts is None:
             pts = _decimal_or_none(packet.get("dts_time"))
         packet_duration = _decimal_or_none(packet.get("duration_time"))
+        if packet_duration is None:
+            # FFmpeg 5.1 (Debian 12) prints no packet duration for TrueHD:
+            # its access units are evenly spaced, so the mean spacing of the
+            # timestamps stands in (it only moves the very last endpoint).
+            packet_duration = fallback_duration
         if (
             pts is None
             or packet_duration is None
@@ -1211,6 +1217,25 @@ def _packet_tail_duration(
         last_end = packet_end if last_end is None else max(last_end, packet_end)
     assert first_pts is not None and last_end is not None
     return last_end, first_pts, packet_count
+
+
+def _mean_packet_spacing(packets: Sequence[Any]) -> Decimal | None:
+    """The mean timestamp step of a packet list, or ``None`` without two."""
+
+    stamps = []
+    for packet in packets:
+        if not isinstance(packet, Mapping):
+            return None
+        value = _decimal_or_none(packet.get("pts_time"))
+        if value is None:
+            value = _decimal_or_none(packet.get("dts_time"))
+        if value is None or not value.is_finite():
+            return None
+        stamps.append(value)
+    if len(stamps) < 2:
+        return None
+    spacing = (max(stamps) - min(stamps)) / (len(stamps) - 1)
+    return spacing if spacing > 0 else None
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:

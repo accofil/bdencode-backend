@@ -37,6 +37,11 @@ class _Runner:
         timeout: float = 30,
         check: bool = True,
     ) -> subprocess.CompletedProcess[str]:
+        if argv[0] == "ffmpeg":
+            # A clean frame of the finished MKV, as large as a real picture.
+            seek = argv[argv.index("-ss") + 1].encode()
+            Path(argv[-1]).write_bytes(bytes.fromhex("89504e470d0a1a0a") + b"clean" * 4000 + seek)
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
         assert argv[0] == "mediainfo"
         return subprocess.CompletedProcess(
             argv,
@@ -657,3 +662,60 @@ def test_stable_bounded_read_rejects_a_delete_race(
     monkeypatch.setattr(Path, "lstat", disappearing_lstat)
     with pytest.raises(ReleaseServiceError, match="disappeared"):
         _read_stable_bounded_file(owner, root=root, maximum_bytes=1024)
+
+
+def _labelled_pairs(payload: Path, sizes: list[int]) -> dict[int, str]:
+    """Labelled-only comparison pairs (no tracker profile) with timestamps."""
+
+    comparison = payload.parent / "comparison"
+    digests: dict[int, str] = {}
+    pairs = []
+    for number, size in enumerate(sizes, start=1):
+        encode = comparison / f"pair-{number:02d}-encode.png"
+        encode.write_bytes(bytes.fromhex("89504e470d0a1a0a") + bytes([number]) * size)
+        digests[number] = sha256_file(encode)
+        pairs.append(
+            {
+                "encode_png": encode.name,
+                "encode_sha256": digests[number],
+                "encoded_pts_seconds": f"{number * 100}.000",
+                "category": "B",
+                "presentation_index": number * 2400,
+            }
+        )
+    (comparison / "video-comparison.json").write_text(json.dumps({"pairs": pairs}), encoding="utf-8")
+    return digests
+
+
+def test_a_kit_without_clean_frames_takes_them_from_the_finished_mkv(tmp_path: Path) -> None:
+    service, job_id, payload = _fixture(tmp_path)
+    labelled = _labelled_pairs(payload, [20_000] * 9)
+    commands: list[list[str]] = []
+    real_capture = service.runner.capture
+
+    def capture(argv, **kwargs):
+        commands.append(list(argv))
+        return real_capture(argv, **kwargs)
+
+    service.runner.capture = capture
+    created = service.create(job_id, profile_id="ncore", metadata=_metadata(payload))
+
+    ready = service.build(created.id, expected_version=created.version)
+
+    chosen = _kit_screenshot_digests(service, ready)
+    assert len(chosen) == 3 and not chosen & set(labelled.values())
+    seeks = [command[command.index("-ss") + 1] for command in commands if command[0] == "ffmpeg"]
+    # Spread over the title: first, middle and last comparison moment.
+    assert seeks[:3] == ["100.000", "500.000", "900.000"]
+
+
+def test_black_frames_never_become_screenshots(tmp_path: Path) -> None:
+    from bdencode.release_service import _without_uniform
+
+    big = [tmp_path / f"{index}.png" for index in range(5)]
+    for path in big:
+        path.write_bytes(b"x" * 6_000_000)
+    black = tmp_path / "black.png"
+    black.write_bytes(b"x" * 14_000)
+
+    assert _without_uniform([black, *big]) == big

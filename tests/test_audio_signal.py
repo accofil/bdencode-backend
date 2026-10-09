@@ -369,3 +369,29 @@ def test_analysis_and_verification_are_manifest_serializable() -> None:
     assert source.to_dict()["complete"] is True
     assert result.to_dict()["true_peak_increase_db"] == "0.2"
     assert result.to_dict()["failures"] == []
+
+
+def test_truehd_packets_without_duration_use_their_mean_spacing() -> None:
+    """FFmpeg 5.1 prints no duration_time for TrueHD packets (Debian 12)."""
+
+    import json as json_module
+
+    from bdencode.qc.audio import parse_audio_probe
+
+    step = 1 / 1200
+    packets = [
+        {"stream_index": 1, "pts_time": f"{0.042 + index * step:.6f}", "dts_time": f"{0.042 + index * step:.6f}"}
+        for index in range(12001)
+    ]
+    document = {
+        "packets": packets,
+        "streams": [
+            {"index": 1, "codec_name": "truehd", "codec_type": "audio", "sample_rate": "48000",
+             "channels": 6, "start_time": "0.042000", "nb_read_packets": str(len(packets))}
+        ],
+    }
+
+    probe = parse_audio_probe(json_module.dumps(document))
+
+    assert probe.duration_evidence == "complete_packet_tail"
+    assert abs(float(probe.duration) - 10.000833) < 0.00001
