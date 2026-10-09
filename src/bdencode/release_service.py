@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import threading
 from typing import Any, Callable
 
@@ -90,6 +91,45 @@ def _safe_message(exc: BaseException) -> str:
     # response bodies.  The precise exception remains available to the caller's
     # private traceback; only this bounded classification is persisted/API-visible.
     return f"{type(exc).__name__}: release operation did not complete"
+
+
+# A screenshot far smaller than its siblings is a (near) uniform picture: the
+# black first or last frame of the title, a fade.  Real 1080p frames are
+# megabytes; a black one is a few kilobytes.
+UNIFORM_SCREENSHOT_SHARE = 0.05
+# Clean frames taken from the finished MKV for a release kit, cached so a
+# repeated preflight does not decode them again.
+SCREENSHOT_CACHE_DIR = "release-screenshots"
+SCREENSHOT_EXTRACT_TIMEOUT = 180
+# The tone-mapped view an HDR encode's screenshots use (what a browser shows).
+_HDR_SCREENSHOT_FILTER = (
+    "zscale=t=linear:npl=100,format=gbrpf32le,tonemap=mobius:param=0.3:desat=0,"
+    "zscale=p=bt709:t=bt709:m=bt709:r=tv,format=rgb24"
+)
+
+
+def _without_uniform(paths: list[Path]) -> list[Path]:
+    """Drop the near-uniform (black) pictures of a screenshot set."""
+
+    if len(paths) < 3:
+        return paths
+    sizes = sorted(path.stat().st_size for path in paths)
+    floor = sizes[len(sizes) // 2] * UNIFORM_SCREENSHOT_SHARE
+    return [path for path in paths if path.stat().st_size >= floor]
+
+
+def _spread_order(count: int, wanted: int) -> list[int]:
+    """Indexes spread over ``count`` items first, then every other one."""
+
+    if count <= 0:
+        return []
+    if wanted <= 1 or count == 1:
+        first = [count // 2]
+    else:
+        first = sorted(
+            {round(index * (count - 1) / (wanted - 1)) for index in range(min(wanted, count))}
+        )
+    return first + [index for index in range(count) if index not in first]
 
 
 def _comparison_png(root: Path, item: dict[str, Any], key: str) -> Path | None:
@@ -549,6 +589,7 @@ class ReleaseService:
             raise ReleaseServiceError("video comparison has no screenshot pairs")
         labelled: list[Path] = []
         clean: list[Path] = []
+        moments: list[tuple[str, bool]] = []
         for item in pairs:
             if not isinstance(item, dict):
                 continue
@@ -559,6 +600,9 @@ class ReleaseService:
             )
             if (candidate := _comparison_png(resolved_root, item, key)) is not None:
                 labelled.append(candidate)
+            pts = item.get("encoded_pts_seconds")
+            if isinstance(pts, (str, int, float)) and not isinstance(pts, bool):
+                moments.append((str(pts), key == "encode_sdr_png"))
             # Tracker jobs also keep clean, unlabelled frames for screenshots.
             if (
                 screenshot := _comparison_png(resolved_root, item, "screenshot_png")
@@ -566,7 +610,13 @@ class ReleaseService:
                 clean.append(screenshot)
         maximum = profile.tracker.screenshot_maximum
         minimum = profile.tracker.screenshot_minimum
-        candidates = clean if clean and len(clean) >= minimum else labelled
+        clean = _without_uniform(clean)
+        if len(clean) < minimum:
+            # A job encoded without a tracker profile kept no clean frames:
+            # trackers want screenshots without the comparison labels, so
+            # they come from the finished MKV at the comparison moments.
+            clean = _without_uniform(self._extracted_screenshots(payload, moments, maximum))
+        candidates = clean if len(clean) >= minimum else _without_uniform(labelled)
         if len(candidates) < minimum:
             raise ReleaseServiceError(
                 "completed release has too few validated encode-only screenshots"
@@ -581,6 +631,56 @@ class ReleaseService:
             for index in range(maximum)
         }
         return tuple(candidates[index] for index in sorted(indexes))
+
+    def _screenshot_cache(self, payload: Path) -> Path:
+        details = payload.stat()
+        key = hashlib.sha256(
+            f"{payload}|{details.st_size}|{details.st_mtime_ns}".encode("utf-8")
+        ).hexdigest()[:24]
+        return self.settings.cache_root / SCREENSHOT_CACHE_DIR / key
+
+    def _extracted_screenshots(
+        self, payload: Path, moments: list[tuple[str, bool]], wanted: int
+    ) -> list[Path]:
+        """Clean frames of the finished MKV, spread over the comparison moments.
+
+        Near-black frames are skipped and the next moment is tried, until
+        ``wanted`` usable frames exist.  A failed extraction leaves the frame
+        out; the caller falls back to the labelled comparison frames.
+        """
+
+        if not moments or wanted <= 0:
+            return []
+        cache = self._screenshot_cache(payload)
+        try:
+            cache.mkdir(mode=0o750, parents=True, exist_ok=True)
+        except OSError:
+            return []
+        if _is_link_or_reparse(cache) or not cache.is_dir():
+            return []
+        frames: list[Path] = []
+        for index in _spread_order(len(moments), wanted):
+            if len(_without_uniform(frames)) >= wanted:
+                break
+            pts, hdr = moments[index]
+            output = cache / f"{index + 1:02d}-clean.png"
+            if not output.is_file() or output.stat().st_size == 0:
+                command = [
+                    "ffmpeg", "-nostdin", "-hide_banner", "-v", "error",
+                    "-ss", pts, "-i", str(payload),
+                    "-map", "0:v:0", "-frames:v", "1", "-an", "-sn",
+                    *(["-vf", _HDR_SCREENSHOT_FILTER] if hdr else []),
+                    "-y", str(output),
+                ]
+                try:
+                    self.runner.capture(command, timeout=SCREENSHOT_EXTRACT_TIMEOUT, check=True)
+                except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
+                    continue
+            if output.is_file() and output.stat().st_size > 0:
+                frames.append(output)
+        usable = _without_uniform(frames)
+        ordered = sorted(usable, key=lambda path: path.name)
+        return ordered[:wanted]
 
     def _release_text(self, record: ReleasePreparation) -> tuple[str, str, str]:
         payload = Path(record.payload_path)
@@ -655,7 +755,14 @@ class ReleaseService:
                 nfo=nfo,
                 description_bbcode=description,
                 screenshots=screenshots,
-                screenshot_roots=(payload.parent / "comparison",),
+                screenshot_roots=tuple(
+                    root
+                    for root in (
+                        payload.parent / "comparison",
+                        self._screenshot_cache(payload),
+                    )
+                    if root.is_dir()
+                ),
                 created_at=self._now(),
             )
             ready = self.store.transition(
