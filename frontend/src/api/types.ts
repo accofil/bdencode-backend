@@ -1186,3 +1186,37 @@ export interface BackupList {
   directory: string;
   items: BackupInfo[];
 }
+
+export interface LocalizedPair {
+  hu: string;
+  en: string;
+}
+
+export interface EvaluationSuggestion {
+  field: string;
+  current: number | string | null;
+  value: number;
+  reason: LocalizedPair;
+  estimated_size_change_percent?: number;
+}
+
+export interface JobEvaluation {
+  source: "deterministic" | "openai" | "anthropic";
+  model: string | null;
+  verdict: "transparent" | "good" | "acceptable" | "weak";
+  summary: LocalizedPair;
+  findings: LocalizedPair[];
+  suggestions: EvaluationSuggestion[];
+  confidence: number | null;
+  ai_available: boolean;
+  ai_attempted: boolean;
+  ai_error: string | null;
+  created_at: string;
+  facts: {
+    encoder: string;
+    settings: Record<string, unknown>;
+    sizes: { saving_ratio: number | null; video_kbps: number | null; source_video_kbps: number | null; bits_per_pixel: number | null };
+    metrics: { ssim_mean: number | null; psnr_mean_db: number | null };
+    vmaf: { mean: number | null; one_percent_low: number | null; minimum: number | null };
+  };
+}

@@ -34,6 +34,7 @@ import { Link, useLocation, useNavigate, useParams } from "react-router";
 import { api, ApiError, artifactContentUrl, fetchArtifactText } from "../api/client";
 import type { Artifact, DiscScanResult, EventRecord, Job, JobLive, JobOperation, JobStorageReport, ReleasePreparation, ReleasePreparationList, Scan } from "../api/types";
 import { ComparisonPanel } from "../components/ComparisonPanel";
+import { EvaluationCard } from "../components/EvaluationCard";
 import { PipelineSteps } from "../components/JobCard";
 import { JobStatisticsCard } from "../components/JobStatisticsCard";
 import { LiveStepPanel, StepTimelineCard, useJobLive } from "../components/LiveStep";
@@ -528,7 +529,7 @@ export function JobDetailPage() {
             <EmptyState icon={job.state === "SCANNING" ? <LoaderCircle className="spin" size={28} /> : <Settings2 size={28} />} title={job.state === "SCANNING" ? t("A scan folyamatban van", "The scan is in progress") : t("Még nincs jóváhagyott beállítás", "No approved settings yet")} description={t("A playlist- és sávválasztó a scan befejezése után jelenik meg.", "The playlist and track picker appears once the scan is finished.")} />
           )
         )}
-        {tab === "comparison" && <ComparisonPanel artifacts={artifacts} />}
+        {tab === "comparison" && <><EvaluationCard job={job} /><ComparisonPanel artifacts={artifacts} /></>}
         {tab === "player" && job.state === "COMPLETED" && <PlayerPanel jobId={job.id} />}
         {tab === "release" && <ReleasePanel job={job} outputArtifact={completedOutput} />}
         {tab === "events" && <EventTimeline events={events} loading={eventsQuery.isLoading} />}

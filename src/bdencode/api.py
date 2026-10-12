@@ -9,11 +9,12 @@ import subprocess
 import threading
 import time
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal, Mapping
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, Query, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -29,6 +30,12 @@ from .ai_recommendation import (
     AIRecommendationService,
     AIRecommendationUnavailable,
     RecommendationContext,
+)
+from .comparison_evaluation import (
+    EVALUATION_NAME,
+    collect_facts,
+    deterministic_evaluation,
+    facts_digest,
 )
 from .ai_settings import (
     AIPreferences,
@@ -123,7 +130,7 @@ from .release_service import (
     ReleaseService,
     ReleaseServiceError,
 )
-from .utils import sha256_file
+from .utils import atomic_write_json, sha256_file
 from .worker import (
     ReviewRequired,
     _field_handling,
@@ -235,6 +242,12 @@ class VideoMetricsAcceptRequest(_ApiRequest):
     """Accept the sampled video measurement of the finished encode."""
 
     expected_version: int | None = Field(default=None, ge=1)
+
+
+class EvaluationRequest(_ApiRequest):
+    """Evaluate a finished encode again; with ``use_ai`` the configured AI does it."""
+
+    use_ai: bool = True
 
 
 class ReleasePreparationCreateRequest(_ApiRequest):
@@ -604,6 +617,75 @@ def create_app(
     @application.get(f"{API_PREFIX}/ai-recommendation/status")
     def ai_recommendation_status() -> dict[str, Any]:
         return {**recommendation_service.status(), "key_management": key_management_view()}
+
+    def _evaluation_paths(job_id: str) -> tuple[Path, Path | None]:
+        runtime = configured_settings()
+        job = db.get_job(job_id)
+        if job.state is not JobState.COMPLETED:
+            raise StateConflictError(
+                "only a completed job has an evaluation", current=job.state
+            )
+        output = next(
+            (
+                item
+                for item in db.list_artifacts(job_id=job_id, limit=500)
+                if item.kind is ArtifactKind.OUTPUT
+            ),
+            None,
+        )
+        return runtime.job_root(job_id), Path(output.path).parent if output else None
+
+    def _evaluation_document(
+        job_id: str, *, refresh: bool, use_ai: bool
+    ) -> dict[str, Any]:
+        root, completed = _evaluation_paths(job_id)
+        facts = collect_facts(root, completed)
+        if facts is None:
+            raise HTTPException(
+                status_code=404,
+                detail="the job has no comparison measurements to evaluate",
+            )
+        digest = facts_digest(facts)
+        cache = root / "analysis" / EVALUATION_NAME
+        ai_available = recommendation_service.evaluation_available()
+        if not refresh:
+            try:
+                cached = json.loads(cache.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                cached = None
+            if isinstance(cached, dict) and cached.get("facts_sha256") == digest:
+                return {**cached, "ai_available": ai_available}
+        document = deterministic_evaluation(facts)
+        ai_error: str | None = None
+        if refresh and use_ai and ai_available:
+            try:
+                document = recommendation_service.evaluate_comparison(facts, document)
+            except (AIRecommendationError, AIRecommendationUnavailable) as exc:
+                ai_error = str(exc)[:400]
+        document = {
+            **document,
+            "facts": facts,
+            "facts_sha256": digest,
+            "created_at": datetime.now(UTC).isoformat(),
+            "ai_attempted": bool(refresh and use_ai and ai_available),
+            "ai_error": ai_error,
+        }
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(cache, document)
+        return {**document, "ai_available": ai_available}
+
+    @application.get(f"{API_PREFIX}/jobs/{{job_id}}/evaluation")
+    def job_evaluation(job_id: str) -> dict[str, Any]:
+        """The saved evaluation of a finished encode (deterministic at first)."""
+
+        return _evaluation_document(job_id, refresh=False, use_ai=False)
+
+    @application.post(f"{API_PREFIX}/jobs/{{job_id}}/evaluation")
+    def evaluate_job(job_id: str, request: EvaluationRequest | None = None) -> dict[str, Any]:
+        """Evaluate again: by the configured AI when a key is set, else by the fixed rules."""
+
+        action = request or EvaluationRequest()
+        return _evaluation_document(job_id, refresh=True, use_ai=action.use_ai)
 
     @application.put(f"{API_PREFIX}/system/ai-settings")
     def update_ai_settings(preferences: AIPreferences) -> dict[str, Any]:
