@@ -101,6 +101,20 @@ describe("SystemPage runtime capabilities", () => {
     expect(screen.getByText("Írható").nextElementSibling).toHaveTextContent("Ismeretlen");
   });
 
+  it("keeps the loaded data and says it is reconnecting when the API answers nothing for a moment", async () => {
+    mockRuntime({ host: { logical_cpus: 16 }, tools: { vspipe: { path: "/tools/vspipe", version: "VapourSynth", available: true } }, ffmpeg: { encoders: ["libx264"] } });
+    renderApp(<SystemPage />, "/settings");
+    await screen.findByText("VapourSynth Ismeretlen");
+
+    // The API restarts (a saved key): the next refresh fails.
+    vi.mocked(api.runtimeCapabilities).mockRejectedValue(new Error("Failed to fetch"));
+    fireEvent.click(screen.getByRole("button", { name: "Frissítés" }));
+
+    expect(await screen.findByText("Újracsatlakozás…")).toBeInTheDocument();
+    expect(screen.getByText("VapourSynth Ismeretlen")).toBeInTheDocument();
+    expect(screen.queryByText("A rendszerállapot nem olvasható")).not.toBeInTheDocument();
+  });
+
   it("renders the path, VapourSynth result, warnings and storage values from a full doctor report", async () => {
     mockRuntime({
       status: "ok",

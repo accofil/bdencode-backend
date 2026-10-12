@@ -8,7 +8,7 @@ import shutil
 import stat
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .ai_settings import DEFAULT_ANTHROPIC_MODEL
 from .capabilities import capability_snapshot, dynamic_hdr_support
@@ -376,7 +376,11 @@ def _vapoursynth_plugins() -> dict[str, Any]:
 
 
 def build_report(
-    database: Database, settings: Settings, *, prepare: bool = True
+    database: Database,
+    settings: Settings,
+    *,
+    prepare: bool = True,
+    tool_snapshot: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a complete runtime report.
 
@@ -396,7 +400,13 @@ def build_report(
     )
     if database_available:
         database.initialize()
-    snapshot = capability_snapshot((*MANDATORY_TOOLS, *RECOMMENDED_TOOLS))
+    # Starting every tool and hashing its binary takes tens of seconds on a
+    # slow disk: the API passes a recent snapshot instead of asking each time.
+    snapshot = (
+        tool_snapshot
+        if tool_snapshot is not None
+        else capability_snapshot((*MANDATORY_TOOLS, *RECOMMENDED_TOOLS))
+    )
     tools = snapshot["tools"]
     missing_mandatory = [
         name for name in MANDATORY_TOOLS if not tools[name]["available"]
