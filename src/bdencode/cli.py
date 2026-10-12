@@ -169,6 +169,9 @@ def _run_api(args: argparse.Namespace) -> int:
         port=settings.bind_port,
         log_level=(args.log_level or settings.log_level).lower(),
         root_path=settings.api_root_path,
+        # A restart (a saved API key, an update) must not wait for a slow
+        # request: connections still open after ten seconds are closed.
+        timeout_graceful_shutdown=10,
     )
     return 0
 

@@ -59,6 +59,10 @@ def test_runtime_capabilities_is_fresh_and_does_not_prepare_paths(
         }
 
     monkeypatch.setattr(doctor, "capability_snapshot", capability_report)
+    # The API probes the tools itself and keeps the result for ten minutes.
+    import bdencode.api as api_module
+
+    monkeypatch.setattr(api_module, "capability_snapshot", capability_report)
     monkeypatch.setattr(
         doctor,
         "_vapoursynth_plugins",
@@ -86,7 +90,8 @@ def test_runtime_capabilities_is_fresh_and_does_not_prepare_paths(
 
     assert first.status_code == 200
     assert second.status_code == 200
-    assert calls == 2
+    # One probe (warm-up at start) serves both reads; the rest is read fresh.
+    assert calls == 1
     first_report = first.json()
     second_report = second.json()
     data_status = first_report["paths"]["data"]
@@ -112,7 +117,7 @@ def test_runtime_capabilities_is_fresh_and_does_not_prepare_paths(
     assert "tsMuxeR" not in first_report["tools"]
     assert "whisper-cli" not in first_report["tools"]
     assert first_report["tools"]["ffmpeg"]["version"] == "test-call-1"
-    assert second_report["tools"]["ffmpeg"]["version"] == "test-call-2"
+    assert second_report["tools"]["ffmpeg"]["version"] == "test-call-1"
     assert not data_root.exists()
     assert not source_root.exists()
     assert not database_root.exists()
@@ -268,7 +273,7 @@ def test_health_capabilities_and_job_flow(tmp_path):
     with make_client(tmp_path) as client:
         capabilities = client.get("/api/v1/capabilities")
         assert capabilities.status_code == 200
-        assert capabilities.json()["backend_version"] == "3.8.0"
+        assert capabilities.json()["backend_version"] == "3.8.1"
         assert capabilities.json()["constraints"]["max_active_jobs"] == 1
         assert capabilities.json()["output_video_codecs"] == ["x264", "x265"]
         assert capabilities.json()["audio_actions"] == [
@@ -770,3 +775,31 @@ def test_restart_can_reopen_the_saved_settings_for_changes(tmp_path):
     body = reopened.json()
     assert body["state"] == "AWAITING_SELECTION"
     assert body["selection"]["playlist_id"] == "00001"
+
+
+def test_the_system_page_probes_the_installed_tools_only_once(tmp_path, monkeypatch):
+    """The probe starts every tool and hashes its binary: slow disks need the cache."""
+
+    import bdencode.api as api_module
+
+    calls: list[int] = []
+    real = api_module.capability_snapshot
+
+    def counted(names=None):
+        calls.append(1)
+        return real(names)
+
+    monkeypatch.setattr(api_module, "capability_snapshot", counted)
+    source = tmp_path / "source"
+    source.mkdir()
+    settings = Settings(data_root=tmp_path / "data", source_roots=(source,)).validate()
+    settings.create_directories()
+    client = TestClient(create_app(Database(tmp_path / "state.sqlite3"), settings=settings))
+
+    first = client.get("/api/v1/runtime-capabilities")
+    second = client.get("/api/v1/runtime-capabilities")
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["tools"] == second.json()["tools"]
+    # The warm-up at start and the requests share one probe.
+    assert len(calls) == 1

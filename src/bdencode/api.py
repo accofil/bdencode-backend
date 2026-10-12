@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import __version__
 from .audio import AUDIO_ACTIONS, audio_presets_payload
-from .capabilities import dynamic_hdr_support
+from .capabilities import capability_snapshot, dynamic_hdr_support
 from .crf_search import AutoCrfConfig
 from .i18n import parse_accept_language, reset_language, set_language, t
 from .ai_recommendation import (
@@ -110,7 +110,10 @@ from .review import (
     video_metrics_overview,
 )
 from .config import ConfigurationError, Settings
-from .doctor import build_report
+from .doctor import MANDATORY_TOOLS, RECOMMENDED_TOOLS, build_report
+
+# How long the installed-tool probe of the System page stays valid.
+TOOL_SNAPSHOT_TTL_SECONDS = 600
 from .media.profiles import (
     DetailLevel,
     VideoEncoder,
@@ -541,10 +544,56 @@ def create_app(
             },
         )
 
+    tool_cache: dict[str, Any] = {"value": None, "at": 0.0, "refreshing": False}
+    tool_lock = threading.Lock()  # guards tool_cache
+    probe_lock = threading.Lock()  # one probe at a time; waiters reuse its result
+
+    def _compute_tool_snapshot() -> None:
+        with probe_lock:
+            try:
+                value = capability_snapshot((*MANDATORY_TOOLS, *RECOMMENDED_TOOLS))
+            except Exception:  # a failed probe keeps the previous snapshot
+                value = None
+            with tool_lock:
+                if value is not None:
+                    tool_cache.update(value=value, at=time.monotonic())
+                tool_cache["refreshing"] = False
+
+    def _start_refresh() -> None:
+        tool_cache["refreshing"] = True
+        threading.Thread(target=_compute_tool_snapshot, daemon=True, name="tool-snapshot").start()
+
+    def cached_tool_snapshot() -> dict[str, Any]:
+        """The installed tools, probed at most every ten minutes.
+
+        The first call waits for the (warm-up) probe; later calls return the
+        last result at once and refresh a stale one in the background.
+        """
+
+        with tool_lock:
+            value = tool_cache["value"]
+            stale = time.monotonic() - tool_cache["at"] > TOOL_SNAPSHOT_TTL_SECONDS
+            if value is not None and stale and not tool_cache["refreshing"]:
+                _start_refresh()
+        if value is None:
+            with probe_lock:  # wait for a probe already running
+                value = tool_cache["value"]
+            if value is None:
+                _compute_tool_snapshot()
+                value = tool_cache["value"]
+        return value if value is not None else capability_snapshot((*MANDATORY_TOOLS, *RECOMMENDED_TOOLS))
+
+    if settings is not None:
+        # Warm the cache while the API starts, so the System page opens fast.
+        with tool_lock:
+            _start_refresh()
+
     @application.get(f"{API_PREFIX}/runtime-capabilities")
     def runtime_capabilities() -> dict[str, object]:
         runtime_settings = settings or load_settings()
-        return build_report(db, runtime_settings, prepare=False)
+        return build_report(
+            db, runtime_settings, prepare=False, tool_snapshot=cached_tool_snapshot()
+        )
 
     @application.get(f"{API_PREFIX}/profiles/{{encoder}}/schema")
     def encoder_schema(
