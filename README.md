@@ -439,6 +439,15 @@ Egy AI (OpenAI vagy Claude) a lemez technikai adatai és a megadott célod alapj
 
 Az AI nem kapja meg a filmet, a képeket vagy a fájlneveket, csak egy rövid technikai összefoglalót. A javaslata csak kitölti a mezőket; jóvá neked kell hagynod.
 
+**A kész kódolás értékelése (3.8-tól).** A kész munka **Comparison** fülének tetején egy **Értékelés** kártya mutatja:
+
+- az ítéletet: **Átlátszó**, **Jó**, **Elfogadható** vagy **Gyenge**;
+- a fő mérőszámokat: VMAF, SSIM, PSNR, megtakarítás, bitráta;
+- a megállapításokat;
+- a **javasolt változtatást hasonló lemezhez**, például: CRF 17,5 → 18,5, kb. −13% méret.
+
+Ha van beállított AI-kulcs, az első megnyitáskor az AI értékel egyszer, és az eredmény elmentődik. Kulcs nélkül a program rögzített küszöbökből és szabályokból számol. Az AI itt sem kap képet vagy fájlnevet, csak a mért számokat, és a javaslatait a program a megengedett tartományokra szűri.
+
 ---
 
 ## 10. Az első kódolás lépésről lépésre

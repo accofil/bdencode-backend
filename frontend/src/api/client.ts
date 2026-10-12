@@ -1,4 +1,5 @@
 import { getLanguage, t } from "../i18n";
+import type { JobEvaluation } from "./types";
 import type {
   AIKeyRequest,
   AIProvider,
@@ -321,6 +322,13 @@ export const api = {
   backups: () => apiFetch<BackupList>("/system/backups"),
   releaseUpdate: () => apiFetch<ReleaseUpdateResponse>("/system/release-update"),
   createBackup: () => apiFetch<BackupInfo>("/system/backups", { method: "POST" }),
+  jobEvaluation: (id: string) =>
+    apiFetch<JobEvaluation>(`/jobs/${encodeURIComponent(id)}/evaluation`),
+  evaluateJob: (id: string, useAi: boolean) =>
+    apiFetch<JobEvaluation>(`/jobs/${encodeURIComponent(id)}/evaluation`, {
+      method: "POST",
+      body: JSON.stringify({ use_ai: useAi }),
+    }),
   aiRecommendationStatus: () =>
     apiFetch<AIRecommendationStatus>("/ai-recommendation/status"),
   saveAISettings: (settings: AISettings) =>

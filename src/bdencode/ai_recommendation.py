@@ -736,6 +736,112 @@ class AIRecommendationService:
         return document, overrides, dropped, getattr(message, "model", None)
 
 
+    # -- comparison evaluation ----------------------------------------------------------------------------------
+    def evaluation_available(self) -> bool:
+        return bool(self._api_key(self.active_provider(self.preferences())))
+
+    def evaluate_comparison(
+        self, facts: Mapping[str, Any], baseline: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Ask the active provider to evaluate a finished encode's measurements."""
+
+        from .comparison_evaluation import (
+            AI_INSTRUCTIONS,
+            ai_input,
+            ai_output_schema,
+            evaluation_from_ai,
+        )
+
+        preferences = self.preferences()
+        chosen = self.active_provider(preferences)
+        api_key = self._api_key(chosen)
+        if not api_key:
+            raise AIRecommendationUnavailable(
+                t(
+                    f"A(z) {PROVIDER_LABELS[chosen]} API-kulcs nincs beállítva a szerveren.",
+                    f"The {PROVIDER_LABELS[chosen]} API key is not set on the server.",
+                )
+            )
+        model = self.model_for(chosen, preferences)
+        schema = ai_output_schema()
+        user_input = ai_input(facts, baseline)
+        if chosen == "anthropic":
+            client = self._anthropic_client_factory(api_key, self.anthropic_timeout_seconds)
+            try:
+                message = client.beta.messages.create(
+                    model=model,
+                    max_tokens=ANTHROPIC_MAX_TOKENS,
+                    betas=[ANTHROPIC_FALLBACK_BETA],
+                    system=AI_INSTRUCTIONS,
+                    messages=[{"role": "user", "content": user_input}],
+                    output_config={
+                        "effort": "medium",
+                        "format": {"type": "json_schema", "schema": schema},
+                    },
+                    extra_body={"fallbacks": "default"},
+                )
+            except Exception as exc:
+                if _is_programming_error(exc):
+                    raise
+                raise AIRecommendationError(
+                    _rejected_key_message("anthropic", getattr(exc, "status_code", None))
+                    or _no_usable_answer()
+                ) from exc
+            if message.stop_reason in {"refusal", "max_tokens"}:
+                raise AIRecommendationError(_no_usable_answer())
+            text = next(
+                (block.text for block in message.content if getattr(block, "type", None) == "text"),
+                None,
+            )
+            answered = getattr(message, "model", None) or model
+            source = "anthropic"
+        else:
+            body = {
+                "model": model,
+                "store": False,
+                "instructions": AI_INSTRUCTIONS,
+                "input": user_input,
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "bdencode_comparison_evaluation",
+                        "strict": True,
+                        "schema": schema,
+                    }
+                },
+            }
+            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+            try:
+                if self._client is not None:
+                    response = self._client.post(OPENAI_RESPONSES_URL, headers=headers, json=body)
+                else:
+                    with httpx.Client(timeout=self.timeout_seconds * 3) as client:
+                        response = client.post(OPENAI_RESPONSES_URL, headers=headers, json=body)
+                response.raise_for_status()
+                payload = response.json()
+            except httpx.HTTPStatusError as exc:
+                raise AIRecommendationError(
+                    _rejected_key_message("openai", exc.response.status_code)
+                    or _no_usable_answer()
+                ) from exc
+            except (httpx.HTTPError, ValueError) as exc:
+                raise AIRecommendationError(_no_usable_answer()) from exc
+            if not isinstance(payload, Mapping):
+                raise AIRecommendationError(_no_usable_answer())
+            text = _output_text(payload)
+            answered = str(payload.get("model") or model)
+            source = "openai"
+        try:
+            document = json.loads(text) if isinstance(text, str) else None
+            if not isinstance(document, Mapping):
+                raise ValueError("not an object")
+            return evaluation_from_ai(
+                document, facts, source=source, model=_bounded_text(answered, 100)
+            )
+        except ValueError as exc:
+            raise AIRecommendationError(_no_usable_answer()) from exc
+
+
 def _is_programming_error(exc: Exception) -> bool:
     """A wrong call into the SDK must surface as a bug, not as an outage."""
 

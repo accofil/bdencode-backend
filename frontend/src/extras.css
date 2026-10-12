@@ -261,3 +261,12 @@
 .tracker-order li > strong { min-width: 58px; font-weight: 600; }
 .release-name-tools { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px; margin: 8px 0 4px; }
 .release-name-tools .field { flex: 1 1 240px; }
+
+/* -- Evaluation of a finished encode (3.8) --------------------------------- */
+.evaluation-card { display: grid; gap: 12px; margin-bottom: 14px; padding: 20px 22px; }
+.evaluation-card .section-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; }
+.evaluation-card h2 { display: flex; align-items: center; gap: 10px; }
+.evaluation-card__actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.evaluation-card__summary { margin: 0; font-size: 13px; }
+.evaluation-card__suggestions { display: grid; gap: 8px; }
+.evaluation-card__none { margin: 0; color: var(--muted); font-size: 12px; }

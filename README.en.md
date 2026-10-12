@@ -442,6 +442,15 @@ An AI (OpenAI or Claude) can suggest encoding settings from the disc's technical
 
 The AI never receives the film, images or file names, only a short technical summary. Its suggestion only fills in the fields; you still approve them.
 
+**Evaluating a finished encode (from 3.8).** An **Evaluation** card at the top of a finished job's **Comparison** tab shows:
+
+- the verdict: **Transparent**, **Good**, **Acceptable** or **Weak**;
+- the key numbers: VMAF, SSIM, PSNR, saving, bitrate;
+- the findings;
+- the **suggested change for a similar disc**, for example: CRF 17.5 → 18.5, about −13% size.
+
+With an AI key set, the AI evaluates once on the first visit and the result is saved. Without a key the program works from fixed thresholds and rules. Here too the AI receives no picture or file name, only the measured numbers, and its suggestions are filtered to the allowed ranges.
+
 ---
 
 ## 10. Your first encode, step by step
