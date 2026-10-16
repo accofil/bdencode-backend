@@ -648,6 +648,7 @@ system_files=(
     /etc/systemd/system/timers.target.wants/bdencode-worker-ensure.timer
     /usr/local/libexec/bdencode-cpu-policy
     /usr/local/libexec/bdencode-credentials
+    /usr/local/libexec/bdencode-worker-ensure
     /usr/local/libexec/bdencode-daily-update
     /usr/local/libexec/bdencode-release-update
     /usr/local/libexec/bdencode-install-transaction

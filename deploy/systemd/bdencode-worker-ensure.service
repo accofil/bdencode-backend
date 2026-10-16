@@ -5,13 +5,9 @@ Description=Start the BDEncode worker when a passing condition left it stopped
 Type=oneshot
 User=root
 Group=root
-# The worker's ExecCondition (the recovery check) can fail while the disk is
-# full or an update is running.  systemd then marks the unit skipped, not
-# failed, and never tries again, so a queued job would wait for ever.  This
-# runs every two minutes: an enabled worker that is not running is started;
-# the ExecCondition still keeps it down while an update or recovery is active.
-# A deliberate stop for maintenance is kept with "systemctl disable --now".
-ExecStart=/bin/sh -c 'if systemctl is-enabled --quiet bdencode-worker.service && ! systemctl is-active --quiet bdencode-worker.service; then systemctl reset-failed bdencode-worker.service || true; systemctl start --no-block bdencode-worker.service; fi'
+# See the comments of the helper: it starts only a plainly stopped, enabled
+# worker and leaves everything alone while an update or installer runs.
+ExecStart=/usr/local/libexec/bdencode-worker-ensure
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateNetwork=true
