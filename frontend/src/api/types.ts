@@ -48,6 +48,10 @@ export interface HealthResponse {
   preparing_job_id?: string | null;
   ready_jobs?: number;
   queued_jobs: number;
+  /** null when the host cannot tell (no systemd). */
+  worker_active?: boolean | null;
+  disk_free_bytes?: number | null;
+  disk_total_bytes?: number | null;
 }
 
 export interface CapabilitiesResponse {

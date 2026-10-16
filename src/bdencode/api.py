@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -110,7 +111,13 @@ from .review import (
     video_metrics_overview,
 )
 from .config import ConfigurationError, Settings
-from .doctor import MANDATORY_TOOLS, RECOMMENDED_TOOLS, build_report
+from .doctor import (
+    MANDATORY_TOOLS,
+    RECOMMENDED_TOOLS,
+    WORKER_SERVICE,
+    _service_active,
+    build_report,
+)
 
 # How long the installed-tool probe of the System page stays valid.
 TOOL_SNAPSHOT_TTL_SECONDS = 600
@@ -481,11 +488,34 @@ def create_app(
             content={"detail": str(exc), "code": "ai_recommendation_failed"},
         )
 
+    worker_state: dict[str, Any] = {"value": None, "at": -1e9}
+
+    def observed_worker_active() -> bool | None:
+        """Whether the worker service runs; the page polls often, systemd is asked every few seconds."""
+
+        now = time.monotonic()
+        if now - worker_state["at"] > 4:
+            worker_state.update(value=_service_active(WORKER_SERVICE), at=now)
+        return worker_state["value"]
+
+    def observed_disk() -> tuple[int | None, int | None]:
+        if settings is None:
+            return None, None
+        try:
+            usage = shutil.disk_usage(settings.data_root)
+        except OSError:
+            return None, None
+        return usage.free, usage.total
+
     @application.get(f"{API_PREFIX}/health", response_model=HealthResponse)
     def health() -> HealthResponse:
         active = db.encoding_job()
         preparing = db.preparing_job()
+        disk_free, disk_total = observed_disk()
         return HealthResponse(
+            worker_active=observed_worker_active(),
+            disk_free_bytes=disk_free,
+            disk_total_bytes=disk_total,
             status="ok",
             database=db.display_path,
             schema_version=db.schema_version(),

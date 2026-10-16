@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep the BDEncode worker running
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=15s
+Unit=bdencode-worker-ensure.service
+
+[Install]
+WantedBy=timers.target

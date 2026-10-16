@@ -273,7 +273,7 @@ def test_health_capabilities_and_job_flow(tmp_path):
     with make_client(tmp_path) as client:
         capabilities = client.get("/api/v1/capabilities")
         assert capabilities.status_code == 200
-        assert capabilities.json()["backend_version"] == "3.8.1"
+        assert capabilities.json()["backend_version"] == "3.8.2"
         assert capabilities.json()["constraints"]["max_active_jobs"] == 1
         assert capabilities.json()["output_video_codecs"] == ["x264", "x265"]
         assert capabilities.json()["audio_actions"] == [
@@ -803,3 +803,29 @@ def test_the_system_page_probes_the_installed_tools_only_once(tmp_path, monkeypa
     assert first.json()["tools"] == second.json()["tools"]
     # The warm-up at start and the requests share one probe.
     assert len(calls) == 1
+
+
+def test_health_reports_the_worker_and_the_free_disk_space(tmp_path, monkeypatch):
+    """A stopped worker or a nearly full disk must show on the page, not as a stuck job."""
+
+    import bdencode.api as api_module
+
+    calls: list[str] = []
+
+    def stopped(service: str) -> bool:
+        calls.append(service)
+        return False
+
+    monkeypatch.setattr(api_module, "_service_active", stopped)
+    source = tmp_path / "source"
+    source.mkdir()
+    settings = Settings(data_root=tmp_path / "data", source_roots=(source,)).validate()
+    settings.create_directories()
+    client = TestClient(create_app(Database(tmp_path / "state.sqlite3"), settings=settings))
+
+    first = client.get("/api/v1/health").json()
+    second = client.get("/api/v1/health").json()
+
+    assert first["worker_active"] is False and second["worker_active"] is False
+    assert calls == ["bdencode-worker.service"]  # the page polls often: systemd is asked once
+    assert first["disk_total_bytes"] >= first["disk_free_bytes"] > 0

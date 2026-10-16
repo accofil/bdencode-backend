@@ -388,6 +388,12 @@ render_unit_atomic "$repo_root/deploy/systemd/bdencode-cpu-policy.path.in" \
     /etc/systemd/system/bdencode-cpu-policy.path
 atomic_root_install "$repo_root/deploy/systemd/bdencode-cpu-policy.timer" \
     /etc/systemd/system/bdencode-cpu-policy.timer 0644
+# A worker left stopped by a passing ExecCondition failure (a full disk) is
+# started again by a two-minute timer; the condition still guards updates.
+atomic_root_install "$repo_root/deploy/systemd/bdencode-worker-ensure.service" \
+    /etc/systemd/system/bdencode-worker-ensure.service 0644
+atomic_root_install "$repo_root/deploy/systemd/bdencode-worker-ensure.timer" \
+    /etc/systemd/system/bdencode-worker-ensure.timer 0644
 # API keys typed on the System page reach the encrypted credential store
 # through a root helper started by a path unit on the API's runtime directory.
 atomic_root_install "$repo_root/install/credentials_helper.py" \
@@ -399,11 +405,11 @@ render_unit_atomic "$repo_root/deploy/systemd/bdencode-credentials.path.in" \
 sudo systemctl daemon-reload
 sudo systemctl enable bdencode-update-recovery.service \
     bdencode-install-recovery.path bdencode-cpu-policy.path bdencode-cpu-policy.timer \
-    bdencode-credentials.path
+    bdencode-credentials.path bdencode-worker-ensure.timer
 sudo systemctl restart bdencode-install-recovery.path
 sudo systemctl is-active --quiet bdencode-install-recovery.path
 sudo systemctl restart bdencode-cpu-policy.path bdencode-cpu-policy.timer \
-    bdencode-credentials.path
+    bdencode-credentials.path bdencode-worker-ensure.timer
 
 # Finish an interrupted daily transaction before recording the service state
 # this installation must preserve. APT oneshots are always allowed to finish.
@@ -861,6 +867,8 @@ sudo systemd-analyze verify \
     /etc/systemd/system/bdencode-cpu-policy.timer \
     /etc/systemd/system/bdencode-credentials.service \
     /etc/systemd/system/bdencode-credentials.path \
+    /etc/systemd/system/bdencode-worker-ensure.service \
+    /etc/systemd/system/bdencode-worker-ensure.timer \
     apt-daily.service apt-daily-upgrade.service
 
 if [[ -d /etc/nginx/apps && -f /etc/htpasswd ]]; then
