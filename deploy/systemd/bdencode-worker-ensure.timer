@@ -2,7 +2,9 @@
 Description=Keep the BDEncode worker running
 
 [Timer]
-OnBootSec=2min
+# First run two minutes after the timer starts (an installer restarts it
+# mid-update: nothing may fire at once), then every two minutes.
+OnActiveSec=2min
 OnUnitActiveSec=2min
 AccuracySec=15s
 Unit=bdencode-worker-ensure.service

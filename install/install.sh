@@ -390,6 +390,8 @@ atomic_root_install "$repo_root/deploy/systemd/bdencode-cpu-policy.timer" \
     /etc/systemd/system/bdencode-cpu-policy.timer 0644
 # A worker left stopped by a passing ExecCondition failure (a full disk) is
 # started again by a two-minute timer; the condition still guards updates.
+atomic_root_install "$repo_root/install/worker_ensure.sh" \
+    /usr/local/libexec/bdencode-worker-ensure 0755
 atomic_root_install "$repo_root/deploy/systemd/bdencode-worker-ensure.service" \
     /etc/systemd/system/bdencode-worker-ensure.service 0644
 atomic_root_install "$repo_root/deploy/systemd/bdencode-worker-ensure.timer" \
