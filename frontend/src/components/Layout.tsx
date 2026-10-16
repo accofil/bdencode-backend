@@ -19,6 +19,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import { LANGUAGES, setLanguage, t, useLanguage } from "../i18n";
 import { cpuShareInForce, useCpuPolicy } from "./CpuPolicyPanel";
+import type { HealthResponse } from "../api/types";
+import { Notice } from "./ui";
 
 function navigation() {
   return [
@@ -56,6 +58,45 @@ function LanguageSwitch() {
           {option.toUpperCase()}
         </button>
       ))}
+    </div>
+  );
+}
+
+const GIB = 1024 ** 3;
+/** Below this much free space a UHD encode and its work files may not fit. */
+export const LOW_DISK_WARNING_BYTES = 100 * GIB;
+export const LOW_DISK_CRITICAL_BYTES = 30 * GIB;
+
+/** Problems of the host that otherwise look like a job that "does not start". */
+export function HostWarnings({ health }: { health: HealthResponse | undefined }) {
+  useLanguage();
+  if (!health) return null;
+  const waiting = health.queued_jobs + (health.ready_jobs ?? 0) + (health.active_job_id ? 1 : 0);
+  const workerDown = health.worker_active === false && waiting > 0;
+  const free = health.disk_free_bytes;
+  const lowDisk = typeof free === "number" && free < LOW_DISK_WARNING_BYTES;
+  if (!workerDown && !lowDisk) return null;
+  return (
+    <div className="host-warnings">
+      {workerDown && (
+        <Notice tone="danger" title={t("A worker szolgáltatás nem fut", "The worker service is not running")}>
+          {t(
+            `${waiting} munka vár, de senki nem veszi fel. A szerver pár percen belül magától újraindítja a workert; ha ez nem történik meg, a szerveren: sudo systemctl start bdencode-worker`,
+            `${waiting} job(s) are waiting but nothing picks them up. The server restarts the worker by itself within a few minutes; if that does not happen, run on the server: sudo systemctl start bdencode-worker`,
+          )}
+        </Notice>
+      )}
+      {lowDisk && (
+        <Notice
+          tone={free < LOW_DISK_CRITICAL_BYTES ? "danger" : "warning"}
+          title={free < LOW_DISK_CRITICAL_BYTES ? t("Majdnem megtelt a lemez", "The disk is almost full") : t("Kevés a szabad lemezhely", "Little free disk space")}
+        >
+          {t(
+            `Szabad hely: ${(free / GIB).toFixed(0)} GiB. A kódolás a forrás méretének többszörösét igényli (munkafájlok, kész fájl); megtelt lemeznél a worker leáll. Törölj kész munkákat vagy bővítsd a tárhelyet.`,
+            `Free space: ${(free / GIB).toFixed(0)} GiB. An encode needs several times the source size (work files, finished file); a full disk stops the worker. Delete finished jobs or add storage.`,
+          )}
+        </Notice>
+      )}
     </div>
   );
 }
@@ -159,6 +200,7 @@ export function Layout() {
       {mobileOpen && <button type="button" className="sidebar-scrim" aria-label={t("Menü bezárása", "Close menu")} onClick={() => setMobileOpen(false)} />}
 
       <main id="main-content" className="main-content" tabIndex={-1}>
+        <HostWarnings health={health.data} />
         <Outlet />
       </main>
     </div>

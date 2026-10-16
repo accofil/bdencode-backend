@@ -418,6 +418,10 @@ class HealthResponse(StrictModel):
     preparing_job_id: str | None = None
     ready_jobs: int = 0
     queued_jobs: int
+    # ``None`` where it cannot be observed (no systemd, no configured roots).
+    worker_active: bool | None = None
+    disk_free_bytes: int | None = None
+    disk_total_bytes: int | None = None
 
 
 class CapabilitiesResponse(StrictModel):

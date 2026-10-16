@@ -270,3 +270,7 @@
 .evaluation-card__summary { margin: 0; font-size: 13px; }
 .evaluation-card__suggestions { display: grid; gap: 8px; }
 .evaluation-card__none { margin: 0; color: var(--muted); font-size: 12px; }
+
+/* -- Host problems shown above every page (3.8.2) -------------------------- */
+.host-warnings { display: grid; gap: 10px; margin-bottom: 16px; }
+.host-warnings > .notice { margin: 0; }

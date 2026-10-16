@@ -553,6 +553,8 @@ managed_units=(
     bdencode-cpu-policy.service
     bdencode-credentials.path
     bdencode-credentials.service
+    bdencode-worker-ensure.timer
+    bdencode-worker-ensure.service
     bdencode-update.timer
     bdencode-update.service
     bdencode-worker.service
@@ -625,6 +627,8 @@ system_files=(
     /etc/systemd/system/bdencode-cpu-policy.timer
     /etc/systemd/system/bdencode-credentials.service
     /etc/systemd/system/bdencode-credentials.path
+    /etc/systemd/system/bdencode-worker-ensure.service
+    /etc/systemd/system/bdencode-worker-ensure.timer
     /etc/systemd/system/bdencode-update.service.d/bdencode-recovery.conf
     /etc/systemd/system/bdencode-api.service.d/bdencode-recovery.conf
     /etc/systemd/system/bdencode-worker.service.d/bdencode-recovery.conf
@@ -641,6 +645,7 @@ system_files=(
     /etc/systemd/system/multi-user.target.wants/bdencode-cpu-policy.path
     /etc/systemd/system/timers.target.wants/bdencode-cpu-policy.timer
     /etc/systemd/system/multi-user.target.wants/bdencode-credentials.path
+    /etc/systemd/system/timers.target.wants/bdencode-worker-ensure.timer
     /usr/local/libexec/bdencode-cpu-policy
     /usr/local/libexec/bdencode-credentials
     /usr/local/libexec/bdencode-daily-update
