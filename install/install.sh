@@ -544,7 +544,8 @@ sudo flock -x "$installer_apt_lock" apt-get \
     install -y --no-install-recommends --no-upgrade \
     build-essential ca-certificates curl ffmpeg fonts-dejavu-core git libbluray-bin libbluray-dev \
     dpkg-repack man-db mediainfo meson mkvtoolnix nasm ninja-build openssh-client pkg-config \
-    python3-pip python3-venv sqlite3 util-linux x264 x265 xxd
+    python3-pip python3-venv sqlite3 tesseract-ocr tesseract-ocr-eng tesseract-ocr-hun \
+    util-linux x264 x265 xxd
 
 python3 -m venv "$release_root/venv"
 "$release_root/venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip wheel

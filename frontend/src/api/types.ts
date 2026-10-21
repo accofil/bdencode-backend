@@ -544,6 +544,8 @@ export interface SourceEntry {
   name: string;
   path: string;
   is_bluray: boolean;
+  /** "mkv": a disc-remux Matroska file (3.10); older servers send only is_bluray. */
+  kind?: "bluray" | "mkv" | "folder";
 }
 
 export interface SourceBrowserResponse {
@@ -607,6 +609,8 @@ export interface MediaStream {
   roles: string[];
   object_audio: boolean;
   video: VideoProperties | null;
+  /** A text subtitle (SRT/ASS) of an MKV remux source; absent on disc scans. */
+  text_subtitle?: boolean;
 }
 
 /** Selection-time analysis of a recommended playlist's tracks (3.7). */
@@ -626,6 +630,18 @@ export interface SubtitleTrackAnalysis {
   events_per_minute: number;
   suggested_kind: "full" | "forced" | null;
   confidence: "high" | "medium" | "low";
+  /** The captions' language, read from their text (OCR for PGS) (3.10). */
+  language?: SubtitleLanguageAnalysis;
+}
+
+export interface SubtitleLanguageAnalysis {
+  status: "detected" | "unknown" | "unavailable";
+  iso639_2t?: string;
+  confidence?: number;
+  words?: number;
+  method?: "ocr" | "text";
+  sample?: string;
+  reason?: string;
 }
 
 export interface TrackAnalysis {
@@ -663,6 +679,8 @@ export interface DiscScanResult {
   has_seamless_branching: boolean;
   has_three_d: boolean;
   warnings: string[];
+  /** "mkv": the source is a disc-remux MKV file; absent ("disc") for a Blu-ray folder. */
+  source_kind?: "disc" | "mkv";
 }
 
 export interface Scan {

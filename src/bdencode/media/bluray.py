@@ -25,6 +25,10 @@ from .language import LanguageDecision, LanguageResolver
 
 DEFAULT_SOURCE_ROOT = Path("/home/accofil/storage")
 
+SOURCE_KIND_DISC = "disc"
+SOURCE_KIND_MKV = "mkv"
+SOURCE_KINDS = frozenset({SOURCE_KIND_DISC, SOURCE_KIND_MKV})
+
 
 class DiscKind(StrEnum):
     BD = "bd"
@@ -128,15 +132,23 @@ class MediaStream:
     roles: tuple[TrackRole, ...] = ()
     object_audio: bool = False
     video: VideoProperties | None = None
+    # A text subtitle (SRT/ASS...) of a Matroska remux; Blu-ray subtitles are
+    # always PGS bitmaps.  Serialised only when set.
+    text_subtitle: bool = False
 
     def __post_init__(self) -> None:
         if self.kind is StreamKind.VIDEO and self.video is None:
             raise ValueError("video streams require VideoProperties")
         if self.kind is not StreamKind.VIDEO and self.video is not None:
             raise ValueError("only video streams may contain VideoProperties")
+        if self.text_subtitle and self.kind is not StreamKind.SUBTITLE:
+            raise ValueError("only subtitle streams can be text subtitles")
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
+        if not self.text_subtitle:
+            # A disc stream keeps its historical document byte for byte.
+            del result["text_subtitle"]
         result["kind"] = self.kind.value
         result["roles"] = [role.value for role in self.roles]
         result["language"] = self.language.to_dict() if self.language else None
@@ -233,6 +245,18 @@ class DiscScan:
     capabilities: ToolCapabilities
     fingerprint: str
     warnings: tuple[str, ...] = ()
+    # ``"disc"``: a Blu-ray folder read through libbluray (``source`` is the
+    # disc root).  ``"mkv"``: a disc-origin Matroska remux (``source`` is the
+    # file), scanned as one title, playlist ``00001``.
+    source_kind: str = SOURCE_KIND_DISC
+
+    def __post_init__(self) -> None:
+        if self.source_kind not in SOURCE_KINDS:
+            raise ValueError(f"unsupported source kind: {self.source_kind}")
+
+    @property
+    def is_mkv(self) -> bool:
+        return self.source_kind == SOURCE_KIND_MKV
 
     @property
     def has_multiple_editions(self) -> bool:
@@ -264,7 +288,7 @@ class DiscScan:
             raise KeyError(f"playlist {normalized} is not present in the scan") from exc
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "source": str(self.source),
             "disc_kind": self.disc_kind.value,
             "content_kind": self.content_kind.value,
@@ -276,6 +300,10 @@ class DiscScan:
             "has_three_d": self.has_three_d,
             "warnings": list(self.warnings),
         }
+        # A disc scan keeps its historical document byte for byte.
+        if self.source_kind != SOURCE_KIND_DISC:
+            result["source_kind"] = self.source_kind
+        return result
 
 
 # The libbluray playlist helper reads every playlist of the disc; on a slow
@@ -931,8 +959,16 @@ class BluRayScanner:
         )
 
     def _stream_from_probe(
-        self, index: int, item: Mapping[str, Any], native: Mapping[str, Any]
+        self,
+        index: int,
+        item: Mapping[str, Any],
+        native: Mapping[str, Any],
+        *,
+        tag_language_source: str = "pmt",
     ) -> MediaStream:
+        """``tag_language_source`` names the evidence the probe's language tag
+        is: the transport stream's PMT on a disc, ``matroska`` for a remux."""
+
         codec_type = str(
             item.get(
                 "codec_type",
@@ -956,7 +992,7 @@ class BluRayScanner:
         raw_language = {
             "mpls": native.get("mpls_language"),
             "clpi": native.get("clpi_language"),
-            "pmt": tags.get("language", native.get("pmt_language")),
+            tag_language_source: tags.get("language", native.get("pmt_language")),
         }
         language = self.languages.resolve(**raw_language)
         codec_name = str(item.get("codec_name", native.get("codec", "unknown"))).lower()

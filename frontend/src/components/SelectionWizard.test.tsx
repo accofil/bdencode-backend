@@ -198,6 +198,34 @@ describe("SelectionWizard", () => {
     expect(sent).toMatchObject({ mbtree: false, ipratio: 1.3 });
   });
 
+  it("titles an MKV remux source as one file and marks its text subtitles", async () => {
+    const user = userEvent.setup();
+    const scan = makeScanWithRetainedSubtitle();
+    scan.source = "/storage/Movie 2026 1080p Blu-ray Remux.mkv";
+    scan.source_kind = "mkv";
+    scan.playlists[0].streams.push({
+      ...scan.playlists[0].streams.at(-1)!,
+      id: "subtitle:3",
+      index: 3,
+      pid: null,
+      codec: "subrip",
+      title: "English SRT",
+      text_subtitle: true,
+    });
+    renderApp(<SelectionWizard job={makeJob({ state: "AWAITING_SELECTION", settings: { detail_level: "beginner" } })} scan={scan} onComplete={vi.fn()} />);
+
+    expect(screen.getByText("MKV remux")).toBeInTheDocument();
+    expect(screen.queryByText("Playlist 00001")).not.toBeInTheDocument();
+    expect(screen.getByText("egyetlen fájl")).toBeInTheDocument();
+    expect(screen.queryByText(/szegmens/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/szög$/)).not.toBeInTheDocument();
+    await waitFor(() => expect(api.profileRecommendation).toHaveBeenCalled());
+
+    await user.click(screen.getByRole("button", { name: "Tovább" }));
+    expect(screen.getByText("English SRT")).toBeInTheDocument();
+    expect(screen.getByText(/szöveges felirat \(nem PGS\)/)).toBeInTheDocument();
+  });
+
   it("walks through playlist, tracks and video before server validation and save", async () => {
     const user = userEvent.setup();
     const onComplete = vi.fn();
@@ -368,8 +396,8 @@ describe("SelectionWizard", () => {
       windows: Array.from({ length: 6 }, (_, index) => ({ start_seconds: 600 + index * 900, duration_seconds: 30 })),
       audio: { [audio.id]: { status: "detected", iso639_2t: "hun", confidence: 0.94, agreement: 1, usable_samples: 6, needs_review: false, reason: "consensus" } },
       subtitles: {
-        "subtitle:4608": { events: 31, sampled_seconds: 180, events_per_minute: 10.33, suggested_kind: "full", confidence: "high" },
-        "subtitle:4609": { events: 1, sampled_seconds: 180, events_per_minute: 0.33, suggested_kind: "forced", confidence: "high" },
+        "subtitle:4608": { events: 31, sampled_seconds: 180, events_per_minute: 10.33, suggested_kind: "full", confidence: "high", language: { status: "detected", iso639_2t: "hun", confidence: 0.91, words: 140, method: "ocr" } },
+        "subtitle:4609": { events: 1, sampled_seconds: 180, events_per_minute: 0.33, suggested_kind: "forced", confidence: "high", language: { status: "unknown", reason: "too_little_text", words: 3, method: "ocr" } },
       },
     };
     const user = userEvent.setup();
@@ -380,6 +408,8 @@ describe("SelectionWizard", () => {
     expect(view.getByText(/A lemez szerint eng, a hang alapján/)).toBeInTheDocument();
     expect(view.getByText(/Javaslat: Teljes felirat \(31 esemény 3 perc mintában/)).toBeInTheDocument();
     expect(view.getByText(/Javaslat: Forced \/ signs/)).toBeInTheDocument();
+    expect(view.getByText(/A forrás szerint eng, a felirat képeiből \(OCR\)/)).toBeInTheDocument();
+    expect(view.getByRole("textbox", { name: "subtitle:4608 nyelve" })).toHaveValue("");
     const kinds = view.getAllByRole("combobox", { name: /felirattípusa/ });
     expect(kinds.map((select) => (select as HTMLSelectElement).value)).toEqual(["unknown", "unknown"]);
 
@@ -387,6 +417,8 @@ describe("SelectionWizard", () => {
 
     expect(kinds.map((select) => (select as HTMLSelectElement).value)).toEqual(["full", "forced"]);
     expect(view.getByRole("textbox", { name: "English 5.1 nyelve" })).toHaveValue("hun");
+    expect(view.getByRole("textbox", { name: "subtitle:4608 nyelve" })).toHaveValue("hun");
+    expect(view.getByRole("textbox", { name: "subtitle:4609 nyelve" })).toHaveValue("");
     expect(view.queryByRole("button", { name: /Minden javaslat elfogadása/ })).not.toBeInTheDocument();
   });
 

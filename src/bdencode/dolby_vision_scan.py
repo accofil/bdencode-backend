@@ -130,7 +130,9 @@ def detect_dolby_vision_layers(
     UHD discs: a few seconds of copying per candidate, not a second scan of the disc.
     """
 
-    if scan.disc_kind is not DiscKind.UHD or not tool_available:
+    if scan.disc_kind is not DiscKind.UHD or not tool_available or scan.is_mkv:
+        # A Matroska remux carries one video track (a profile 7 remux has its
+        # enhancement layer inside it); there is no layer stream to find.
         return scan
     longest = max((item.duration_seconds for item in scan.playlists if item.recommended), default=0.0)
     if longest <= 0.0:
