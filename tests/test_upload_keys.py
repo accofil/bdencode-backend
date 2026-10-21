@@ -40,7 +40,8 @@ helper = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = helper
 SPEC.loader.exec_module(helper)
 
-IMGBB_KEY = "0123456789abcdef0123456789abcdef"
+# Distinct from REQUEST_ID: the status file legitimately names the request.
+IMGBB_KEY = "9f8e7d6c5b4a39281706f5e4d3c2b1a0"
 NEW_IMGBB_KEY = "fedcba9876543210fedcba9876543210"
 FREEIMAGE_KEY = "6d207e02198a847aa98d0a2a901485a5"
 USERHASH = "a1b2c3d4e5f6a7b8c9d0e1f2a"
