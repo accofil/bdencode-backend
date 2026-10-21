@@ -107,12 +107,15 @@ from .media.bluray import (
     MediaStream,
     PlaylistCandidate,
     PlaylistSegment,
+    SOURCE_KIND_DISC,
+    SOURCE_KIND_MKV,
     StreamKind,
     ToolCapabilities,
     TrackRole,
     VideoCodec,
     VideoProperties,
 )
+from .media.mkv_source import MkvScanner, is_mkv_source, mkv_fingerprint
 from .media.language import (
     LanguageDecision,
     LanguageEvidence,
@@ -349,6 +352,10 @@ LOG = logging.getLogger(__name__)
 # Free space that must remain beside a staged disc copy on top of the reference
 # remux, which is about as large as the copied clips.
 STAGE_RESERVE_BYTES = 10 * 1024**3
+# An MKV source is copied to the reference in these blocks; the copy must leave
+# at least this much space free.
+MKV_COPY_BLOCK_BYTES = 8 * 1024 * 1024
+MKV_REFERENCE_RESERVE_BYTES = 2 * 1024**3
 
 # Sampled VMAF of the finished file: 12 windows of 2 s (576 frames at 24p).
 FINAL_VMAF_SAMPLES = 12
@@ -619,7 +626,52 @@ def _quick_source_fingerprint(path: Path) -> dict[str, Any]:
     }
 
 
+def _remember_sha256(path: Path, digest: str) -> None:
+    """Record a digest computed while the file was written (see ``sha256_file``)."""
+
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("a SHA-256 digest is 64 lowercase hex digits")
+    resolved = path.resolve(strict=True)
+    stat = resolved.stat()
+    _HASH_CACHE[
+        (
+            str(resolved),
+            stat.st_dev,
+            stat.st_ino,
+            stat.st_size,
+            stat.st_mtime_ns,
+            stat.st_ctime_ns,
+        )
+    ] = digest
+
+
+def _mkv_reference_inputs(scan: DiscScan, playlist_id: str) -> dict[str, Any]:
+    """The reference-copy marker inputs of an MKV source.
+
+    The quick fingerprint (size, modification time, first and last MiB) makes
+    a replaced or modified source invalidate the copy.
+    """
+
+    try:
+        source = _quick_source_fingerprint(scan.source)
+    except OSError as exc:
+        raise ReviewRequired(
+            f"the MKV source cannot be read: {exc}",
+            details={"code": "mkv_source_unreadable"},
+        ) from exc
+    return {
+        "source_kind": SOURCE_KIND_MKV,
+        "scan_fingerprint": scan.fingerprint,
+        "playlist_id": playlist_id,
+        "source_file": source,
+    }
+
+
 def _playlist_source_snapshot(scan: DiscScan, playlist_id: str) -> list[dict[str, Any]]:
+    if scan.is_mkv:
+        # The remux file is the title's only source file.
+        scan.playlist(playlist_id)
+        return [_quick_source_fingerprint(scan.source)]
     playlist = scan.playlist(playlist_id)
     clip_ids = tuple(dict.fromkeys(segment.clip_id for segment in playlist.segments))
     result: list[dict[str, Any]] = []
@@ -1709,6 +1761,7 @@ def _scan_from_dict(value: Mapping[str, Any]) -> DiscScan:
                     ),
                     object_audio=bool(raw_stream.get("object_audio", False)),
                     video=video,
+                    text_subtitle=bool(raw_stream.get("text_subtitle", False)),
                 )
             )
         segments = tuple(
@@ -1754,6 +1807,7 @@ def _scan_from_dict(value: Mapping[str, Any]) -> DiscScan:
         ),
         fingerprint=str(value["fingerprint"]),
         warnings=tuple(str(item) for item in value.get("warnings", [])),
+        source_kind=str(value.get("source_kind", SOURCE_KIND_DISC)),
     )
 
 
@@ -3320,6 +3374,8 @@ class PipelineWorker:
         marker = paths.stages / "scan.json"
         if not _valid_stage(marker, inputs, [paths.scan_json]):
             source = self.settings.authorize_source(job.source_path)
+            mkv_source = source.is_file() and is_mkv_source(source)
+            scanner: BluRayScanner | MkvScanner
             if self.scanner_factory is not None:
                 scanner = self.scanner_factory(self.settings)
             else:
@@ -3328,12 +3384,21 @@ class PipelineWorker:
                     for root in self.settings.source_roots
                     if source == root or source.is_relative_to(root)
                 )
-                scanner = BluRayScanner(
-                    source_root=source_root,
-                    runner=self._runner(paths),
-                )
+                if mkv_source:
+                    scanner = MkvScanner(
+                        source_root=source_root,
+                        runner=self._runner(paths),
+                    )
+                else:
+                    scanner = BluRayScanner(
+                        source_root=source_root,
+                        runner=self._runner(paths),
+                    )
             result = scanner.scan(source, content_kind=_content_kind(job))
-            result = self._detect_dolby_vision_layers(paths, source, result)
+            if not result.is_mkv:
+                # A remux has one video track: there is no separate Dolby
+                # Vision enhancement-layer stream to look for.
+                result = self._detect_dolby_vision_layers(paths, source, result)
             atomic_write_json(paths.scan_json, result.to_dict())
             _write_stage(marker, inputs, [paths.scan_json])
         result_json = json.loads(paths.scan_json.read_text(encoding="utf-8"))
@@ -3376,6 +3441,23 @@ class PipelineWorker:
                 analyses = json.loads(report.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 analyses = {}
+        elif result_json.get("source_kind") == SOURCE_KIND_MKV:
+            # The analysis reads a disc through libbluray (``bluray:`` input,
+            # ``-playlist``), which a Matroska file is not.  Until it learns to
+            # read a file, an MKV scan records it as failed and never runs a
+            # disc command against the file.
+            analyses = {
+                str(playlist["playlist_id"]): {
+                    "schema_version": TRACK_ANALYSIS_SCHEMA_VERSION,
+                    "status": "failed",
+                    "reason": "mkv_source_unsupported",
+                }
+                for playlist in playlists_to_analyse(
+                    [p for p in result_json.get("playlists") or [] if isinstance(p, dict)]
+                )
+            }
+            atomic_write_json(report, analyses)
+            _write_stage(marker, inputs, [report])
         else:
             if self.scanner_factory is not None:
                 # Test and alternative scanners have no real disc to read.
@@ -3594,6 +3676,11 @@ class PipelineWorker:
         decision: LanguageDecision | None,
     ) -> dict[str, str | None]:
         result: dict[str, str | None] = {"mpls": None, "clpi": None, "pmt": None}
+        if decision is not None and any(
+            item.source is LanguageSource.MATROSKA for item in decision.evidence
+        ):
+            # Only an MKV source declares this; a disc keeps its three labels.
+            result["matroska"] = None
         if decision is None:
             return result
         for item in decision.evidence:
@@ -3752,6 +3839,7 @@ class PipelineWorker:
                 mpls=raw["mpls"],
                 clpi=raw["clpi"],
                 pmt=raw["pmt"],
+                matroska=raw.get("matroska"),
                 audio_lid=consensus.get("iso639_2t"),
                 audio_confidence=float(consensus.get("confidence", 0.0)),
             )
@@ -3903,6 +3991,114 @@ class PipelineWorker:
             )
         )
         return staged
+
+    def _materialise_mkv_reference(
+        self, job: Job, paths: JobPaths, scan: DiscScan
+    ) -> None:
+        """Copy an MKV source byte for byte to ``paths.reference``.
+
+        A remux already is the title's reference, so it is copied instead of
+        remuxed: a real copy, never a link (the workspace accounting refuses
+        links and other devices), hashed while it is written so the stage
+        marker needs no second read.  Pause and cancel stop the copy; the
+        partial file is removed.
+        """
+
+        source = self.settings.authorize_source(job.source_path)
+        # The scan's stream list (and every ``-map 0:<index>`` built from it)
+        # describes the file it fingerprinted; a replaced or modified file
+        # needs a new scan, not a silent copy.
+        if (
+            source != scan.source
+            or not source.is_file()
+            or mkv_fingerprint(source) != scan.fingerprint
+        ):
+            raise ReviewRequired(
+                "the MKV source changed since the scan; create the job again "
+                "to rescan it",
+                details={"code": "mkv_source_changed"},
+            )
+        before = source.stat()
+        total = before.st_size
+        paths.work.mkdir(parents=True, exist_ok=True)
+        free = shutil.disk_usage(paths.work).free
+        if free < total + MKV_REFERENCE_RESERVE_BYTES:
+            raise ReviewRequired(
+                f"not enough space for the reference copy of the MKV source "
+                f"({total / 1e9:.1f} GB needed plus "
+                f"{MKV_REFERENCE_RESERVE_BYTES / 1e9:.1f} GB reserve, "
+                f"{free / 1e9:.1f} GB free)",
+                details={"code": "mkv_reference_space"},
+            )
+        partial = paths.work / f"{paths.reference.name}.partial"
+        digest = hashlib.sha256()
+        done = 0
+        started = time.monotonic()
+        # Operator control is checked at the first block and then every second.
+        last_check = started - 1.0
+        last_report = started
+        label = ("Referencia-másolat (MKV)", "Reference copy (MKV)")
+        try:
+            with self._step(paths, "remux", label) as step:
+                with (
+                    ThreadPoolExecutor(max_workers=1) as pool,
+                    source.open("rb", buffering=0) as reader,
+                    partial.open("wb") as writer,
+                ):
+                    # The next block is read while this one is hashed and written.
+                    pending = pool.submit(reader.read, MKV_COPY_BLOCK_BYTES)
+                    while True:
+                        chunk = pending.result()
+                        if not chunk:
+                            break
+                        pending = pool.submit(reader.read, MKV_COPY_BLOCK_BYTES)
+                        digest.update(chunk)
+                        writer.write(chunk)
+                        done += len(chunk)
+                        now = time.monotonic()
+                        if now - last_check >= 1.0:
+                            last_check = now
+                            if self._process_interrupt_requested(job.id):
+                                pending.result()
+                                raise ProcessInterrupted(
+                                    "operator control stopped the MKV reference copy"
+                                )
+                        if now - last_report >= 2.0:
+                            last_report = now
+                            shown = f"{done / 1e9:.1f} / {total / 1e9:.1f} GB"
+                            step.update(
+                                done / total if total else None,
+                                detail=(shown, shown),
+                            )
+                    writer.flush()
+                    os.fsync(writer.fileno())
+                after = source.stat()
+                if (
+                    done != total
+                    or after.st_size != before.st_size
+                    or after.st_mtime_ns != before.st_mtime_ns
+                ):
+                    raise ReviewRequired(
+                        "the MKV source changed while it was copied",
+                        details={"code": "mkv_source_changed"},
+                    )
+                os.replace(partial, paths.reference)
+        finally:
+            partial.unlink(missing_ok=True)
+        # The digest was taken from the bytes written; the marker reuses it.
+        _remember_sha256(paths.reference, digest.hexdigest())
+        seconds = time.monotonic() - started
+        self.database.add_event(
+            EventCreate(
+                job_id=job.id,
+                kind="worker.mkv-reference-copied",
+                message=(
+                    f"MKV source copied as the reference ({total / 1e9:.1f} GB "
+                    f"in {seconds / 60:.1f} min)"
+                ),
+                payload={"bytes": total, "seconds": round(seconds, 1)},
+            )
+        )
 
     def _crop_decode_acceleration(self, runner: Runner) -> str | None:
         mode = self.settings.crop_hwaccel
@@ -4656,13 +4852,16 @@ class PipelineWorker:
                     f"Blu-ray PCM stream {stream.id} has an unsupported bit depth: "
                     f"{stream.bit_depth}"
                 ) from exc
-        remux_inputs = {
-            "scan_fingerprint": scan.fingerprint,
-            "playlist_id": selection.playlist_id,
-            "angle": selection.angle,
-            "pcm_bluray_audio": [asdict(item) for item in pcm_bluray_audio],
-            "source_clips": _playlist_source_snapshot(scan, selection.playlist_id),
-        }
+        if scan.is_mkv:
+            remux_inputs = _mkv_reference_inputs(scan, selection.playlist_id)
+        else:
+            remux_inputs = {
+                "scan_fingerprint": scan.fingerprint,
+                "playlist_id": selection.playlist_id,
+                "angle": selection.angle,
+                "pcm_bluray_audio": [asdict(item) for item in pcm_bluray_audio],
+                "source_clips": _playlist_source_snapshot(scan, selection.playlist_id),
+            }
         remux_marker = paths.stages / "reference-remux.json"
         try:
             _activate_source_log_generation(
@@ -4675,7 +4874,11 @@ class PipelineWorker:
             raise ReviewRequired(
                 f"source integrity generation record is invalid: {exc}"
             ) from exc
-        if not _valid_stage(remux_marker, remux_inputs, [paths.reference]):
+        if scan.is_mkv:
+            if not _valid_stage(remux_marker, remux_inputs, [paths.reference]):
+                self._materialise_mkv_reference(job, paths, scan)
+                _write_stage(remux_marker, remux_inputs, [paths.reference])
+        elif not _valid_stage(remux_marker, remux_inputs, [paths.reference]):
             disc_root = self._stage_source(job, paths, scan, playlist) or scan.source
             command = reference_remux_command(
                 ReferenceRemuxPlan(

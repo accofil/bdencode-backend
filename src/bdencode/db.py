@@ -596,6 +596,9 @@ class Database:
         source_leaf = (
             request.source_path.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1]
         )
+        if source_leaf.casefold().endswith(".mkv") and len(source_leaf) > 4:
+            # An MKV remux source is named after its file, without the suffix.
+            source_leaf = source_leaf[:-4]
         name = request.name or source_leaf or job_id
         with self._write() as connection:
             connection.execute(

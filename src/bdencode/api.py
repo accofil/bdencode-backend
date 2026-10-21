@@ -131,6 +131,7 @@ from .media.profiles import (
 )
 from .media.aither_presets import aither_preset_settings, aither_presets
 from .media.noise_profiles import noise_profiles, preset_settings
+from .media.mkv_source import is_mkv_source
 from .media.planner import EncodePlanner, EncodeRequest
 from .analyzer import MkvAnalyzer
 from .api_extras import register_extra_routes
@@ -989,7 +990,11 @@ def create_app(
             raise ConfigurationError("source browser path must be a directory")
         entries: list[dict[str, object]] = []
         try:
-            children = sorted(selected.iterdir(), key=lambda value: value.name.casefold())
+            # Folders first, then the disc-remux MKV files, each by name.
+            children = sorted(
+                selected.iterdir(),
+                key=lambda value: (not value.is_dir(), value.name.casefold()),
+            )
         except OSError as exc:
             raise ConfigurationError("source directory cannot be read") from exc
         for item in children:
@@ -998,13 +1003,19 @@ def create_app(
                     settings.authorize_source(item)
                 except (ConfigurationError, OSError):
                     continue
-            if not item.is_dir():
+            if item.is_dir():
+                is_bluray = (item / "BDMV" / "PLAYLIST").is_dir()
+                kind = "bluray" if is_bluray else "folder"
+            elif item.is_file() and is_mkv_source(item):
+                is_bluray, kind = False, "mkv"
+            else:
                 continue
             entries.append(
                 {
                     "name": item.name,
                     "path": str(item),
-                    "is_bluray": (item / "BDMV" / "PLAYLIST").is_dir(),
+                    "is_bluray": is_bluray,
+                    "kind": kind,
                 }
             )
             if len(entries) >= 1000:
@@ -1039,6 +1050,10 @@ def create_app(
     def create_job(request: JobCreate) -> Job:
         if settings is not None:
             source = settings.authorize_source(request.source_path)
+            if source.is_file() and not is_mkv_source(source):
+                raise ConfigurationError(
+                    "a file source must be a disc-remux .mkv file"
+                )
             if request.work_path is not None:
                 work = Path(request.work_path).expanduser().resolve(strict=False)
                 if not work.is_relative_to(settings.jobs_root):
