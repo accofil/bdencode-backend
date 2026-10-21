@@ -1,5 +1,5 @@
 import { getLanguage, t } from "../i18n";
-import type { JobEvaluation } from "./types";
+import type { EncoderLog, JobEvaluation } from "./types";
 import type {
   AIKeyRequest,
   AIProvider,
@@ -322,6 +322,8 @@ export const api = {
   backups: () => apiFetch<BackupList>("/system/backups"),
   releaseUpdate: () => apiFetch<ReleaseUpdateResponse>("/system/release-update"),
   createBackup: () => apiFetch<BackupInfo>("/system/backups", { method: "POST" }),
+  encoderLog: (id: string) =>
+    apiFetch<EncoderLog>(`/jobs/${encodeURIComponent(id)}/encoder-log`),
   jobEvaluation: (id: string) =>
     apiFetch<JobEvaluation>(`/jobs/${encodeURIComponent(id)}/evaluation`),
   evaluateJob: (id: string, useAi: boolean) =>
@@ -366,6 +368,10 @@ export const api = {
 
 export function previewUrl(jobId: string, name: string): string {
   return `${API_ROOT}/jobs/${encodeURIComponent(jobId)}/previews/${encodeURIComponent(name)}`;
+}
+
+export function encoderLogDownloadUrl(jobId: string): string {
+  return `${API_ROOT}/jobs/${encodeURIComponent(jobId)}/encoder-log.txt`;
 }
 
 export function artifactContentUrl(id: string): string {

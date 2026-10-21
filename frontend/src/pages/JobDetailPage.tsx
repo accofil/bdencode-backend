@@ -35,6 +35,7 @@ import { api, ApiError, artifactContentUrl, fetchArtifactText } from "../api/cli
 import type { Artifact, DiscScanResult, EventRecord, Job, JobLive, JobOperation, JobStorageReport, ReleasePreparation, ReleasePreparationList, Scan } from "../api/types";
 import { ComparisonPanel } from "../components/ComparisonPanel";
 import { EvaluationCard } from "../components/EvaluationCard";
+import { EncoderLogCard } from "../components/EncoderLogCard";
 import { PipelineSteps } from "../components/JobCard";
 import { JobStatisticsCard } from "../components/JobStatisticsCard";
 import { LiveStepPanel, StepTimelineCard, useJobLive } from "../components/LiveStep";
@@ -684,6 +685,7 @@ function Overview({ job, scan, events, artifacts, live, running, reviewCardShown
           </Card>
         )}
         <StepTimelineCard live={live} showStep={running} />
+        <EncoderLogCard job={job} />
         <Card>
           <div className="section-heading"><div><span className="section-heading__icon"><ClipboardList size={19} /></span><div><h2>{t("Legutóbbi események", "Recent events")}</h2><p>{t("Sanitizált, tartós állapotnapló", "Sanitized, durable state log")}</p></div></div></div>
           {newest.length ? <div className="mini-timeline">{newest.map((event) => <EventItem key={event.id} event={event} compact />)}</div> : <p className="muted">{t("Még nincs naplózott esemény.", "No events logged yet.")}</p>}

@@ -32,6 +32,7 @@ from .ai_recommendation import (
     AIRecommendationUnavailable,
     RecommendationContext,
 )
+from .encoder_log import read_encoder_log
 from .comparison_evaluation import (
     EVALUATION_NAME,
     collect_facts,
@@ -752,6 +753,27 @@ def create_app(
         cache.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_json(cache, document)
         return {**document, "ai_available": ai_available}
+
+    @application.get(f"{API_PREFIX}/jobs/{{job_id}}/encoder-log")
+    def job_encoder_log(job_id: str) -> dict[str, Any]:
+        """The video encoder's log without the progress noise (the settings at the
+        start, the statistics at the end), with host paths masked."""
+
+        db.get_job(job_id)
+        return read_encoder_log(configured_settings().job_root(job_id))
+
+    @application.get(f"{API_PREFIX}/jobs/{{job_id}}/encoder-log.txt")
+    def job_encoder_log_text(job_id: str) -> Response:
+        db.get_job(job_id)
+        document = read_encoder_log(configured_settings().job_root(job_id))
+        if not document.get("available"):
+            raise HTTPException(status_code=404, detail="the job has no encoder log yet")
+        name = f"{document.get('encoder') or 'video'}-encode-log.txt"
+        return Response(
+            content=str(document["text"]),
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{name}"'},
+        )
 
     @application.get(f"{API_PREFIX}/jobs/{{job_id}}/evaluation")
     def job_evaluation(job_id: str) -> dict[str, Any]:
