@@ -1255,6 +1255,12 @@ function detectedAudioLanguage(analysis: TrackAnalysis | undefined, streamId: st
   return { code: record.iso639_2t, confidence: record.confidence ?? 0 };
 }
 
+function detectedSubtitleLanguage(analysis: TrackAnalysis | undefined, streamId: string): { code: string; confidence: number; method: "ocr" | "text" } | null {
+  const record = analysis?.subtitles?.[streamId]?.language;
+  if (!record || record.status !== "detected" || !record.iso639_2t) return null;
+  return { code: record.iso639_2t, confidence: record.confidence ?? 0, method: record.method ?? "ocr" };
+}
+
 function bcp47For(stream: MediaStream, code: string): string | null {
   return stream.language?.iso639_2t === code ? stream.language?.bcp47 ?? null : null;
 }
@@ -1277,10 +1283,16 @@ function pendingSuggestions(playlist: Playlist, selections: TrackSelection[]): A
       const current = selection.language || stream.language?.iso639_2t || null;
       if (detected && detected.code !== current) pending.push({ streamId: stream.id, update: { language: detected.code } });
     } else if (stream.kind === "subtitle") {
+      if (selection.action === "omit") continue;
+      const detected = detectedSubtitleLanguage(analysis, stream.id);
+      const current = selection.language || stream.language?.iso639_2t || null;
+      const update: Partial<TrackSelection> = {};
+      if (detected && detected.code !== current) update.language = detected.code;
       const suggestion = analysis.subtitles?.[stream.id];
       if (suggestion?.suggested_kind && (selection.subtitle_kind ?? "unknown") === "unknown") {
-        pending.push({ streamId: stream.id, update: { subtitle_kind: suggestion.suggested_kind, forced: suggestion.suggested_kind === "forced" } });
+        Object.assign(update, { subtitle_kind: suggestion.suggested_kind, forced: suggestion.suggested_kind === "forced" });
       }
+      if (Object.keys(update).length) pending.push({ streamId: stream.id, update });
     }
   }
   return pending;
@@ -1305,8 +1317,8 @@ function TrackAnalysisSummary({
   return (
     <Notice tone="info" title={t("Sávelemzés a lemezből", "Track analysis from the disc")}>
       <p>{t(
-        `A scan ${analysis.windows?.length ?? 0} rövid részletből (összesen ${minutes} perc) felismerte a hangsávok nyelvét, és megszámolta a feliratok eseményeit: a teljes feliratnak percenként több eseménye van, a forcednak csak néhány az egész filmben. Ezek javaslatok; minden sornál ellenőrizheted.`,
-        `The scan read ${analysis.windows?.length ?? 0} short windows (${minutes} min in total), detected the audio languages and counted the subtitle events: a full subtitle has several events a minute, a forced one only a few in the whole film. These are suggestions; check each row.`,
+        `A scan ${analysis.windows?.length ?? 0} rövid részletből (összesen ${minutes} perc) felismerte a hangsávok nyelvét a beszédből, a feliratokét a szövegükből (képes feliratnál OCR-rel), és megszámolta a feliratok eseményeit: a teljes feliratnak percenként több eseménye van, a forcednak csak néhány az egész filmben. Ezek javaslatok; minden sornál ellenőrizheted.`,
+        `The scan read ${analysis.windows?.length ?? 0} short windows (${minutes} min in total), detected the audio languages from the speech and the subtitle languages from their text (OCR for image subtitles), and counted the subtitle events: a full subtitle has several events a minute, a forced one only a few in the whole film. These are suggestions; check each row.`,
       )}</p>
       {pending.length > 0 && (
         <Button variant="secondary" icon={<WandSparkles size={16} />} onClick={() => pending.forEach(({ streamId, update }) => onUpdate(streamId, update))}>
@@ -1409,6 +1421,34 @@ function TrackTable({
                       <span>{current
                         ? t(`A lemez szerint ${current}, a hang alapján ${label} (${percent}%).`, `The disc says ${current}, the audio sounds ${label} (${percent}%).`)
                         : t(`A hang alapján: ${label} (${percent}%).`, `From the audio: ${label} (${percent}%).`)}</span>
+                      <Button variant="ghost" onClick={() => onUpdate(stream.id, { language: detected.code })}>{t("Elfogadás", "Accept")}</Button>
+                    </div>
+                  );
+                })()}
+                {stream.kind === "subtitle" && (() => {
+                  const record = analysis?.subtitles?.[stream.id]?.language;
+                  const detected = detectedSubtitleLanguage(analysis, stream.id);
+                  if (!detected) {
+                    if (record?.reason === "tesseract_missing") {
+                      return <div className="track-analysis">{t("A felirat szövegét nem lehetett felismerni: a gépen nincs OCR (tesseract).", "The caption text could not be read: no OCR (tesseract) on the host.")}</div>;
+                    }
+                    return record?.status === "unknown" && record.reason !== "too_little_text"
+                      ? <div className="track-analysis">{t("A felirat szövegéből a nyelv nem egyértelmű.", "From the caption text the language is not clear.")}</div>
+                      : null;
+                  }
+                  const current = selection.language || declaredLanguage;
+                  const label = languageLabel(detected.code, bcp47For(stream, detected.code));
+                  const percent = Math.round(detected.confidence * 100);
+                  const source = detected.method === "ocr" ? t("a felirat képeiből (OCR)", "the caption images (OCR)") : t("a felirat szövegéből", "the caption text");
+                  if (current === detected.code) {
+                    return <div className="track-analysis track-analysis--ok"><CheckCircle2 size={14} aria-hidden="true" /> {t(`Nyelv ${source}: ${label}, ${percent}%`, `Language from ${source}: ${label}, ${percent}%`)}</div>;
+                  }
+                  return (
+                    <div className="track-analysis track-analysis--differs">
+                      <AlertTriangle size={14} aria-hidden="true" />
+                      <span>{current
+                        ? t(`A forrás szerint ${current}, ${source} ${label} (${percent}%).`, `The source says ${current}, ${source} reads ${label} (${percent}%).`)
+                        : t(`Nyelv ${source}: ${label} (${percent}%).`, `Language from ${source}: ${label} (${percent}%).`)}</span>
                       <Button variant="ghost" onClick={() => onUpdate(stream.id, { language: detected.code })}>{t("Elfogadás", "Accept")}</Button>
                     </div>
                   );

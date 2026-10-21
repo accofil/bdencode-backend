@@ -630,6 +630,18 @@ export interface SubtitleTrackAnalysis {
   events_per_minute: number;
   suggested_kind: "full" | "forced" | null;
   confidence: "high" | "medium" | "low";
+  /** The captions' language, read from their text (OCR for PGS) (3.10). */
+  language?: SubtitleLanguageAnalysis;
+}
+
+export interface SubtitleLanguageAnalysis {
+  status: "detected" | "unknown" | "unavailable";
+  iso639_2t?: string;
+  confidence?: number;
+  words?: number;
+  method?: "ocr" | "text";
+  sample?: string;
+  reason?: string;
 }
 
 export interface TrackAnalysis {

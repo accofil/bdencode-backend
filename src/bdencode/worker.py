@@ -3441,24 +3441,9 @@ class PipelineWorker:
                 analyses = json.loads(report.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 analyses = {}
-        elif result_json.get("source_kind") == SOURCE_KIND_MKV:
-            # The analysis reads a disc through libbluray (``bluray:`` input,
-            # ``-playlist``), which a Matroska file is not.  Until it learns to
-            # read a file, an MKV scan records it as failed and never runs a
-            # disc command against the file.
-            analyses = {
-                str(playlist["playlist_id"]): {
-                    "schema_version": TRACK_ANALYSIS_SCHEMA_VERSION,
-                    "status": "failed",
-                    "reason": "mkv_source_unsupported",
-                }
-                for playlist in playlists_to_analyse(
-                    [p for p in result_json.get("playlists") or [] if isinstance(p, dict)]
-                )
-            }
-            atomic_write_json(report, analyses)
-            _write_stage(marker, inputs, [report])
         else:
+            # A disc is read through libbluray by PID; a remux MKV file by its
+            # own stream indexes (track_analysis.source_input_args).
             if self.scanner_factory is not None:
                 # Test and alternative scanners have no real disc to read.
                 return result_json
@@ -3727,6 +3712,26 @@ class PipelineWorker:
                 }
             )
 
+    @staticmethod
+    def _subtitle_detection(
+        paths: JobPaths, playlist_id: str, stream_id: str
+    ) -> tuple[str | None, float]:
+        """The caption-text language of a subtitle from the track analysis."""
+
+        try:
+            analyses = json.loads((paths.analysis / "track-analysis.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None, 0.0
+        wanted = str(playlist_id).lower().removesuffix(".mpls").zfill(5)
+        analysis = next(
+            (value for key, value in analyses.items() if str(key).zfill(5) == wanted),
+            None,
+        ) if isinstance(analyses, dict) else None
+        record = (((analysis or {}).get("subtitles") or {}).get(stream_id) or {}).get("language") or {}
+        code = normalize_iso639_2(record.get("iso639_2t")) if record.get("status") == "detected" else None
+        confidence = record.get("confidence")
+        return code, float(confidence) if isinstance(confidence, (int, float)) else 0.0
+
     def _resolve_selected_languages(
         self,
         job: Job,
@@ -3786,18 +3791,36 @@ class PipelineWorker:
             declared = stream.language
             labels = self._declared_language_codes(declared)
             if stream.kind is StreamKind.SUBTITLE:
-                # Subtitle declarations remain usable when their independent
-                # authored metadata agrees.  Audio is different: repeated
-                # MPLS/CLPI tags have proven capable of carrying the same wrong
-                # value, so every retained non-overridden audio track is sampled.
-                if (
+                # The selection-time analysis read the captions themselves
+                # (OCR for PGS, text for SubRip): that reading is the detection
+                # of a subtitle, as speech detection is for audio.
+                detected, detected_confidence = self._subtitle_detection(
+                    paths, selection.playlist_id, stream.id
+                )
+                if detected is None and (
                     declared is not None
                     and declared.iso639_2t is not None
                     and not declared.needs_review
                 ):
+                    # Agreeing authored metadata and nothing read: usable as is.
                     continue
+                evidence_records.append(
+                    {
+                        "stream_id": stream.id,
+                        "decision": declared.to_dict() if declared else None,
+                        "inference": {
+                            "status": "detected" if detected else "unavailable",
+                            "method": "caption_text",
+                            "consensus": {"iso639_2t": detected, "confidence": detected_confidence},
+                        },
+                    }
+                )
                 self._settle_language(
-                    stream, settle_track_language(labels), resolved, unresolved, language_warnings
+                    stream,
+                    settle_track_language(labels, detected, detected_confidence),
+                    resolved,
+                    unresolved,
+                    language_warnings,
                 )
                 continue
             if stream.kind is not StreamKind.AUDIO:

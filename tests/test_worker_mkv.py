@@ -178,13 +178,15 @@ def test_the_scan_stage_uses_the_mkv_scanner(context, monkeypatch) -> None:
         "video:0", "audio:1", "subtitle:2", "subtitle:3", "subtitle:4",
     ]
     _no_disc_commands(runner.commands)
-    # The disc-only track analysis is recorded as failed, without running.
+    # The track analysis reads the file itself by stream index.
     stored = database.list_scans(job_id=job.id, limit=1)[0].result
-    assert stored["playlists"][0]["track_analysis"] == {
-        "schema_version": worker_module.TRACK_ANALYSIS_SCHEMA_VERSION,
-        "status": "failed",
-        "reason": "mkv_source_unsupported",
-    }
+    analysis = stored["playlists"][0]["track_analysis"]
+    assert analysis.get("reason") != "mkv_source_unsupported"
+    window_reads = [
+        command for command in runner.commands
+        if command and command[0] == "ffmpeg" and any(str(item).endswith(".wav") or str(item).endswith(".mks") for item in command)
+    ]
+    assert window_reads and all(command[command.index("-i") + 1] == str(source.resolve()) for command in window_reads)
 
 
 def test_planner_reads_an_mkv_source_file_directly(context) -> None:

@@ -8,7 +8,6 @@ from bdencode.media.subtitle_language import (
     identify_text_language,
     parse_packets,
     pgs_captions,
-    render_caption_command,
     srt_text,
     sup_command,
     write_pgm,
@@ -85,5 +84,3 @@ def test_packets_give_time_and_size() -> None:
 def test_commands_read_only_the_window_file(tmp_path: Path) -> None:
     window = tmp_path / "subtitle-4608.mks"
     assert sup_command(window, tmp_path / "x.sup")[-3:] == ["-f", "sup", str(tmp_path / "x.sup")]
-    render = render_caption_command(window, 9.6, (1920, 1080), tmp_path / "c.png")
-    assert "-ss" not in render  # seeking inside the window loses the caption

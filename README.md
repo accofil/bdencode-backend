@@ -2,7 +2,7 @@
 
 **Blu-ray és UHD Blu-ray lemezek kódolása böngészőből, lépésről lépésre.**
 
-A BDEncode egy kész Blu-ray-mappából (a lemez `BDMV` mappájából) elkészíti a kész MKV-fájlt: kiválasztod a filmet, a hang- és feliratsávokat, a program pedig elvégzi a videó és a hang kódolását, ellenőrzi a minőséget, összehasonlító képeket készít, és összeállítja a release-csomagot (NFO, leírás, MediaInfo, képek). Mindezt egy weboldalon kezeled; parancssort csak a telepítésnél kell használnod.
+A BDEncode egy kész Blu-ray-mappából (a lemez `BDMV` mappájából) vagy egy lemezről készült remux MKV-ból elkészíti a kész MKV-fájlt: kiválasztod a filmet, a hang- és feliratsávokat, a program pedig elvégzi a videó és a hang kódolását, ellenőrzi a minőséget, összehasonlító képeket készít, és összeállítja a release-csomagot (NFO, leírás, MediaInfo, képek). Mindezt egy weboldalon kezeled; parancssort csak a telepítésnél kell használnod.
 
 > [!IMPORTANT]
 > A BDEncode **tesztelési (béta) állapotban** van. Első alkalommal egy rövidebb vagy kevésbé fontos lemezzel próbáld ki, és a kész MKV-t mindig nézd is meg lejátszóval.
@@ -45,7 +45,7 @@ A BDEncode egy kész Blu-ray-mappából (a lemez `BDMV` mappájából) elkészí
 
 **Amit nem csinál:**
 
-- **nem töri fel a lemez másolásvédelmét**: egy már kicsomagolt, `BDMV` mappát tartalmazó lemezmappát vár (ISO-fájlt nem);
+- **nem töri fel a lemez másolásvédelmét**: egy már kicsomagolt, `BDMV` mappát tartalmazó lemezmappát vagy egy lemezről készült, újrakódolás nélküli remux MKV-t (például MakeMKV-ből) vár (ISO-fájlt és streaming eredetű MKV-t nem);
 - **nem készít torrentet, és nem tölt fel trackerre**: a kész MKV-ból a torrentet a tracker szabályai szerint te készíted el;
 - nem kezeli a 3D-t;
 - nem kódol GPU-val (a videókódolás mindig CPU-n fut; ha van NVIDIA GPU, a crop-keresés gyorsabb).
@@ -455,7 +455,7 @@ Ha van beállított AI-kulcs, az első megnyitáskor az AI értékel egyszer, é
 ### 10.1. Új munka létrehozása
 
 1. Kattints az **Új kódolás** menüpontra.
-2. **Forrás:** kattints a lemez mappájára. A program a `BDMV`-t tartalmazó mappákat **Blu-ray forrás** felirattal jelöli. Ha nem látod a lemezt, kattints a **Frissítés** gombra.
+2. **Forrás:** kattints a lemez mappájára. A program a `BDMV`-t tartalmazó mappákat **Blu-ray forrás** felirattal jelöli, a `.mkv` fájlokat **MKV remux** felirattal. MKV-ként csak lemezről készült remux fogadható el (pontosan egy Blu-ray videósáv; a Dolby Vision profil 5 streaming fájl nem). Ha nem látod a forrást, kattints a **Frissítés** gombra.
 3. Kattints a **Tovább** gombra.
 4. **Tartalom:** add meg a munka nevét (például a film címét), ellenőrizd a lemeztípust (BD vagy UHD), és válaszd ki, mi van a lemezen: **Film**, **Koncert**, **Anime** vagy **Sorozatlemez**.
 5. **Munkamód:** első alkalommal válaszd a **Kezdő** módot. Itt kapcsolhatod ki vagy be a **Comparison képek feltöltése** lehetőséget is.
@@ -477,8 +477,9 @@ Ha a scan elkészült, a munka oldalán megjelenik a **Te következel** kártya.
 - A tetején választhatsz **tracker-profilt** (Aither vagy nCore). A **Sávterv igazítása** gomb ilyenkor a tracker szabályai szerint rendezi a sávokat, és a **Mi változott** lista megmutatja, mit módosított.
 - Minden hangsávnál kiválaszthatod, mi legyen vele: **Copy** (változatlanul megtartja), **FLAC**, **AC-3**, **E-AC-3**, **DTS** vagy **Kihagyás**. Ha nem tudod, hagyd a javasolt értéken.
 - Minden megtartott feliratnál meg kell adnod, hogy **Teljes felirat** vagy **Forced / signs** (csak a nem magyar/nem angol beszédrészeket feliratozó).
-- **Sávelemzés a lemezből:** a scan végén a program a film néhány rövid részletéből (6 × 30 másodperc) beszédfelismeréssel megállapítja a hangsávok nyelvét, és megszámolja a feliratok eseményeit. A sorokban ezt látod:
+- **Sávelemzés a lemezből:** a scan végén a program a film néhány rövid részletéből (6 × 30 másodperc) beszédfelismeréssel megállapítja a hangsávok nyelvét, a feliratokét a szövegükből (képes, PGS feliratnál szövegfelismeréssel, OCR-rel), és megszámolja a feliratok eseményeit. A sorokban ezt látod:
   - hangsávnál „A hang alapján: angol, 95%”; ha ez eltér a lemez jelölésétől, sárga figyelmeztetés és **Elfogadás** gomb jelenik meg;
+  - feliratnál „Nyelv a felirat képeiből (OCR): német, 86%” (szöveges feliratnál „a felirat szövegéből”); eltérésnél itt is **Elfogadás** gomb van. Ha a nyelvet nem adod meg kézzel, kódoláskor a felismert nyelv dönt a címke nélküli vagy ellentmondó címkéjű feliratnál;
   - feliratnál „Javaslat: Teljes felirat (31 esemény 3 perc mintában…)” vagy „Javaslat: Forced / signs”, és **Javaslat elfogadása** gomb. A teljes feliratnak percenként több eseménye van, a forcednak csak néhány az egész filmben.
 
   A **Minden javaslat elfogadása** gomb egyszerre elfogadja őket. Ezek javaslatok: ha bizonytalan, nézz bele a kész fájlba, vagy hagyd ki a sávot.

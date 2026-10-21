@@ -26,7 +26,7 @@ BITMAP_SUBTITLE_CODECS = frozenset({"hdmv_pgs_subtitle", "pgssub"})
 # The OCR models installed on the hosts (Latin alphabet); more can be added.
 OCR_LANGUAGES = "eng+hun"
 # Captions read per PGS stream (spread over the sampled windows).
-OCR_CAPTIONS_PER_STREAM = 12
+OCR_CAPTIONS_PER_STREAM = 30
 MIN_WORDS = 12
 # The winner needs this share of the two best scores to count.
 MIN_LEAD = 0.62
@@ -194,26 +194,6 @@ def parse_size(csv: str) -> tuple[int, int] | None:
     return None
 
 
-def render_caption_command(
-    path: Path, time: float, size: tuple[int, int], out_png: Path, *, ffmpeg: str = "ffmpeg"
-) -> list[str]:
-    """Draw the caption shown at ``time`` as dark text on white (what OCR reads best)."""
-
-    # Seeking inside the subtitle input loses the caption: the canvas runs on
-    # the window's own timeline instead and the frame just after the caption
-    # appears is taken.
-    width, height = size
-    at = max(0.0, time) + 0.2
-    return [
-        ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-y",
-        "-f", "lavfi", "-i", f"color=c=black:s={width}x{height}:r=5:d={at + 1:.3f}",
-        "-i", str(path),
-        "-filter_complex",
-        f"[0:v][1:s:0]overlay=eof_action=pass,select='gte(t,{at:.3f})',format=gray,negate",
-        "-frames:v", "1", "-fps_mode", "passthrough", str(out_png),
-    ]
-
-
 def ocr_command(png: Path, *, tesseract: str = "tesseract", languages: str = OCR_LANGUAGES) -> list[str]:
     return [tesseract, str(png), "stdout", "-l", languages, "--psm", "6"]
 
@@ -365,7 +345,6 @@ __all__ = [
     "ocr_command",
     "parse_packets",
     "parse_size",
-    "render_caption_command",
     "spread",
     "srt_text",
     "subtitle_probe_command",
