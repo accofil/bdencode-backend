@@ -646,18 +646,25 @@ export function SelectionWizard({
                 <span className="playlist-card__visual"><Film size={27} aria-hidden="true" /><small>{video?.width ?? "?"}×{video?.height ?? "?"}</small></span>
                 <span className="playlist-card__content">
                   <span className="playlist-card__top">
-                    <strong>{item.edition_label || (item.episode_number ? t(`${item.episode_number}. epizód`, `Episode ${item.episode_number}`) : `Playlist ${item.playlist_id}`)}</strong>
+                    <strong>{scan.source_kind === "mkv" ? "MKV remux" : item.edition_label || (item.episode_number ? t(`${item.episode_number}. epizód`, `Episode ${item.episode_number}`) : `Playlist ${item.playlist_id}`)}</strong>
                     {item.recommended && <Badge tone="success">{t("Ajánlott", "Recommended")}</Badge>}
                   </span>
                   <span className="playlist-card__facts">
                     <span>{formatDuration(item.duration_seconds)}</span>
                     <span>{t(`${item.chapters.length} fejezet`, `${item.chapters.length} chapters`)}</span>
-                    <span>{t(`${item.segments.length} szegmens`, `${item.segments.length} segments`)}</span>
-                    <span>{t(`${item.angle_count} szög`, `${item.angle_count} angles`)}</span>
+                    {scan.source_kind === "mkv" ? (
+                      <span>{t("egyetlen fájl", "single file")}</span>
+                    ) : (
+                      <>
+                        <span>{t(`${item.segments.length} szegmens`, `${item.segments.length} segments`)}</span>
+                        <span>{t(`${item.angle_count} szög`, `${item.angle_count} angles`)}</span>
+                      </>
+                    )}
                   </span>
                   <span className="playlist-card__tags">
                     <Badge>{video?.codec?.toUpperCase() || t("VIDEÓ", "VIDEO")}</Badge>
                     {video?.hdr10 && <Badge tone="info">HDR10</Badge>}
+                    {video?.hdr10_plus && <Badge tone="info">HDR10+</Badge>}
                     {video?.dolby_vision && <Badge tone="warning">DV → HDR10</Badge>}
                     {item.seamless_branching && <Badge>Seamless branching</Badge>}
                   </span>
@@ -1346,6 +1353,7 @@ function TrackTable({
               stream.sample_rate ? `${stream.sample_rate / 1000} kHz` : null,
               stream.bit_depth ? `${stream.bit_depth} bit` : null,
               stream.object_audio ? t("objektumalapú hang", "object-based audio") : null,
+              stream.text_subtitle ? t("szöveges felirat (nem PGS)", "text subtitle (not PGS)") : null,
             ].filter(Boolean).join(" · ");
             return (
               <div key={stream.id} className={selection.action === "omit" ? "track-row track-row--omitted" : "track-row"}>

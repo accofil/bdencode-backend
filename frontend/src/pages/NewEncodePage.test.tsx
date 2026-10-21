@@ -71,6 +71,29 @@ describe("NewEncodePage", () => {
     expect(screen.getByRole("button", { name: "Tovább" })).toBeDisabled();
   });
 
+  it("offers a disc-remux MKV file as a source, named without its extension", async () => {
+    const name = "I Want Your Sex 2026 Hybrid 2160p UHD Blu-ray Remux DoVi HDR10+ HEVC TrueHD 7.1 Atmos.mkv";
+    vi.mocked(api.sources).mockResolvedValue({
+      roots: ["/storage"],
+      path: "/storage",
+      entries: [
+        { name: "Extras", path: "/storage/Extras", is_bluray: false, kind: "folder" },
+        { name, path: `/storage/${name}`, is_bluray: false, kind: "mkv" },
+      ],
+    });
+    renderApp(<NewEncodePage />, "/new");
+
+    expect(await screen.findByText("MKV remux")).toBeInTheDocument();
+    // The long name is clamped in its tile; the full name stays in the tooltip.
+    expect(screen.getByTitle(name)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: `${name} megnyitása` })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Extras megnyitása" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: `${name} kiválasztása` }));
+    expect(screen.getByText(`/storage/${name}`)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Tovább" }));
+    expect(screen.getByPlaceholderText("Például: A film címe (2024)")).toHaveValue(name.slice(0, -4));
+  });
+
   it("shows the wizard in English", async () => {
     setLanguage("en", { persist: false });
     renderApp(<NewEncodePage />, "/new");
