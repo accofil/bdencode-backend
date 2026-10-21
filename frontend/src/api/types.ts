@@ -1191,6 +1191,20 @@ export interface BackupList {
   items: BackupInfo[];
 }
 
+export interface EncoderLog {
+  available: boolean;
+  encoder?: "x264" | "x265" | null;
+  /** true once the encoder printed its closing statistics. */
+  finished?: boolean;
+  options?: string | null;
+  summary?: string[];
+  text?: string;
+  line_count?: number;
+  raw_bytes?: number;
+  truncated?: boolean;
+  updated_at?: number;
+}
+
 export interface LocalizedPair {
   hu: string;
   en: string;
