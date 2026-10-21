@@ -198,6 +198,34 @@ describe("SelectionWizard", () => {
     expect(sent).toMatchObject({ mbtree: false, ipratio: 1.3 });
   });
 
+  it("titles an MKV remux source as one file and marks its text subtitles", async () => {
+    const user = userEvent.setup();
+    const scan = makeScanWithRetainedSubtitle();
+    scan.source = "/storage/Movie 2026 1080p Blu-ray Remux.mkv";
+    scan.source_kind = "mkv";
+    scan.playlists[0].streams.push({
+      ...scan.playlists[0].streams.at(-1)!,
+      id: "subtitle:3",
+      index: 3,
+      pid: null,
+      codec: "subrip",
+      title: "English SRT",
+      text_subtitle: true,
+    });
+    renderApp(<SelectionWizard job={makeJob({ state: "AWAITING_SELECTION", settings: { detail_level: "beginner" } })} scan={scan} onComplete={vi.fn()} />);
+
+    expect(screen.getByText("MKV remux")).toBeInTheDocument();
+    expect(screen.queryByText("Playlist 00001")).not.toBeInTheDocument();
+    expect(screen.getByText("egyetlen fájl")).toBeInTheDocument();
+    expect(screen.queryByText(/szegmens/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/szög$/)).not.toBeInTheDocument();
+    await waitFor(() => expect(api.profileRecommendation).toHaveBeenCalled());
+
+    await user.click(screen.getByRole("button", { name: "Tovább" }));
+    expect(screen.getByText("English SRT")).toBeInTheDocument();
+    expect(screen.getByText(/szöveges felirat \(nem PGS\)/)).toBeInTheDocument();
+  });
+
   it("walks through playlist, tracks and video before server validation and save", async () => {
     const user = userEvent.setup();
     const onComplete = vi.fn();

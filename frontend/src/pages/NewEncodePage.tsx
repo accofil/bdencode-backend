@@ -5,6 +5,7 @@ import {
   Check,
   Clapperboard,
   Disc3,
+  FileVideo,
   Film,
   Folder,
   FolderOpen,
@@ -68,6 +69,11 @@ function detailOptions() {
     { value: "advanced" as const, icon: Wrench, title: t("Haladó", "Advanced"), description: t("CRF, preset, GOP, AQ és a fontosabb képi paraméterek.", "CRF, preset, GOP, AQ and the main picture parameters.") },
     { value: "pro" as const, icon: Layers3, title: t("Profi", "Pro"), description: t("Minden támogatott x264/x265 paraméter, csoportosítva.", "Every supported x264/x265 parameter, grouped.") },
   ];
+}
+
+/** What a source-browser entry is; older servers only say whether it is a Blu-ray folder. */
+export function sourceEntryKind(entry: SourceEntry): "bluray" | "mkv" | "folder" {
+  return entry.kind ?? (entry.is_bluray ? "bluray" : "folder");
 }
 
 function loadDraft(): Draft {
@@ -171,12 +177,14 @@ export function NewEncodePage() {
   }, [root, sources.data?.path]);
 
   function chooseSource(entry: SourceEntry) {
+    // An MKV remux is named after its file, without the extension.
+    const sourceName = sourceEntryKind(entry) === "mkv" ? entry.name.replace(/\.mkv$/i, "") || entry.name : entry.name;
     setDraft((value) => ({
       ...value,
       sourcePath: entry.path,
-      sourceName: entry.name,
-      // The name follows the chosen disc until the operator types their own.
-      name: !value.name.trim() || value.name === value.sourceName ? entry.name : value.name,
+      sourceName,
+      // The name follows the chosen source until the operator types their own.
+      name: !value.name.trim() || value.name === value.sourceName ? sourceName : value.name,
     }));
   }
 
@@ -191,8 +199,8 @@ export function NewEncodePage() {
         eyebrow={t("Új kódolás", "New encode")}
         title={stepTitle}
         description={t(
-          "A lemez először biztonságos, írásmentes scanen megy át, ez egy futó encode mellett is elkészülhet. Kódolás csak a későbbi beállítás-jóváhagyás és a sorra kerülés után indul.",
-          "The disc first goes through a safe, read-only scan, which can run alongside an encode in progress. Encoding starts only after you approve the settings and the job reaches the front of the queue.",
+          "A forrás (Blu-ray mappa vagy lemezről készült remux MKV) először biztonságos, írásmentes scanen megy át, ez egy futó encode mellett is elkészülhet. Kódolás csak a későbbi beállítás-jóváhagyás és a sorra kerülés után indul.",
+          "The source (a Blu-ray folder or a disc remux MKV) first goes through a safe, read-only scan, which can run alongside an encode in progress. Encoding starts only after you approve the settings and the job reaches the front of the queue.",
         )}
       />
 
@@ -217,7 +225,8 @@ export function NewEncodePage() {
           <div className="source-browser__header">
             <div>
               <span className="eyebrow">{t("Szerver tárhely", "Server storage")}</span>
-              <h2>{t("Válassz BDMV-forrást", "Choose a BDMV source")}</h2>
+              <h2>{t("Válassz BDMV-forrást vagy remux MKV-t", "Choose a BDMV source or a remux MKV")}</h2>
+              <small className="muted">{t("MKV-ként csak lemezről készült, újrakódolás nélküli remux (pl. MakeMKV) fogadható el.", "Only an untouched disc remux (for example from MakeMKV) is accepted as an MKV.")}</small>
             </div>
             <Button variant="ghost" icon={<RefreshCw size={16} />} onClick={() => void sources.refetch()} loading={sources.isFetching}>{t("Frissítés", "Refresh")}</Button>
           </div>
@@ -231,7 +240,7 @@ export function NewEncodePage() {
               ))}
             </nav>
             <label className="search-field search-field--small">
-              <Search size={16} aria-hidden="true" /><input aria-label={t("Mappa keresése", "Search folders")} value={folderFilter} onChange={(event) => setFolderFilter(event.target.value)} placeholder={t("Mappa keresése…", "Search folders…")} />
+              <Search size={16} aria-hidden="true" /><input aria-label={t("Mappa keresése", "Search folders")} value={folderFilter} onChange={(event) => setFolderFilter(event.target.value)} placeholder={t("Mappa vagy MKV keresése…", "Search folders or MKV files…")} />
             </label>
           </div>
 
@@ -239,21 +248,25 @@ export function NewEncodePage() {
             <Notice tone="danger" title={t("A tárhely nem olvasható", "The storage cannot be read")}>{sources.error instanceof Error ? sources.error.message : t("Ismeretlen kapcsolati hiba", "Unknown connection error")}</Notice>
           ) : (
             <div className="folder-grid">
-              {entries.map((entry) => (
-                <div key={entry.path} className={draft.sourcePath === entry.path ? "folder-tile folder-tile--selected" : "folder-tile"}>
-                  <button type="button" className="folder-tile__open" title={entry.name} onClick={() => entry.is_bluray ? chooseSource(entry) : setBrowsePath(entry.path)}>
-                    <span className="folder-tile__icon">{entry.is_bluray ? <Disc3 size={25} /> : <Folder size={25} />}</span>
-                    <span className="folder-tile__name"><strong>{entry.name}</strong><small>{entry.is_bluray ? t("Blu-ray forrás", "Blu-ray source") : t("Mappa", "Folder")}</small></span>
-                  </button>
-                  {entry.is_bluray && (
-                    <button type="button" className="folder-tile__select" onClick={() => chooseSource(entry)} aria-label={t(`${entry.name} kiválasztása`, `Select ${entry.name}`)}>
-                      {draft.sourcePath === entry.path ? <Check size={17} /> : t("Kiválasztás", "Select")}
+              {entries.map((entry) => {
+                const kind = sourceEntryKind(entry);
+                const selectable = kind !== "folder";
+                return (
+                  <div key={entry.path} className={draft.sourcePath === entry.path ? "folder-tile folder-tile--selected" : "folder-tile"}>
+                    <button type="button" className="folder-tile__open" title={entry.name} onClick={() => selectable ? chooseSource(entry) : setBrowsePath(entry.path)}>
+                      <span className="folder-tile__icon">{kind === "bluray" ? <Disc3 size={25} /> : kind === "mkv" ? <FileVideo size={25} /> : <Folder size={25} />}</span>
+                      <span className="folder-tile__name"><strong>{entry.name}</strong><small>{kind === "bluray" ? t("Blu-ray forrás", "Blu-ray source") : kind === "mkv" ? "MKV remux" : t("Mappa", "Folder")}</small></span>
                     </button>
-                  )}
-                  {!entry.is_bluray && <button type="button" className="folder-tile__chevron" onClick={() => setBrowsePath(entry.path)} aria-label={t(`${entry.name} megnyitása`, `Open ${entry.name}`)}><ArrowRight size={17} aria-hidden="true" /></button>}
-                </div>
-              ))}
-              {!entries.length && <div className="folder-empty"><FolderOpen size={25} /><span>{t("Ebben a mappában nincs további könyvtár.", "This folder has no further subfolders.")}</span></div>}
+                    {selectable && (
+                      <button type="button" className="folder-tile__select" onClick={() => chooseSource(entry)} aria-label={t(`${entry.name} kiválasztása`, `Select ${entry.name}`)}>
+                        {draft.sourcePath === entry.path ? <Check size={17} /> : t("Kiválasztás", "Select")}
+                      </button>
+                    )}
+                    {!selectable && <button type="button" className="folder-tile__chevron" onClick={() => setBrowsePath(entry.path)} aria-label={t(`${entry.name} megnyitása`, `Open ${entry.name}`)}><ArrowRight size={17} aria-hidden="true" /></button>}
+                  </div>
+                );
+              })}
+              {!entries.length && <div className="folder-empty"><FolderOpen size={25} /><span>{t("Ebben a mappában nincs további könyvtár vagy MKV-fájl.", "This folder has no further subfolders or MKV files.")}</span></div>}
             </div>
           )}
 
