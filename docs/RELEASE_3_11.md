@@ -23,6 +23,15 @@
 - Ha az FFmpeg-ben nincs `libvmaf` szűrő, a program a hivatalos, önálló VMAF parancssori programot használja. Ez nem hiba, ezért a Rendszer oldalon **Tájékoztatás** cím alatt, szürkén jelenik meg, a valódi figyelmeztetésektől külön. A **Runtime figyelmeztetések** blokk csak akkor látszik, ha van valódi figyelmeztetés.
 - Az API-ban a `runtime-capabilities` válasz `warnings` listája csak a valódi figyelmeztetéseket tartalmazza (szövegként, mint eddig); az új `notices` lista minden tételt `severity` mezővel (`warning` vagy `info`) ad vissza.
 
+## A varázsló nem jelez tévesen „Hiányzó nyelv”-et
+
+Eddig minden megtartott sáv „bizonytalan nyelvű” volt, amelynél nem írtál be kézzel nyelvet, akkor is, ha a forrás címkéje rendben volt. Remux MKV-nál ez minden sávra kiírta a figyelmeztetést. Mostantól csak az a sáv számít bizonytalannak, amelynek
+- nincs kézzel megadott nyelve,
+- a címkéje hiányzik vagy ellenőrzésre szorul,
+- és ezt a sávelemzés (hangnál a beszéd, feliratnál a szöveg) sem erősíti meg; címke nélküli sávnál a felismerésnek legalább 75%-osnak kell lennie.
+
+A figyelmeztetés szövege sem állítja többé, hogy a PGS felirat nyelvét kézzel kell megadni.
+
 ## Új API-végpontok
 
 - `GET /api/v1/system/image-upload`: a tárhelyek a sorrendjükben, `configured` jelzéssel; kulcsot sosem ad vissza.
