@@ -184,3 +184,138 @@ def test_without_speech_detection_audio_is_reported_unavailable(tmp_path: Path) 
     result = analyse_playlist(Path("/d"), playlist, tmp_path, run=run, detect_language=None)
     assert result["audio"] == {"audio:4352": {"status": "unavailable"}}
     assert result["subtitles"] == {}
+
+
+def test_an_unreadable_window_or_subtitle_file_is_skipped_not_fatal(tmp_path: Path) -> None:
+    """3.9 failed a whole disc (The Florist) on one cut subtitle window."""
+
+    playlist = {
+        "playlist_id": "00002",
+        "duration_seconds": 6000.0,
+        "streams": [
+            {"id": "audio:4352", "kind": "audio", "pid": 4352},
+            {"id": "subtitle:4608", "kind": "subtitle", "pid": 4608},
+        ],
+    }
+
+    def run(argv: list[str], cwd: Path) -> str:
+        if argv[0] == "ffprobe" and "-playlist" in argv:
+            return json.dumps({"streams": [{"index": 1, "id": "0x1100"}, {"index": 4, "id": "0x1200"}]})
+        if argv[0] == "ffmpeg":
+            if "window-02" in str(cwd):
+                raise RuntimeError("Residual encoded channels are present without core")
+            for item in argv:
+                if item.endswith(".wav"):
+                    _write_wav(Path(item))
+                elif item.endswith(".mks"):
+                    Path(item).write_bytes(b"mks")
+            return ""
+        if "window-03" in str(cwd):
+            raise RuntimeError("End of file")
+        return "9000\n20"
+
+    result = analyse_playlist(Path("/discs/Film"), playlist, tmp_path, run=run, detect_language=None)
+
+    assert {"window": 2, "reason": "RuntimeError"} in result["skipped"]
+    assert {"window": 3, "stream_id": "subtitle:4608", "reason": "unreadable_subtitle_window"} in result["skipped"]
+    assert result["subtitles"]["subtitle:4608"]["events"] == 4  # windows 1, 4, 5, 6
+
+
+def test_a_remux_file_is_read_by_stream_index(tmp_path: Path) -> None:
+    source = tmp_path / "Film.mkv"
+    source.write_bytes(b"mkv")
+    playlist = {
+        "playlist_id": "00001",
+        "duration_seconds": 5400.0,
+        "streams": [
+            {"id": "video:0", "kind": "video", "index": 0, "codec": "hevc"},
+            {"id": "audio:1", "kind": "audio", "index": 1, "codec": "truehd"},
+            {"id": "subtitle:3", "kind": "subtitle", "index": 3, "codec": "subrip"},
+        ],
+    }
+    reads: list[list[str]] = []
+
+    def run(argv: list[str], cwd: Path) -> str:
+        if argv[0] == "ffmpeg" and "-f" in argv and argv[argv.index("-f") + 1] == "srt":
+            return "1\n00:00:01,000 --> 00:00:02,000\nWhat are you doing here? I don't know.\n\n2\n00:00:03,000 --> 00:00:04,000\nCome on, we have to go now. Thank you, it's okay.\n"
+        if argv[0] == "ffmpeg":
+            reads.append(argv)
+            for item in argv:
+                if item.endswith(".wav"):
+                    _write_wav(Path(item))
+                elif item.endswith(".mks"):
+                    Path(item).write_bytes(b"mks")
+            return ""
+        return "9000\n20"
+
+    result = analyse_playlist(source, playlist, tmp_path / "work", run=run, detect_language=None)
+
+    assert all("-playlist" not in argv and not any(str(a).startswith("bluray:") for a in argv) for argv in reads)
+    assert reads[0][reads[0].index("-i") + 1] == str(source)
+    assert ["-map", "0:1"] == reads[0][reads[0].index(str(tmp_path / "work" / "window-01" / "audio-1.wav")) - 11:][:2]
+    language = result["subtitles"]["subtitle:3"]["language"]
+    assert language["status"] == "detected" and language["iso639_2t"] == "eng" and language["method"] == "text"
+
+
+def test_pgs_captions_are_read_with_ocr(tmp_path: Path, monkeypatch) -> None:
+    import bdencode.media.track_analysis as module
+    from test_subtitle_language import caption_sup
+
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/" + name)
+    playlist = {
+        "playlist_id": "00002",
+        "duration_seconds": 6000.0,
+        "streams": [{"id": "subtitle:4608", "kind": "subtitle", "pid": 4608, "codec": "hdmv_pgs_subtitle"}],
+    }
+    ocr_calls: list[list[str]] = []
+
+    def run(argv: list[str], cwd: Path) -> str:
+        if argv[0] == "ffprobe" and "-playlist" in argv:
+            return json.dumps({"streams": [{"index": 4, "id": "0x1200"}]})
+        if argv[0] == "ffmpeg" and argv[-2] == "sup":
+            Path(argv[-1]).write_bytes(caption_sup())
+            return ""
+        if argv[0] == "ffmpeg":
+            for item in argv:
+                if item.endswith(".mks"):
+                    Path(item).write_bytes(b"mks")
+            return ""
+        if argv[0] == "tesseract":
+            ocr_calls.append(argv)
+            return "Wirklich? Ja. Danke. Und danke. Fick dich, leck mich."
+        return "9000\n20"
+
+    result = analyse_playlist(Path("/discs/Film"), playlist, tmp_path, run=run, detect_language=None)
+
+    language = result["subtitles"]["subtitle:4608"]["language"]
+    assert language["method"] == "ocr" and language["status"] == "detected" and language["iso639_2t"] == "deu"
+    assert 1 <= len(ocr_calls) <= 12 and all(call[1].endswith(".pgm") for call in ocr_calls)
+
+
+def test_without_tesseract_pgs_language_is_unavailable(tmp_path: Path, monkeypatch) -> None:
+    import bdencode.media.track_analysis as module
+
+    monkeypatch.setattr(module.shutil, "which", lambda name: None)
+    playlist = {
+        "playlist_id": "00002",
+        "duration_seconds": 6000.0,
+        "streams": [{"id": "subtitle:4608", "kind": "subtitle", "pid": 4608, "codec": "hdmv_pgs_subtitle"}],
+    }
+
+    def run(argv: list[str], cwd: Path) -> str:
+        if argv[0] == "ffprobe" and "-playlist" in argv:
+            return json.dumps({"streams": [{"index": 4, "id": "0x1200"}]})
+        return "9000\n20"
+
+    result = analyse_playlist(Path("/discs/Film"), playlist, tmp_path, run=run, detect_language=None)
+    assert result["subtitles"]["subtitle:4608"]["language"] == {"status": "unavailable", "reason": "tesseract_missing", "method": "ocr"}
+
+
+def test_text_subtitle_packets_are_captions_whatever_their_size() -> None:
+    """SubRip captions are tiny packets; the PGS size rule called them forced."""
+
+    from bdencode.media.track_analysis import event_min_bytes
+
+    sizes = "\n".join(["38", "52", "61", "0"])
+    assert count_events(sizes, event_min_bytes("subrip")) == 3
+    assert count_events(sizes, event_min_bytes("hdmv_pgs_subtitle")) == 0
