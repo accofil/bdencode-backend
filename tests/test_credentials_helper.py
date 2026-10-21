@@ -35,7 +35,8 @@ def test_requests_are_validated_strictly() -> None:
     assert helper.validate(good) == (REQUEST_ID, "anthropic-api-key", "set", KEY)
     assert helper.validate({**{k: v for k, v in good.items() if k != "value"}, "action": "delete"})[2] == "delete"
     for bad in (
-        {**good, "credential": "imgbb-api-key"},
+        {**good, "credential": "tracker-aither-api-token"},
+        {**good, "credential": "imgbb-api-key"},  # not an ImgBB key
         {**good, "credential": "../../etc/shadow"},
         {**good, "value": "sk-proj-" + "x" * 40},  # an OpenAI key for Claude
         {**good, "credential": "openai-api-key", "value": KEY},
@@ -131,7 +132,7 @@ def test_delete_unbinds_and_bad_requests_change_nothing(tmp_path: Path) -> None:
     os.chmod(credentials / "openai-api-key.cred", 0o600)
     dropin.write_text("[Service]\nLoadCredentialEncrypted=openai-api-key:x\n", encoding="utf-8")
     _request(run_dir, {"schema_version": 1, "request_id": REQUEST_ID, "credential": "openai-api-key", "action": "delete"})
-    _request(run_dir, {"schema_version": 1, "request_id": "f" * 32, "credential": "imgbb-api-key", "action": "delete"})
+    _request(run_dir, {"schema_version": 1, "request_id": "f" * 32, "credential": "tracker-aither-api-token", "action": "delete"})
     (run_dir / "unrelated.json").write_text("{}", encoding="utf-8")
     system = FakeSystem()
 

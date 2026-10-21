@@ -156,11 +156,24 @@ def submit_credential_request(
 ) -> str:
     """Hand one key change to the root helper; returns the request id."""
 
+    return submit_named_credential_request(
+        directory, PROVIDER_CREDENTIALS[provider], action, value
+    )
+
+
+def submit_named_credential_request(
+    directory: Path,
+    credential: str,
+    action: Literal["set", "delete"],
+    value: str | None = None,
+) -> str:
+    """One change of the credential ``credential``; the helper checks the name."""
+
     request_id = uuid.uuid4().hex
     document: dict[str, Any] = {
         "schema_version": 1,
         "request_id": request_id,
-        "credential": PROVIDER_CREDENTIALS[provider],
+        "credential": credential,
         "action": action,
     }
     if action == "set":

@@ -60,7 +60,7 @@ import type { SourceColorField, SourceColorMetadata } from "../colorMetadata";
 import { normalizeStoredSelection } from "../selection";
 import type { StoredTrackSelection } from "../selection";
 import { encoderHelp } from "../encoderHelp";
-import { IMAGE_UPLOAD_PROVIDER_LABELS, UPLOAD_IMAGE_SET_LABELS, uploadImageSet } from "../uploads";
+import { imageHostOrderText, imageUploadProviderLabels, UPLOAD_IMAGE_SET_LABELS, uploadImageSet, useImageHostOrder } from "../uploads";
 import { basename, formatDuration, humanize, stabilityWarning, suggestedOutputName } from "../utils";
 import {
   buildReleaseName,
@@ -304,6 +304,8 @@ export function SelectionWizard({
   scan: DiscScanResult;
   onComplete: () => void;
 }) {
+  const hostOrder = useImageHostOrder();
+  const providerLabels = imageUploadProviderLabels(hostOrder);
   const initial = normalizeStoredSelection(job.selection);
   const initialPlaylist = initial?.playlistId
     ? scan.playlists.find((item) => item.playlist_id === initial.playlistId)
@@ -1003,13 +1005,13 @@ export function SelectionWizard({
 
             <div className="review-options">
               <label className="toggle-row">
-                <span><strong>{t("Képfeltöltés és BBCode", "Image upload and BBCode")}</strong><small>{t("Automatikus módban a sorrend: ImgBB, Catbox, majd Freeimage; a sikeres szolgáltató az egész csomagra rögzül.", "In automatic mode the order is ImgBB, Catbox, then Freeimage; the first host that succeeds is used for the whole set.")}</small></span>
+                <span><strong>{t("Képfeltöltés és BBCode", "Image upload and BBCode")}</strong><small>{t(`Automatikus módban a sorrend: ${imageHostOrderText(hostOrder)}; a sikeres szolgáltató az egész csomagra rögzül.`, `In automatic mode the order is ${imageHostOrderText(hostOrder)}; the first host that succeeds is used for the whole set.`)}</small></span>
                 <input type="checkbox" checked={uploadImages} onChange={(event) => { setUploadImages(event.target.checked); setValidation(null); }} /><span className="toggle" aria-hidden="true" />
               </label>
               <label className="field">
                 <span>{t("Képtárhely", "Image host")}</span>
                 <select aria-label={t("Képtárhely", "Image host")} value={selectedImageProvider} disabled={!uploadImages} onChange={(event) => { setSelectedImageProvider(event.target.value as ImageUploadProvider); setValidation(null); }}>
-                  {Object.entries(IMAGE_UPLOAD_PROVIDER_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                  {Object.entries(providerLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                 </select>
                 <small>{t("Automatikus módban csak az első sikeres kép előtt válthat szolgáltatót; kézi módban nincs failover.", "In automatic mode the host can only change before the first successful image; manual mode has no failover.")}</small>
               </label>

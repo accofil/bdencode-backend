@@ -355,7 +355,7 @@ Nyisd meg a **Rendszer** oldalt, és nézd meg:
 - **Tárhely**: van-e elég szabad hely;
 - **Processzor**: a logikai CPU-k száma, a CPU-keret, és hogy van-e GPU a crop-kereséshez (ha nincs, az is rendben van).
 
-Ha valami pirosan jelez, nézd meg a [13. pontot](#13-ha-valami-nem-működik).
+Ha valami pirosan jelez, nézd meg a [13. pontot](#13-ha-valami-nem-működik). A lap alján a szürke **Tájékoztatás** blokk (például hogy a VMAF az önálló VMAF programmal fut) nem hiba, nincs vele teendő.
 
 ### 7.3. A CPU-keret beállítása
 
@@ -376,7 +376,21 @@ A program az összehasonlító képeket fel tudja tölteni egy képtárhelyre, �
 Elég egy is, de kettő ajánlott: ha az egyik nem működik, a program a másikkal próbálkozik. Képfeltöltés nélkül is minden működik; a képek a kész mappában megmaradnak.
 
 > [!IMPORTANT]
-> A kulcsot ne írd be chatbe, hibajelentésbe, és ne tedd képernyőképre. Az alábbi módszer titkosítva menti, és begépeléskor sem látszik.
+> A kulcsot ne írd be chatbe, hibajelentésbe, és ne tedd képernyőképre. Mindkét alábbi módszer titkosítva menti, és begépeléskor sem látszik.
+
+### 8.1. A legegyszerűbb: a Rendszer oldalon
+
+1. Nyisd meg a **Rendszer** oldalt, és keresd meg a **Képfeltöltés** kártyát.
+2. A tárhely sorában írd be a kulcsot (ImgBB és Freeimage: 32 karakteres API-kulcs; Catbox: userhash), és kattints a **Mentés** gombra.
+3. Néhány másodperc múlva a sor állapota **Kulcs beállítva** lesz.
+
+A futó worker a következő feltöltésnél már az új kulcsot használja: semmit sem kell újraindítani, és egy épp futó kódolás sem szakad meg. Ugyanitt cserélheted (új kulcs beírásával) és törölheted (**Törlés**) a kulcsot. Az oldal a kulcsot sosem mutatja vissza.
+
+A kártyán a nyilakkal azt is beállíthatod, melyik tárhellyel kezdjen az automatikus mód, és melyik legyen a tartalék (alapból ImgBB → Catbox → Freeimage); a **Sorrend mentése** után a következő feltöltéstől érvényes.
+
+### 8.2. Másik lehetőség: parancssorból
+
+Ha a Rendszer oldal azt írja, hogy a kulcs ott nem állítható be (régebbi telepítés), vagy inkább parancssorból dolgozol, így is beállíthatod:
 
 **1. Nyiss parancssort a BDEncode gépén.** Windows-telepítésnél nyiss PowerShellt, és írd be: `wsl -d Debian` (ezzel a BDEncode Linux-környezetébe lépsz). Szerveren jelentkezz be SSH-val.
 

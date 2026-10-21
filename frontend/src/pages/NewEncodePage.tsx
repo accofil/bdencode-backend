@@ -27,7 +27,7 @@ import { api, ApiError } from "../api/client";
 import type { ContentType, DetailLevel, DiscType, ImageUploadProvider, SourceEntry, UploadImageSet } from "../api/types";
 import { Badge, Button, Card, LoadingPanel, Notice, PageHeader } from "../components/ui";
 import { t, useLanguage } from "../i18n";
-import { IMAGE_UPLOAD_PROVIDER_LABELS, UPLOAD_IMAGE_SET_LABELS, uploadImageSet } from "../uploads";
+import { imageUploadProviderLabels, UPLOAD_IMAGE_SET_LABELS, uploadImageSet, useImageHostOrder } from "../uploads";
 import { basename, contentLabel } from "../utils";
 
 interface Draft {
@@ -112,6 +112,7 @@ function loadDraft(): Draft {
 }
 
 export function NewEncodePage() {
+  const providerLabels = imageUploadProviderLabels(useImageHostOrder());
   const [step, setStep] = useState(1);
   const [browsePath, setBrowsePath] = useState<string | undefined>();
   const [folderFilter, setFolderFilter] = useState("");
@@ -344,7 +345,7 @@ export function NewEncodePage() {
             <label className="field">
               <span>{t("Képtárhely", "Image host")}</span>
               <select aria-label={t("Képtárhely", "Image host")} value={draft.imageUploadProvider} disabled={!draft.uploadImages} onChange={(event) => setDraft((value) => ({ ...value, imageUploadProvider: event.target.value as ImageUploadProvider }))}>
-                {Object.entries(IMAGE_UPLOAD_PROVIDER_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                {Object.entries(providerLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
               <small>{t("Kézi választásnál a rendszer nem vált át másik szolgáltatóra.", "With a manual choice the system does not fall back to another provider.")}</small>
             </label>
@@ -366,7 +367,7 @@ export function NewEncodePage() {
               <div><dt>{t("Tartalom", "Content")}</dt><dd>{contentLabel(draft.contentType)}</dd></div>
               <div><dt>{t("Lemez", "Disc")}</dt><dd>{draft.discType === "AUTO" ? t("Automatikus felismerés", "Automatic detection") : draft.discType}</dd></div>
               <div><dt>{t("Nézet", "View")}</dt><dd>{detailOptions().find((item) => item.value === draft.detailLevel)?.title}</dd></div>
-              <div><dt>{t("Képfeltöltés", "Image upload")}</dt><dd>{draft.uploadImages ? `${IMAGE_UPLOAD_PROVIDER_LABELS[draft.imageUploadProvider]} · ${UPLOAD_IMAGE_SET_LABELS[draft.uploadImageSet]}` : t("Kikapcsolva", "Off")}</dd></div>
+              <div><dt>{t("Képfeltöltés", "Image upload")}</dt><dd>{draft.uploadImages ? `${providerLabels[draft.imageUploadProvider]} · ${UPLOAD_IMAGE_SET_LABELS[draft.uploadImageSet]}` : t("Kikapcsolva", "Off")}</dd></div>
             </dl>
             <Notice tone="info">{t(
               "A scan nem módosítja a forrást, és a futó encode-ot sem állítja le. A playlistet, sávokat és videóbeállításokat az eredmény után hagyod jóvá; ezután a munka kész paraméterekkel kerül a kódolási sorba.",

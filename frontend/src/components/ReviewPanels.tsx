@@ -11,7 +11,7 @@ import type {
   UploadImageSet,
   UploadResetRequest,
 } from "../api/types";
-import { IMAGE_HOST_NAMES, IMAGE_UPLOAD_PROVIDER_LABELS, UPLOAD_IMAGE_SET_LABELS, uploadImageSet } from "../uploads";
+import { IMAGE_HOST_NAMES, imageUploadProviderLabels, UPLOAD_IMAGE_SET_LABELS, uploadImageSet, useImageHostOrder } from "../uploads";
 import { getLanguage, t, useLanguage } from "../i18n";
 import type { Language } from "../i18n";
 import { formatBytes, formatStatusMessage, videoMetricFinding } from "../utils";
@@ -254,6 +254,7 @@ export function UploadReviewCard({
   credentials?: Record<string, RuntimeCredentialCapability>;
 }) {
   const refresh = useJobRefresh(job);
+  const providerLabels = imageUploadProviderLabels(useImageHostOrder());
   const info = review.upload;
   const largest = info?.largest_image_bytes ?? null;
   const hosts = (info?.hosts ?? []).map((host) => ({
@@ -326,7 +327,7 @@ export function UploadReviewCard({
         <label className="field">
           <span>{t("Képtárhely", "Image host")}</span>
           <select aria-label={t("Új képtárhely", "New image host")} value={provider} onChange={(event) => setProvider(event.target.value as ImageUploadProvider)}>
-            {Object.entries(IMAGE_UPLOAD_PROVIDER_LABELS).map(([value, text]) => <option key={value} value={value}>{text}</option>)}
+            {Object.entries(providerLabels).map(([value, text]) => <option key={value} value={value}>{text}</option>)}
           </select>
         </label>
         <label className="field">

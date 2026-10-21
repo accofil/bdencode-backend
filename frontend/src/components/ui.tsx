@@ -106,7 +106,8 @@ export function Notice({
   title,
   children,
 }: PropsWithChildren<{
-  tone?: "info" | "success" | "warning" | "danger";
+  /** `muted`: grey, for information that needs no action. */
+  tone?: "info" | "muted" | "success" | "warning" | "danger";
   title?: string;
 }>) {
   const Icon = tone === "success" ? CheckCircle2 : tone === "warning" ? AlertTriangle : tone === "danger" ? XCircle : Info;

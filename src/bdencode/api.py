@@ -43,12 +43,22 @@ from .ai_settings import (
     AIPreferences,
     AIProvider,
     CredentialRequestUnavailable,
+    PROVIDER_CREDENTIALS,
     credential_request_directory,
     key_management_view,
     save_preferences,
     settings_path as ai_settings_path,
-    submit_credential_request,
+    submit_named_credential_request,
     validate_api_key,
+)
+from .upload_settings import (
+    HOST_CREDENTIALS,
+    UploadHost,
+    UploadPreferences,
+    save_preferences as save_upload_preferences,
+    settings_path as upload_settings_path,
+    upload_status,
+    validate_upload_key,
 )
 from .db import (
     Database,
@@ -222,6 +232,12 @@ class _ApiRequest(BaseModel):
 class AICredentialBody(_ApiRequest):
     # Never logged or echoed; validated per provider before it leaves the API.
     api_key: str = Field(min_length=1, max_length=400, repr=False)
+
+
+class UploadCredentialBody(_ApiRequest):
+    # No length bounds here: a failed field constraint would echo the value in
+    # the 422 body.  ``validate_upload_key`` checks the format without it.
+    api_key: str = Field(repr=False)
 
 
 class JobControlActionRequest(_ApiRequest):
@@ -798,24 +814,37 @@ def create_app(
         save_preferences(ai_settings_path(settings.state_root), preferences)
         return ai_recommendation_status()
 
+    def _submit_key_change(
+        credential: str,
+        action: Literal["set", "delete"],
+        value: str | None,
+        *,
+        code: str,
+        unavailable: tuple[str, str],
+    ) -> str:
+        directory = credential_request_directory()
+        if directory is None:
+            raise ConfigurationError(t(*unavailable), code=code)
+        try:
+            return submit_named_credential_request(directory, credential, action, value)
+        except CredentialRequestUnavailable as exc:
+            raise ConfigurationError(str(exc), code=code) from exc
+
     def _credential_request(
         provider: AIProvider, action: Literal["set", "delete"], value: str | None = None
     ) -> dict[str, Any]:
-        directory = credential_request_directory()
-        if directory is None:
-            raise ConfigurationError(
-                t(
-                    "Ezen a szerveren a kulcs a weboldalról nem állítható be; "
-                    "használd a README 5.2.1. pontjában leírt parancsot.",
-                    "The key cannot be set from the web page on this server; use the "
-                    "command described in README section 9 (docs/REFERENCE.md 5.2.1).",
-                ),
-                code="ai_key_management_unavailable",
-            )
-        try:
-            request_id = submit_credential_request(directory, provider, action, value)
-        except CredentialRequestUnavailable as exc:
-            raise ConfigurationError(str(exc), code="ai_key_management_unavailable") from exc
+        request_id = _submit_key_change(
+            PROVIDER_CREDENTIALS[provider],
+            action,
+            value,
+            code="ai_key_management_unavailable",
+            unavailable=(
+                "Ezen a szerveren a kulcs a weboldalról nem állítható be; "
+                "használd a README 5.2.1. pontjában leírt parancsot.",
+                "The key cannot be set from the web page on this server; use the "
+                "command described in README section 9 (docs/REFERENCE.md 5.2.1).",
+            ),
+        )
         return {"request_id": request_id, "provider": provider, "action": action}
 
     @application.put(
@@ -837,6 +866,59 @@ def create_app(
     )
     def delete_ai_credential(provider: AIProvider) -> dict[str, Any]:
         return _credential_request(provider, "delete")
+
+    @application.get(f"{API_PREFIX}/system/image-upload")
+    def image_upload_status() -> dict[str, Any]:
+        """The image hosts in upload order and whether each has a key; never a key."""
+
+        return upload_status(settings.state_root if settings is not None else None)
+
+    @application.put(f"{API_PREFIX}/system/image-upload-settings")
+    def update_image_upload_settings(preferences: UploadPreferences) -> dict[str, Any]:
+        """Save the host order; the worker uses it from its next upload step."""
+
+        if settings is None:
+            raise ConfigurationError("the image upload settings need the service configuration")
+        save_upload_preferences(upload_settings_path(settings.state_root), preferences)
+        return image_upload_status()
+
+    def _upload_credential_request(
+        host: UploadHost, action: Literal["set", "delete"], value: str | None = None
+    ) -> dict[str, Any]:
+        request_id = _submit_key_change(
+            HOST_CREDENTIALS[host],
+            action,
+            value,
+            code="upload_key_management_unavailable",
+            unavailable=(
+                "Ezen a szerveren a képfeltöltő kulcsa a weboldalról nem állítható be; "
+                "használd a README 8. pontjában leírt parancsot.",
+                "The image host key cannot be set from the web page on this server; "
+                "use the command described in README section 8.",
+            ),
+        )
+        return {"request_id": request_id, "host": host, "action": action}
+
+    @application.put(
+        f"{API_PREFIX}/system/image-upload-credentials/{{host}}",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def set_upload_credential(host: UploadHost, body: UploadCredentialBody) -> dict[str, Any]:
+        """Hand a new image host key to the root helper; the running worker
+        uses it from its next upload, without a restart."""
+
+        try:
+            key = validate_upload_key(host, body.api_key)
+        except ValueError as exc:
+            raise ConfigurationError(str(exc), code="upload_key_invalid") from exc
+        return _upload_credential_request(host, "set", key)
+
+    @application.delete(
+        f"{API_PREFIX}/system/image-upload-credentials/{{host}}",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def delete_upload_credential(host: UploadHost) -> dict[str, Any]:
+        return _upload_credential_request(host, "delete")
 
     @application.post(
         f"{API_PREFIX}/jobs/{{job_id}}/ai-recommendation",

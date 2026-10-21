@@ -50,6 +50,10 @@ MANDATORY_FFMPEG_FILTERS = {
 }
 MANDATORY_FFMPEG_PROTOCOLS = {"bluray"}
 MANDATORY_FFMPEG_BITSTREAM_FILTERS = {"dca_core"}
+# Not a problem: VMAF then runs through the official standalone CLI.
+LIBVMAF_STANDALONE_NOTICE = (
+    "FFmpeg libvmaf filter missing; the official standalone VMAF CLI will be used"
+)
 WORKER_SERVICE = "bdencode-worker.service"
 API_SERVICE = "bdencode-api.service"
 # Written by install.sh only when the host has a GPU device node.
@@ -459,12 +463,13 @@ def build_report(
     )
     release_profiles = _release_profiles_status(settings)
     warnings: list[str] = []
+    # Facts worth knowing that need no action; ``notices`` lists them with
+    # severity "info" next to every warning (severity "warning").
+    information: list[str] = []
     if not database_available:
         warnings.append("database is not initialized")
     if "libvmaf" not in ffmpeg["filters"]:
-        warnings.append(
-            "FFmpeg libvmaf filter missing; the official standalone VMAF CLI will be used"
-        )
+        information.append(LIBVMAF_STANDALONE_NOTICE)
     if missing_recommended:
         warnings.append("recommended tools missing: " + ", ".join(missing_recommended))
     if not comparison_font["ok"]:
@@ -558,7 +563,12 @@ def build_report(
             "systemd_cpu_quota_percent": (os.cpu_count() or 1)
             * settings.cpu_limit_percent,
         },
+        # Real problems only, as plain strings (the historical contract).
         "warnings": warnings,
+        "notices": [
+            *({"severity": "warning", "message": item} for item in warnings),
+            *({"severity": "info", "message": item} for item in information),
+        ],
     }
 
 
