@@ -17,6 +17,10 @@ class LanguageSource(StrEnum):
     MPLS = "mpls"
     CLPI = "clpi"
     PMT = "pmt"
+    # The track language element of a Matroska remux (MKV source).  It is a
+    # copy of some disc label made by the remuxing tool, so it is weighted
+    # like the weakest disc declaration (PMT).
+    MATROSKA = "matroska"
     AUDIO_LID = "audio_lid"
     SUBTITLE_OCR = "subtitle_ocr"
     MANUAL = "manual"
@@ -201,14 +205,16 @@ def settle_track_language(
 ) -> LanguageSettlement:
     """Choose a track language from the disc labels and the detection.
 
-    ``labels`` holds the normalised MPLS, CLPI and PMT codes.  Agreeing labels
+    ``labels`` holds the normalised MPLS, CLPI and PMT codes (and, for a
+    Matroska remux source, its ``matroska`` track language).  Agreeing labels
     are kept even when the detection hears something else (songs, signs or a
     dub's original-language inserts fool it); the disagreement becomes a
     warning.  The detection only settles labels that contradict each other.
     """
 
     mpls, clpi, pmt = labels.get("mpls"), labels.get("clpi"), labels.get("pmt")
-    present = [code for code in (mpls, clpi, pmt) if code]
+    matroska = labels.get("matroska")
+    present = [code for code in (mpls, clpi, pmt, matroska) if code]
     families = {_LANGUAGE_FAMILY.get(code, code) for code in present}
     strong = detected if detected and confidence >= STRONG_DETECTION else None
     if present and (len(families) == 1 or (mpls and clpi and same_language(mpls, clpi))):
@@ -305,6 +311,7 @@ class LanguageResolver:
         LanguageSource.MPLS: 0.92,
         LanguageSource.CLPI: 0.82,
         LanguageSource.PMT: 0.68,
+        LanguageSource.MATROSKA: 0.68,
     }
 
     def resolve(
@@ -313,6 +320,7 @@ class LanguageResolver:
         mpls: str | None = None,
         clpi: str | None = None,
         pmt: str | None = None,
+        matroska: str | None = None,
         audio_lid: str | None = None,
         audio_confidence: float = 0.0,
         subtitle_ocr: str | None = None,
@@ -324,6 +332,7 @@ class LanguageResolver:
             mpls=mpls,
             clpi=clpi,
             pmt=pmt,
+            matroska=matroska,
             audio_lid=audio_lid,
             audio_confidence=audio_confidence,
             subtitle_ocr=subtitle_ocr,
@@ -486,6 +495,7 @@ class LanguageResolver:
             (LanguageSource.MPLS, values["mpls"], 1.0),
             (LanguageSource.CLPI, values["clpi"], 1.0),
             (LanguageSource.PMT, values["pmt"], 1.0),
+            (LanguageSource.MATROSKA, values["matroska"], 1.0),
             (LanguageSource.AUDIO_LID, values["audio_lid"], values["audio_confidence"]),
             (
                 LanguageSource.SUBTITLE_OCR,

@@ -840,6 +840,9 @@ class EncodePlanner:
     def _input_args(
         scan: DiscScan, playlist: PlaylistCandidate, angle: int
     ) -> tuple[str, ...]:
+        if scan.is_mkv:
+            # A Matroska remux is one title: the file itself is read.
+            return ("-i", os.fspath(scan.source))
         return (
             "-playlist",
             str(int(playlist.playlist_id)),
