@@ -673,6 +673,21 @@ def _mkv_reference_inputs(scan: DiscScan, playlist_id: str) -> dict[str, Any]:
     }
 
 
+def _track_timestamp_tolerance_ms(scan: DiscScan) -> int:
+    """How far a copied track's PTS/DTS may move between sidecar and final MKV.
+
+    A sync-shifted remux compares two independently quantized Matroska
+    timelines; normalizing both origins can differ by up to two 1 ms ticks.
+    An MKV remux source carries the timeline of a foreign muxer, which may
+    truncate rather than round (The Florist 2026 remux: DTS 10.67 ms packets,
+    mkvmerge re-timed 18 of 552 502 by 3 ms, payload identical): one more
+    tick.  Packet counts, sizes, payloads and durations stay exact, so a
+    dropped or moved packet is still caught.
+    """
+
+    return 3 if scan.is_mkv else 2
+
+
 def _playlist_source_snapshot(scan: DiscScan, playlist_id: str) -> list[dict[str, Any]]:
     if scan.is_mkv:
         # The remux file is the title's only source file.
@@ -7081,10 +7096,7 @@ class PipelineWorker:
                     timeline_verdict = compare_packet_timelines(
                         sidecar_timeline,
                         final_timeline,
-                        # A sync-shifted remux compares two independently
-                        # quantized Matroska timelines.  Normalizing both
-                        # origins can therefore differ by up to two 1 ms ticks.
-                        timestamp_tolerance_ms=2,
+                        timestamp_tolerance_ms=_track_timestamp_tolerance_ms(scan),
                     )
                     reference_payload_sha256 = None
                     reference_timeline = None
