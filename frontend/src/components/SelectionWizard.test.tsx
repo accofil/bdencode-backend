@@ -618,6 +618,45 @@ describe("SelectionWizard", () => {
     expect(view.getByRole("heading", { name: "Feliratok" })).toBeInTheDocument();
   });
 
+  it("starts a subtitle flagged default in the source as not default", async () => {
+    const user = userEvent.setup();
+    const view = renderApp(
+      <SelectionWizard job={makeJob({ state: "AWAITING_SELECTION" })} scan={makeScanWithRetainedSubtitle()} onComplete={vi.fn()} />,
+    );
+
+    await user.click(view.getByRole("button", { name: "Tovább" }));
+
+    // A remux MKV flags every track default; only the first audio track keeps it.
+    const defaults = view.getAllByRole("checkbox", { name: "Alapértelmezett" }) as HTMLInputElement[];
+    expect(defaults[0].checked).toBe(true);
+    expect(defaults[defaults.length - 1].checked).toBe(false);
+  });
+
+  it("explains a taken output name and leads to the name field", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.validateSelection).mockRejectedValueOnce(new ApiError(
+      422,
+      "A finished release named “Film.1080p.BluRay.x264” already exists in the completed folder.",
+      { detail: "taken", code: "output_name_taken", context: { output_name: "Film.1080p.BluRay.x264" } },
+    ));
+    const view = renderApp(
+      <SelectionWizard job={makeJob({ state: "AWAITING_SELECTION" })} scan={makeScanWithRetainedSubtitle()} onComplete={vi.fn()} />,
+    );
+
+    await user.click(view.getByRole("button", { name: "Tovább" }));
+    await user.selectOptions(view.getByLabelText("Magyar felirattípusa"), "full");
+    await user.click(view.getByRole("button", { name: "Tovább" }));
+    await user.click(view.getByRole("button", { name: "Tovább" }));
+    await user.click(view.getByRole("button", { name: "Terv ellenőrzése" }));
+
+    expect(await view.findByText("A kimeneti név foglalt")).toBeInTheDocument();
+    expect(view.getByText(/már van kész kiadás „Film\.1080p\.BluRay\.x264” néven/)).toBeInTheDocument();
+    expect(view.queryByText("A terv nem indítható")).not.toBeInTheDocument();
+
+    await user.click(view.getByRole("button", { name: "Név szerkesztése" }));
+    expect(document.activeElement).toBe(view.getByDisplayValue(/\.x264$|BluRay/));
+  });
+
   it("repairs the legacy audio-only subtitle fields and retries validation", async () => {
     const user = userEvent.setup();
     vi.mocked(api.validateSelection).mockRejectedValueOnce(new ApiError(
