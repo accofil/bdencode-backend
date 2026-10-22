@@ -121,6 +121,7 @@ from .review import (
     upload_overview,
     video_metrics_overview,
 )
+from .completed_names import OUTPUT_NAME_TAKEN, output_name_taken
 from .config import ConfigurationError, Settings
 from .doctor import (
     MANDATORY_TOOLS,
@@ -1353,8 +1354,35 @@ def create_app(
             expected_version=request.expected_version,
         )
 
+    def require_free_output_name(job_id: str, selection: Any) -> None:
+        """Refuse a name whose completed folder already holds a release: the
+        worker would stop there only after the whole encode."""
+
+        if settings is None or not isinstance(selection, dict):
+            return
+        raw = selection.get("output_name")
+        if not isinstance(raw, str) or not raw.strip():
+            return
+        name = raw.strip().removesuffix(".mkv")
+        if name in {".", ".."} or "/" in name or "\\" in name:
+            return  # parse_selection rejects it with its own message
+        if output_name_taken(settings.completed_root, name, job_id):
+            raise ConfigurationError(
+                t(
+                    f"A(z) „{name}” néven már van kész kiadás a completed mappában. "
+                    "Adj meg másik kimeneti nevet (például a release-taggel), "
+                    "vagy előbb helyezd át a régi kiadást.",
+                    f"A finished release named “{name}” already exists in the completed "
+                    "folder. Choose another output name (for example with the release "
+                    "tag), or move the old release first.",
+                ),
+                code=OUTPUT_NAME_TAKEN,
+                context={"output_name": name},
+            )
+
     @application.post(f"{API_PREFIX}/jobs/{{job_id}}/selection", response_model=Job)
     def select_job(job_id: str, request: JobSelectionRequest) -> Job:
+        require_free_output_name(job_id, request.selection)
         return db.set_selection(
             job_id,
             request.selection,
@@ -1398,6 +1426,7 @@ def create_app(
                 "job has no successful scan to validate against", current=job.state
             )
 
+        require_free_output_name(job_id, request.selection)
         candidate = job.model_copy(update={"selection": request.selection})
         try:
             scan = _scan_from_dict(scan_row.result)

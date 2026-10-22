@@ -226,7 +226,12 @@ function initialTrackSelections(playlist: Playlist): TrackSelection[] {
       // treating it as authoritative.
       language: null,
       name: stream.title,
-      default: stream.kind === "audio" && stream.id === firstAudio ? true : stream.default,
+      // Only the first audio track starts as default.  Subtitles start off:
+      // a remux MKV often flags every track default (Matroska's FlagDefault
+      // is 1 unless the muxer clears it), and a default subtitle would switch
+      // itself on in every player.  The operator (or a tracker arrangement)
+      // can still mark one.
+      default: stream.kind === "audio" && stream.id === firstAudio,
       forced: stream.forced,
       subtitle_kind: stream.kind === "subtitle" ? "unknown" : null,
       order: index,
@@ -275,6 +280,14 @@ function isSubtitleClassificationError(error: unknown): boolean {
   if (!(error instanceof ApiError)) return false;
   return /retained subtitles?/i.test(error.detail)
     && /full\s*\/\s*forced|full.*forced/i.test(error.detail);
+}
+
+/** The name a finished release already uses, when the server refused it. */
+function takenOutputName(error: unknown): string | null {
+  if (!(error instanceof ApiError) || !error.payload || typeof error.payload !== "object") return null;
+  const payload = error.payload as { code?: unknown; context?: { output_name?: unknown } };
+  if (payload.code !== "output_name_taken") return null;
+  return typeof payload.context?.output_name === "string" ? payload.context.output_name : "";
 }
 
 function isAudioSubtitleFieldsError(error: unknown): boolean {
@@ -328,6 +341,7 @@ export function SelectionWizard({
   );
   const [crop, setCrop] = useState(initial?.crop ?? { left: 0, top: 0, right: 0, bottom: 0 });
   const encoder = scan.disc_kind === "uhd" ? "x265" : "x264";
+  const outputNameInput = useRef<HTMLInputElement>(null);
   const [outputName, setOutputName] = useState(
     initial?.outputName ?? suggestedOutputName(job.name || basename(scan.source), encoder),
   );
@@ -583,6 +597,7 @@ export function SelectionWizard({
     : null;
   const subtitleClassificationApiIssue = isSubtitleClassificationError(validate.error);
   const audioSubtitleFieldsApiIssue = isAudioSubtitleFieldsError(validate.error);
+  const takenNameIssue = takenOutputName(validate.error) ?? takenOutputName(save.error);
   const needsColorConfirmation = blockingSourceColorFields(videoStream?.video).length > 0
     || Boolean(colorApiIssue);
   const safeColorRecommendation = hasSafeSourceColorRecommendation(videoStream?.video, scan.disc_kind);
@@ -994,7 +1009,7 @@ export function SelectionWizard({
 
             <label className="field">
               <span>{t("Kimeneti fájlnév", "Output file name")}</span>
-              <div className="input-suffix"><input value={outputName} onChange={(event) => { setOutputName(event.target.value); setValidation(null); }} /><span>.mkv</span></div>
+              <div className="input-suffix"><input ref={outputNameInput} value={outputName} onChange={(event) => { setOutputName(event.target.value); setValidation(null); }} /><span>.mkv</span></div>
             </label>
             <div className="release-name-tools">
               <label className="field">
@@ -1046,7 +1061,16 @@ export function SelectionWizard({
                   : <Button variant="secondary" icon={<Palette size={17} />} onClick={() => setStep(3)}>{t("Színadatok kézi megadása", "Enter colour data by hand")}</Button>}
               </Notice>
             )}
-            {validate.isError && !colorApiIssue && !subtitleClassificationApiIssue && !audioSubtitleFieldsApiIssue && <Notice tone="danger" title={t("A terv nem indítható", "The plan cannot start")}>{validate.error instanceof ApiError ? validate.error.detail : validate.error.message}</Notice>}
+            {takenNameIssue !== null && (
+              <Notice tone="danger" title={t("A kimeneti név foglalt", "The output name is taken")}>
+                <p>{t(
+                  `A completed mappában már van kész kiadás „${takenNameIssue}” néven, ezért a munka a végén nem tudna oda kerülni. Adj meg másik nevet (például a release-taggel), vagy előbb helyezd át a régi kiadást.`,
+                  `The completed folder already holds a finished release named “${takenNameIssue}”, so the job could not be placed there at the end. Choose another name (for example with the release tag), or move the old release first.`,
+                )}</p>
+                <Button variant="secondary" onClick={() => outputNameInput.current?.focus()}>{t("Név szerkesztése", "Edit the name")}</Button>
+              </Notice>
+            )}
+            {validate.isError && takenNameIssue === null && !colorApiIssue && !subtitleClassificationApiIssue && !audioSubtitleFieldsApiIssue && <Notice tone="danger" title={t("A terv nem indítható", "The plan cannot start")}>{validate.error instanceof ApiError ? validate.error.detail : validate.error.message}</Notice>}
             {validate.isError && colorApiIssue && (
               <Notice tone="danger" title={t("Hiányos forrás-színinformáció", "Incomplete source colour information")}>
                 <p>{t("A kódolás biztonsága érdekében erősítsd meg ezeket:", "For a safe encode, confirm these:")} {reportedMissingColorFields.map((field) => SOURCE_COLOR_FIELD_LABELS[field]).join(", ")}.</p>
@@ -1071,7 +1095,7 @@ export function SelectionWizard({
                 <Button variant="secondary" onClick={() => validate.mutate()} loading={validate.isPending}>{t("Terv újraellenőrzése", "Check plan again")}</Button>
               </Notice>
             )}
-            {save.isError && <Notice tone="danger" title={t("A jóváhagyás nem menthető", "The approval cannot be saved")}>{save.error instanceof ApiError ? save.error.detail : save.error.message}</Notice>}
+            {save.isError && takenNameIssue === null && <Notice tone="danger" title={t("A jóváhagyás nem menthető", "The approval cannot be saved")}>{save.error instanceof ApiError ? save.error.detail : save.error.message}</Notice>}
           </Card>
 
           <Card className={validation ? "validation-card validation-card--success" : "validation-card"}>
