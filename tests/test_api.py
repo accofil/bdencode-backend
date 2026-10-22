@@ -113,6 +113,21 @@ def test_runtime_capabilities_is_fresh_and_does_not_prepare_paths(
     assert isinstance(first_report["warnings"], list)
     assert first_report["database"]["schema_version"] is None
     assert "database is not initialized" in first_report["warnings"]
+    # Without the FFmpeg filter the standalone VMAF CLI runs: information,
+    # not a warning, so it stays out of ``warnings``.
+    assert doctor.LIBVMAF_STANDALONE_NOTICE not in first_report["warnings"]
+    assert {"severity": "info", "message": doctor.LIBVMAF_STANDALONE_NOTICE} in first_report[
+        "notices"
+    ]
+    assert {
+        "severity": "warning",
+        "message": "database is not initialized",
+    } in first_report["notices"]
+    assert [
+        item["message"]
+        for item in first_report["notices"]
+        if item["severity"] == "warning"
+    ] == first_report["warnings"]
     assert set(first_report["tools"]) == set(expected_tools)
     assert "tsMuxeR" not in first_report["tools"]
     assert "whisper-cli" not in first_report["tools"]
@@ -273,7 +288,7 @@ def test_health_capabilities_and_job_flow(tmp_path):
     with make_client(tmp_path) as client:
         capabilities = client.get("/api/v1/capabilities")
         assert capabilities.status_code == 200
-        assert capabilities.json()["backend_version"] == "3.10.0"
+        assert capabilities.json()["backend_version"] == "3.11.0"
         assert capabilities.json()["constraints"]["max_active_jobs"] == 1
         assert capabilities.json()["output_video_codecs"] == ["x264", "x265"]
         assert capabilities.json()["audio_actions"] == [

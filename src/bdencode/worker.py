@@ -245,6 +245,12 @@ from .qc.image_upload import (
     upload_size_limit,
 )
 from .qc.imgbb import ImgBBClient
+from .upload_settings import (
+    host_order as upload_host_order,
+    load_preferences as load_upload_preferences,
+    order_by_preference,
+    settings_path as upload_settings_path,
+)
 from .qc.video import (
     CropMargins as ActiveCropMargins,
     FrameRecord,
@@ -3012,7 +3018,20 @@ class PipelineWorker:
             clients.append(client)
         if not clients:
             raise ImageUploadError("no image upload provider is configured")
-        return clients
+        # The operator's host order from the System page, read at every upload
+        # step so a change needs no worker restart.  Without a saved order the
+        # chain stays as built (ImgBB, Catbox, Freeimage in production).
+        preferences = load_upload_preferences(
+            upload_settings_path(self.settings.state_root)
+        )
+        if preferences.provider_order is None:
+            return clients
+        order = upload_host_order(preferences)
+        names_in_chain = [
+            str(getattr(client, "provider_name", "imgbb")).strip().lower()
+            for client in clients
+        ]
+        return [clients[index] for index in order_by_preference(names_in_chain, order)]
 
     def process_one_stage(self, job: Job) -> Job:
         """Run exactly the current durable stage and return refreshed state."""

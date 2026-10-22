@@ -195,8 +195,16 @@ export interface RuntimeCapabilitiesResponse {
     systemd_cpu_quota_percent?: number;
     [key: string]: unknown;
   };
+  /** Real problems only. */
   warnings?: string[];
+  /** Every warning plus the informational notes, each with its severity (3.11+). */
+  notices?: RuntimeNotice[];
   [key: string]: unknown;
+}
+
+export interface RuntimeNotice {
+  severity: "info" | "warning" | string;
+  message: string;
 }
 
 export interface Job {
@@ -819,6 +827,39 @@ export interface AISettings {
 export interface AIKeyRequest {
   request_id: string;
   provider: AIProvider;
+  action: "set" | "delete";
+}
+
+export type ImageUploadHost = Exclude<ImageUploadProvider, "auto">;
+
+export interface ImageUploadHostStatus {
+  id: ImageUploadHost;
+  label: string;
+  credential: string;
+  /** Catbox uploads anonymously without its user hash. */
+  key_required: boolean;
+  /** Whether the encrypted key exists on the server; the key itself never comes back. */
+  configured: boolean;
+}
+
+export interface ImageUploadStatus {
+  /** The automatic order, the first host first. */
+  provider_order: ImageUploadHost[];
+  default_order: ImageUploadHost[];
+  custom_order: boolean;
+  /** In `provider_order`. */
+  hosts: ImageUploadHostStatus[];
+  key_management?: { available: boolean; results: AIKeyRequestResult[] };
+}
+
+export interface ImageUploadSettings {
+  /** `null`: the built-in order. */
+  provider_order: ImageUploadHost[] | null;
+}
+
+export interface ImageUploadKeyRequest {
+  request_id: string;
+  host: ImageUploadHost;
   action: "set" | "delete";
 }
 

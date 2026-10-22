@@ -60,7 +60,7 @@ import type { SourceColorField, SourceColorMetadata } from "../colorMetadata";
 import { normalizeStoredSelection } from "../selection";
 import type { StoredTrackSelection } from "../selection";
 import { encoderHelp } from "../encoderHelp";
-import { IMAGE_UPLOAD_PROVIDER_LABELS, UPLOAD_IMAGE_SET_LABELS, uploadImageSet } from "../uploads";
+import { imageHostOrderText, imageUploadProviderLabels, UPLOAD_IMAGE_SET_LABELS, uploadImageSet, useImageHostOrder } from "../uploads";
 import { basename, formatDuration, humanize, stabilityWarning, suggestedOutputName } from "../utils";
 import {
   buildReleaseName,
@@ -304,6 +304,8 @@ export function SelectionWizard({
   scan: DiscScanResult;
   onComplete: () => void;
 }) {
+  const hostOrder = useImageHostOrder();
+  const providerLabels = imageUploadProviderLabels(hostOrder);
   const initial = normalizeStoredSelection(job.selection);
   const initialPlaylist = initial?.playlistId
     ? scan.playlists.find((item) => item.playlist_id === initial.playlistId)
@@ -569,7 +571,11 @@ export function SelectionWizard({
   }
 
   const retainedTracks = tracks.filter((item) => item.action !== "omit");
-  const unresolvedTracks = retainedTracks.filter((item) => !item.language);
+  const unresolvedTracks = retainedTracks.filter((item) => !trackLanguageSettled(
+    playlist?.streams.find((stream) => stream.id === item.stream_id),
+    item,
+    playlist?.track_analysis,
+  ));
   const videoStream = playlist?.streams.find((stream) => stream.kind === "video");
   const missingColorFields = missingSourceColorFields(videoStream?.video);
   const colorApiIssue = validate.error instanceof ApiError
@@ -762,8 +768,8 @@ export function SelectionWizard({
           {unresolvedTracks.length > 0 && (
             <Notice tone="warning" title={t("Hiányzó nyelv", "Missing language")}>
               {t(
-                `${unresolvedTracks.length} megtartott sáv nyelve bizonytalan. Megadhatod most, vagy a hangot a worker beszédmintákból próbálja azonosítani; PGS feliratnál kézi megadás szükséges.`,
-                `The language of ${unresolvedTracks.length} kept track(s) is uncertain. You can set it now, or the worker tries to identify audio from speech samples; PGS subtitles must be set by hand.`,
+                `${unresolvedTracks.length} megtartott sáv nyelve bizonytalan. Megadhatod most; ha nem, kódoláskor a hangsáv nyelve a beszédből, a feliraté a szövegéből (képes feliratnál OCR-rel) dől el, és ha ez sem egyértelmű, a munka nyelvi ellenőrzésre áll meg.`,
+                `The language of ${unresolvedTracks.length} kept track(s) is uncertain. You can set it now; otherwise at encode time audio is identified from speech and subtitles from their text (OCR for image subtitles), and if that is not clear either the job stops for a language review.`,
               )}
             </Notice>
           )}
@@ -1003,13 +1009,13 @@ export function SelectionWizard({
 
             <div className="review-options">
               <label className="toggle-row">
-                <span><strong>{t("Képfeltöltés és BBCode", "Image upload and BBCode")}</strong><small>{t("Automatikus módban a sorrend: ImgBB, Catbox, majd Freeimage; a sikeres szolgáltató az egész csomagra rögzül.", "In automatic mode the order is ImgBB, Catbox, then Freeimage; the first host that succeeds is used for the whole set.")}</small></span>
+                <span><strong>{t("Képfeltöltés és BBCode", "Image upload and BBCode")}</strong><small>{t(`Automatikus módban a sorrend: ${imageHostOrderText(hostOrder)}; a sikeres szolgáltató az egész csomagra rögzül.`, `In automatic mode the order is ${imageHostOrderText(hostOrder)}; the first host that succeeds is used for the whole set.`)}</small></span>
                 <input type="checkbox" checked={uploadImages} onChange={(event) => { setUploadImages(event.target.checked); setValidation(null); }} /><span className="toggle" aria-hidden="true" />
               </label>
               <label className="field">
                 <span>{t("Képtárhely", "Image host")}</span>
                 <select aria-label={t("Képtárhely", "Image host")} value={selectedImageProvider} disabled={!uploadImages} onChange={(event) => { setSelectedImageProvider(event.target.value as ImageUploadProvider); setValidation(null); }}>
-                  {Object.entries(IMAGE_UPLOAD_PROVIDER_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                  {Object.entries(providerLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                 </select>
                 <small>{t("Automatikus módban csak az első sikeres kép előtt válthat szolgáltatót; kézi módban nincs failover.", "In automatic mode the host can only change before the first successful image; manual mode has no failover.")}</small>
               </label>
@@ -1261,6 +1267,21 @@ function detectedSubtitleLanguage(analysis: TrackAnalysis | undefined, streamId:
   return { code: record.iso639_2t, confidence: record.confidence ?? 0, method: record.method ?? "ocr" };
 }
 
+/** Whether a kept track's language is settled without the operator: set by
+ * hand, a source label not marked for review, a label the analysis confirms,
+ * or an unlabelled track the analysis names clearly (as the worker decides). */
+export function trackLanguageSettled(stream: MediaStream | undefined, selection: TrackSelection, analysis: TrackAnalysis | undefined): boolean {
+  if (selection.language) return true;
+  if (!stream) return false;
+  const declared = stream.language?.iso639_2t || null;
+  if (declared && !stream.language?.needs_review) return true;
+  const detected = stream.kind === "audio"
+    ? detectedAudioLanguage(analysis, stream.id)
+    : stream.kind === "subtitle" ? detectedSubtitleLanguage(analysis, stream.id) : null;
+  if (!detected) return false;
+  return declared ? detected.code === declared : detected.confidence >= 0.75;
+}
+
 function bcp47For(stream: MediaStream, code: string): string | null {
   return stream.language?.iso639_2t === code ? stream.language?.bcp47 ?? null : null;
 }
@@ -1355,7 +1376,7 @@ function TrackTable({
               return <Notice key={stream.id} tone="danger">{t(`A(z) ${stream.id} sávhoz nem készült választási terv. Válaszd ki újra a playlistet.`, `No selection plan was made for track ${stream.id}. Select the playlist again.`)}</Notice>;
             }
             const declaredLanguage = detectedLanguage(stream);
-            const uncertain = !declaredLanguage || stream.language?.needs_review;
+            const uncertain = !trackLanguageSettled(stream, selection, analysis);
             const actionDetails = audioActionDetails(selection.action);
             const sourceDetails = [
               stream.codec.toUpperCase(),

@@ -24,6 +24,12 @@ TimeoutStopSec=300s
 KillMode=control-group
 KillSignal=SIGINT
 UMask=0027
+# Image host keys changed on the System page while the worker runs: the root
+# helper writes them here (tmpfs, removed when the worker stops) and every
+# upload reads them before the credentials loaded at start.
+RuntimeDirectory=bdencode-worker
+RuntimeDirectoryMode=0700
+Environment=BDENCODE_LIVE_CREDENTIAL_DIR=/run/bdencode-worker/credentials
 Nice=10
 CPUAccounting=true
 CPUQuota=@CPU_QUOTA@

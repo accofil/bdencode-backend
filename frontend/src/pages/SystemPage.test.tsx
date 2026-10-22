@@ -2,7 +2,7 @@ import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
 import { setLanguage } from "../i18n";
-import type { AIRecommendationStatus, CapabilitiesResponse, RuntimeCapabilitiesResponse } from "../api/types";
+import type { AIRecommendationStatus, CapabilitiesResponse, ImageUploadStatus, RuntimeCapabilitiesResponse } from "../api/types";
 import { renderApp } from "../test/render";
 import { SystemPage } from "./SystemPage";
 
@@ -20,6 +20,10 @@ vi.mock("../api/client", async (importOriginal) => {
       saveAISettings: vi.fn(),
       setAIKey: vi.fn(),
       deleteAIKey: vi.fn(),
+      imageUploadStatus: vi.fn(),
+      saveImageUploadSettings: vi.fn(),
+      setImageUploadKey: vi.fn(),
+      deleteImageUploadKey: vi.fn(),
     },
   };
 });
@@ -47,8 +51,24 @@ function aiStatus(overrides: Partial<AIRecommendationStatus> = {}): AIRecommenda
   };
 }
 
+function uploadStatus(overrides: Partial<ImageUploadStatus> = {}): ImageUploadStatus {
+  return {
+    provider_order: ["imgbb", "catbox", "freeimage"],
+    default_order: ["imgbb", "catbox", "freeimage"],
+    custom_order: false,
+    hosts: [
+      { id: "imgbb", label: "ImgBB", credential: "imgbb-api-key", key_required: true, configured: false },
+      { id: "catbox", label: "Catbox", credential: "catbox-userhash", key_required: false, configured: false },
+      { id: "freeimage", label: "Freeimage", credential: "freeimage-api-key", key_required: true, configured: false },
+    ],
+    key_management: { available: true, results: [] },
+    ...overrides,
+  };
+}
+
 function mockRuntime(runtime: RuntimeCapabilitiesResponse) {
   vi.mocked(api.aiRecommendationStatus).mockResolvedValue(aiStatus());
+  vi.mocked(api.imageUploadStatus).mockResolvedValue(uploadStatus());
   vi.mocked(api.health).mockResolvedValue({
     status: "ok",
     database: "/home/encoder/encode/state/encoder.sqlite3",
@@ -295,6 +315,115 @@ describe("SystemPage runtime capabilities", () => {
     expect(screen.getAllByText("bdencode-worker.service")).toHaveLength(3);
   });
 
+  it("sets an image host key only in a valid format and never shows it back", async () => {
+    mockRuntime({});
+    const imgbbKey = "0123456789abcdef0123456789abcdef";
+    vi.mocked(api.setImageUploadKey).mockResolvedValue({ request_id: "u1", host: "imgbb", action: "set" });
+
+    renderApp(<SystemPage />, "/settings");
+
+    const key = await screen.findByLabelText("ImgBB API-kulcs");
+    expect(key).toHaveAttribute("type", "password");
+    expect(screen.getByText("0 / 3 kulcs beállítva")).toBeInTheDocument();
+    expect(screen.getByText("Névtelen feltöltés")).toBeInTheDocument();
+
+    fireEvent.change(key, { target: { value: "too short" } });
+    fireEvent.click(screen.getByRole("button", { name: "ImgBB kulcs mentése" }));
+    expect(await screen.findByText("A(z) ImgBB API-kulcsa pontosan 32 karakter, csak betű és szám.")).toBeInTheDocument();
+    expect(api.setImageUploadKey).not.toHaveBeenCalled();
+
+    fireEvent.change(key, { target: { value: ` ${imgbbKey}\n` } });
+    fireEvent.click(screen.getByRole("button", { name: "ImgBB kulcs mentése" }));
+    await waitFor(() => expect(api.setImageUploadKey).toHaveBeenCalledWith("imgbb", imgbbKey));
+    expect(await screen.findByText("A képfeltöltő kulcsának mentése…")).toBeInTheDocument();
+    expect(key).toHaveValue("");
+
+    vi.mocked(api.imageUploadStatus).mockResolvedValue(uploadStatus({
+      hosts: uploadStatus().hosts.map((item) => item.id === "imgbb" ? { ...item, configured: true } : item),
+      key_management: { available: true, results: [{ request_id: "u1", state: "applied", credential: "imgbb-api-key" }] },
+    }));
+    expect(await screen.findByText(/kulcsa elmentve; a worker a következő feltöltésnél/, {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(screen.getByText("1 / 3 kulcs beállítva")).toBeInTheDocument();
+    expect(screen.getByLabelText("ImgBB API-kulcs")).toHaveValue("");
+    expect(screen.getByText("Új API-kulcs (csere)")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain(imgbbKey);
+    expect(screen.getByRole("button", { name: "ImgBB kulcs törlése" })).toBeInTheDocument();
+  });
+
+  it("deletes an image host key and reports a key the helper refused", async () => {
+    mockRuntime({});
+    vi.mocked(api.imageUploadStatus).mockResolvedValue(uploadStatus({
+      hosts: uploadStatus().hosts.map((item) => item.id === "freeimage" ? { ...item, configured: true } : item),
+    }));
+    vi.mocked(api.deleteImageUploadKey).mockResolvedValue({ request_id: "d1", host: "freeimage", action: "delete" });
+
+    renderApp(<SystemPage />, "/settings");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Freeimage kulcs törlése" }));
+    await waitFor(() => expect(api.deleteImageUploadKey).toHaveBeenCalledWith("freeimage"));
+    vi.mocked(api.imageUploadStatus).mockResolvedValue(uploadStatus({
+      hosts: uploadStatus().hosts.map((item) => item.id === "freeimage" ? { ...item, configured: true } : item),
+      key_management: { available: true, results: [{ request_id: "d1", state: "rejected", message: "this credential cannot be changed from the web UI" }] },
+    }));
+    expect(await screen.findByText(/A kulcsot a szerver nem mentette el: this credential/, {}, { timeout: 4000 })).toBeInTheDocument();
+  });
+
+  it("saves the automatic host order", async () => {
+    mockRuntime({});
+    vi.mocked(api.saveImageUploadSettings).mockResolvedValue(uploadStatus({ provider_order: ["freeimage", "imgbb", "catbox"], custom_order: true }));
+
+    renderApp(<SystemPage />, "/settings");
+
+    expect(await screen.findByText(/Most: ImgBB, Catbox, majd Freeimage\./)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sorrend mentése" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "ImgBB előrébb" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Freeimage előrébb" }));
+    fireEvent.click(screen.getByRole("button", { name: "Freeimage előrébb" }));
+    expect(screen.getByText(/Most: Freeimage, ImgBB, majd Catbox\./)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Sorrend mentése" }));
+
+    await waitFor(() => expect(api.saveImageUploadSettings).toHaveBeenCalledWith({ provider_order: ["freeimage", "imgbb", "catbox"] }));
+    fireEvent.click(await screen.findByRole("button", { name: "Alapértelmezett sorrend" }));
+    await waitFor(() => expect(api.saveImageUploadSettings).toHaveBeenLastCalledWith({ provider_order: null }));
+  });
+
+  it("shows information in grey apart from the warnings, and the warning heading only for real warnings", async () => {
+    const vmaf = "FFmpeg libvmaf filter missing; the official standalone VMAF CLI will be used";
+    mockRuntime({ warnings: [], notices: [{ severity: "info", message: vmaf }] });
+    const first = renderApp(<SystemPage />, "/settings");
+
+    const information = await first.findByText("Tájékoztatás");
+    expect(information.closest(".notice")).toHaveClass("notice--muted");
+    expect(information.closest(".notice")).toHaveTextContent(vmaf);
+    expect(first.queryByText("Runtime figyelmeztetések")).not.toBeInTheDocument();
+    first.unmount();
+
+    mockRuntime({
+      warnings: ["ImgBB upload credential is not configured"],
+      notices: [
+        { severity: "warning", message: "ImgBB upload credential is not configured" },
+        { severity: "info", message: vmaf },
+      ],
+    });
+    renderApp(<SystemPage />, "/settings");
+    const warnings = await screen.findByText("Runtime figyelmeztetések");
+    expect(warnings.closest(".notice")).toHaveClass("notice--warning");
+    expect(warnings.closest(".notice")).toHaveTextContent("ImgBB upload credential is not configured");
+    expect(warnings.closest(".notice")).not.toHaveTextContent(vmaf);
+    expect(screen.getByText("Tájékoztatás").closest(".notice")).not.toHaveTextContent("ImgBB upload credential");
+  });
+
+  it("explains when the server cannot take image host keys from the page", async () => {
+    mockRuntime({});
+    vi.mocked(api.imageUploadStatus).mockResolvedValue(uploadStatus({ key_management: { available: false, results: [] } }));
+
+    renderApp(<SystemPage />, "/settings");
+
+    expect(await screen.findByText("A képfeltöltők kulcsa itt nem állítható be")).toBeInTheDocument();
+    expect(screen.queryByLabelText("ImgBB API-kulcs")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Freeimage hátrébb" })).toBeDisabled();
+  });
+
   it("renders the System page in English", async () => {
     setLanguage("en", { persist: false });
     mockRuntime({
@@ -339,6 +468,10 @@ describe("SystemPage runtime capabilities", () => {
     expect(await screen.findByRole("heading", { name: "CPU share" })).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "AI adviser" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Save key" })).toHaveLength(2);
+    expect(await screen.findByRole("heading", { name: "Image upload" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Catbox userhash")).toHaveAttribute("type", "password");
+    expect(screen.getByRole("button", { name: "Save the ImgBB key" })).toBeInTheDocument();
+    expect(screen.getByText(/Now: ImgBB, Catbox, then Freeimage\./)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Release check and update" })).toBeInTheDocument();
     expect(screen.getByText("Readable").nextElementSibling).toHaveTextContent("Yes");
     expect(screen.queryByText("Telepített programok")).not.toBeInTheDocument();

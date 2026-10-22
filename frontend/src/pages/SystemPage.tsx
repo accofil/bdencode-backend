@@ -15,6 +15,7 @@ import {
 import { api } from "../api/client";
 import { AIAdviserPanel } from "../components/AIAdviserPanel";
 import { BackupsPanel } from "../components/BackupsPanel";
+import { ImageUploadPanel } from "../components/ImageUploadPanel";
 import { cpuShareInForce, CpuPolicyPanel, useCpuPolicy } from "../components/CpuPolicyPanel";
 import { ReleaseUpdatePanel } from "../components/ReleaseUpdatePanel";
 import { Badge, Button, Card, LoadingPanel, Notice, PageHeader, ProgressBar } from "../components/ui";
@@ -76,6 +77,12 @@ export function SystemPage() {
         `GPU for the crop scan (${(workerGpu.devices ?? []).join(", ") || "configured"})`,
       );
   const imageCredentials = runtime.data?.image_upload_credentials ?? {};
+  // Real warnings in amber; facts that need no action (severity "info", for
+  // example the standalone VMAF CLI) in grey under their own heading.
+  const runtimeWarnings = runtime.data?.warnings ?? [];
+  const runtimeInformation = (runtime.data?.notices ?? [])
+    .filter((item) => item.severity === "info")
+    .map((item) => item.message);
 
   function refresh() {
     void Promise.all([health.refetch(), runtime.refetch(), capabilities.refetch()]);
@@ -176,10 +183,12 @@ export function SystemPage() {
 
           <CpuPolicyPanel />
           <AIAdviserPanel />
+          <ImageUploadPanel />
           <ReleaseUpdatePanel />
           <BackupsPanel />
 
-          {runtime.data?.warnings && runtime.data.warnings.length > 0 && <Notice tone="warning" title={t("Runtime figyelmeztetések", "Runtime warnings")}><ul>{runtime.data.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></Notice>}
+          {runtimeWarnings.length > 0 && <Notice tone="warning" title={t("Runtime figyelmeztetések", "Runtime warnings")}><ul>{runtimeWarnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></Notice>}
+          {runtimeInformation.length > 0 && <Notice tone="muted" title={t("Tájékoztatás", "Information")}><ul>{runtimeInformation.map((item) => <li key={item}>{item}</li>)}</ul></Notice>}
           <details className="runtime-raw"><summary>{humanize("runtime_capabilities")} JSON</summary><pre>{JSON.stringify(runtime.data, null, 2)}</pre></details>
         </>
       )}

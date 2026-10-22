@@ -842,6 +842,8 @@ render_credential_dropin() {
     fi
 }
 
+# Image host keys; the System page can set them too.  Keep in sync with
+# WORKER_CREDENTIALS in install/credentials_helper.py.
 worker_credential_names=(imgbb-api-key catbox-userhash freeimage-api-key)
 # qBittorrent credentials are no longer bound: since 3.0 nothing seeds.
 # Keep in sync with API_CREDENTIALS in install/credentials_helper.py.

@@ -359,6 +359,7 @@ Nem kötelező mindhármat beállítani, de legalább kettő ajánlott. Ha az el
 - Ne add meg nyíltan parancssori argumentumként, mert bekerülhet a shell előzményeibe.
 - A BDEncode titkosított systemd credential fájlokat használ.
 - A három credential neve: `imgbb-api-key`, `catbox-userhash`, `freeimage-api-key`.
+- 3.11 óta mindhárom a Rendszer oldal **Képfeltöltés** kártyáján is beállítható, cserélhető és törölhető (README 8.1); a futó worker a következő feltöltésnél újraindítás nélkül átveszi. Az alábbi kézi út továbbra is működik.
 
 ### 5.2. Biztonságos, interaktív beállítás Debian alatt
 

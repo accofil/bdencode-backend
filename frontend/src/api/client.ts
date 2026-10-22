@@ -3,6 +3,10 @@ import type { EncoderLog, JobEvaluation } from "./types";
 import type {
   AIKeyRequest,
   AIProvider,
+  ImageUploadHost,
+  ImageUploadKeyRequest,
+  ImageUploadSettings,
+  ImageUploadStatus,
   AISettings,
   AIRecommendationRequest,
   AIRecommendationResponse,
@@ -342,6 +346,16 @@ export const api = {
     }),
   deleteAIKey: (provider: AIProvider) =>
     apiFetch<AIKeyRequest>(`/system/ai-credentials/${provider}`, { method: "DELETE" }),
+  imageUploadStatus: () => apiFetch<ImageUploadStatus>("/system/image-upload"),
+  saveImageUploadSettings: (settings: ImageUploadSettings) =>
+    apiFetch<ImageUploadStatus>("/system/image-upload-settings", { method: "PUT", body: JSON.stringify(settings) }),
+  setImageUploadKey: (host: ImageUploadHost, key: string) =>
+    apiFetch<ImageUploadKeyRequest>(`/system/image-upload-credentials/${host}`, {
+      method: "PUT",
+      body: JSON.stringify({ api_key: key }),
+    }),
+  deleteImageUploadKey: (host: ImageUploadHost) =>
+    apiFetch<ImageUploadKeyRequest>(`/system/image-upload-credentials/${host}`, { method: "DELETE" }),
   aiRecommendation: (id: string, request: AIRecommendationRequest) =>
     apiFetch<AIRecommendationResponse>(
       `/jobs/${encodeURIComponent(id)}/ai-recommendation`,

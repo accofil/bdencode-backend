@@ -195,8 +195,9 @@ Névre szóló zaj-/szemcsecsomagokat ad vissza (`off`, `preserve_grain`, `light
 Új job-események: `worker.auto-crf-probe`, `worker.auto-crf`, `worker.dynamic-hdr`, `worker.variable-aspect`. Új analysis-artifactok: `crf-search.json`, `dynamic-hdr.json`; a `crop-policy.json` `aspect_profile` mezőt kap. Az elkészült manifest `auto_crf` és `dynamic_hdr` kulcs alatt tartalmazza őket. A befejezéskor a worker `analysis/source-size.json` fájlt is ír (a kiválasztott playlist klipjeinek összmérete), amelyből a statisztika a megtakarítást számolja.
 
 Az `image_upload_provider` értéke `auto`, `imgbb`, `catbox` vagy `freeimage`.
-Automatikus módban a sorrend ImgBB → Catbox → Freeimage, és csak az első
-sikeres kép előtt engedélyezett a váltás. Kézi választásnál nincs failover.
+Automatikus módban a sorrend alapból ImgBB → Catbox → Freeimage (a Rendszer
+oldalon, a `PUT /system/image-upload-settings` végponttal átállítható), és csak
+az első sikeres kép előtt engedélyezett a váltás. Kézi választásnál nincs failover.
 
 Új kliensnek `schema_version: 2` értéket kell küldenie. A backend az 1-es sémájú, már sorban álló selectiont kompatibilitásból elfogadja és 2-es effektív tervvé migrálja; egy régi BD/x264 terv explicit `chroma_qp_offset: 0` értéke ekkor effektív `-2` lesz.
 
@@ -272,6 +273,19 @@ POST /system/backups         # 201; ellenőrzött "manual" mentés
 ```
 
 A visszaállítás szándékosan nincs az API-n: `bdencode db-restore`, leállított szolgáltatásokkal (lásd a README 14.5. pontját). Memóriában lévő adatbázis mentése `422`.
+
+### Képfeltöltés: kulcsok és sorrend (3.11)
+
+```text
+GET    /system/image-upload                          # tárhelyek sorrendben, configured jelzéssel
+PUT    /system/image-upload-settings                 # {"provider_order": ["freeimage", "imgbb", "catbox"]} vagy null
+PUT    /system/image-upload-credentials/{host}       # {"api_key": "..."} -> 202
+DELETE /system/image-upload-credentials/{host}       # 202
+```
+
+A `host` `imgbb`, `catbox` vagy `freeimage`. A `GET` válasza: `provider_order`, `default_order`, `custom_order`, `hosts` (`id`, `label`, `credential`, `key_required`, `configured`) és `key_management` (`available`, a segédprogram utolsó eredményei kulcs nélkül), mint az AI-kulcsoknál. Kulcsot egyik válasz sem tartalmaz. Formai ellenőrzés: ImgBB és Freeimage pontosan 32 betű/szám, Catbox userhash 16–64 betű/szám; hibás kulcsnál `422` `upload_key_invalid` (a válasz a kulcsot nem ismétli meg). Ha a szerveren nincs kulcsmentő segédprogram: `422` `upload_key_management_unavailable`. A kulcsot a `bdencode-credentials` root segédprogram titkosítja és köti a workerhez; a futó worker a következő feltöltésnél már az újat használja (újraindítás nélkül). A sorrend a `<state>/image-upload-settings.json` fájlba kerül, és a worker minden feltöltési lépésnél újraolvassa.
+
+A `GET /runtime-capabilities` `warnings` listája csak valódi figyelmeztetést tartalmaz (szövegként). A `notices` lista minden tételt `{"severity": "warning" | "info", "message": ...}` alakban ad; az `info` tétel (például: a VMAF az önálló VMAF programmal fut) nem igényel teendőt.
 
 ## Release-előkészítés
 

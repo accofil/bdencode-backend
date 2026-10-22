@@ -358,7 +358,7 @@ Open **System** and look at:
 - **Storage**: enough free space?
 - **Processor**: the number of logical CPUs, the CPU share, and whether there is a GPU for the crop search (no GPU is fine).
 
-If anything is red, see [section 13](#13-when-something-goes-wrong).
+If anything is red, see [section 13](#13-when-something-goes-wrong). The grey **Information** block at the bottom of the page (for example that VMAF runs through the standalone VMAF program) is not an error and needs nothing from you.
 
 ### 7.3. Set the CPU share
 
@@ -379,7 +379,21 @@ The program can upload the comparison screenshots to an image host and turn them
 One is enough, two are better: if one host fails, the program tries the next. Everything works without image uploads too; the images stay in the finished folder.
 
 > [!IMPORTANT]
-> Never paste a key into a chat or a bug report, or show it in a screenshot. The method below stores it encrypted and does not show it while you type.
+> Never paste a key into a chat or a bug report, or show it in a screenshot. Both methods below store it encrypted and do not show it while you type.
+
+### 8.1. The easiest way: on the System page
+
+1. Open **System** and find the **Image upload** card.
+2. In the host's row, enter the key (ImgBB and Freeimage: 32-character API key; Catbox: user hash) and click **Save**.
+3. After a few seconds the row shows **Key set**.
+
+The running worker uses the new key from its next upload: nothing needs a restart, and an encode in progress is not interrupted. You can replace the key (enter a new one) or delete it (**Delete**) in the same place. The page never shows the key back.
+
+With the arrows on the card you can also choose which host the automatic mode starts with and which ones are the fallbacks (by default ImgBB → Catbox → Freeimage); after **Save order** it applies from the next upload.
+
+### 8.2. Alternatively: from the command line
+
+If the System page says the key cannot be set there (an older install), or you prefer the command line:
 
 **1. Open a command line on the BDEncode machine.** On Windows, open PowerShell and type `wsl -d Debian` (this takes you into BDEncode's Linux environment). On a server, log in with SSH.
 
