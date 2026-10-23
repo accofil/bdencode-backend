@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from fractions import Fraction
 from pathlib import Path
 import re
@@ -45,20 +45,53 @@ class CommonTimelinePlan:
     track_sync_offsets_ms: tuple[Decimal, ...]
 
 
+MS = Decimal("0.001")
+
+
+def _whole_ms(value: Decimal) -> Decimal:
+    """mkvmerge's ``--sync`` takes whole milliseconds (and Matroska stores them)."""
+
+    # Adding zero turns a rounded -0 into 0 in the stored plan.
+    return value.quantize(Decimal(1), rounding=ROUND_HALF_EVEN) + Decimal(0)
+
+
+def encoder_priming_seconds(codec: str, sample_rate: int | None) -> Decimal:
+    """Silence an FFmpeg encoder puts before the content, which Matroska keeps.
+
+    Measured (3.12.0) on a DTS-HD MA remux at 48 kHz by cross-correlating the
+    decoded final MKV with the source: AC-3 and E-AC-3 came out exactly 256
+    samples (5.333 ms) late; FLAC, DTS and copies at 0.  The final MKV carries
+    no CodecDelay for AC-3, so players play the priming.
+    """
+
+    if codec.lower() in {"ac3", "eac3"} and sample_rate:
+        return Decimal(256) / Decimal(sample_rate)
+    return Decimal(0)
+
+
 def plan_common_zero_timeline(
     reference_video_start: Decimal | str | int | float,
     retained_track_starts: Sequence[Decimal | str | int | float],
     *,
     encoded_video_start: Decimal | str | int | float = Decimal(0),
     sidecar_start_times: Sequence[Decimal | str | int | float] | None = None,
+    sidecar_priming_seconds: Sequence[Decimal | str | int | float] | None = None,
 ) -> CommonTimelinePlan:
     """Preserve relative stream timing while rebasing the earliest stream to zero.
 
     The encoded video produced from Y4M starts at zero, while audio and subtitle
     sidecars normally retain the reference-remux timestamps.  The optional
-    encoded/sidecar starts account for codec priming or container rounding, so
-    the calculated mux offsets restore the reviewed source relationship rather
-    than assuming every intermediate starts exactly where its source did.
+    encoded/sidecar starts account for container rounding, so the calculated
+    mux offsets restore the reviewed source relationship rather than assuming
+    every intermediate starts exactly where its source did.
+
+    ``sidecar_priming_seconds`` is the encoder delay of a converted track
+    (``encoder_priming_seconds``): its packets must start that much before its
+    content.  A packet cannot go below zero (mkvmerge drops it), so when a
+    primed track would, the common zero moves earlier by whole milliseconds
+    and every other stream starts that much later instead.  Offsets are whole
+    milliseconds; ``expected_start_seconds`` holds where each stream's first
+    packet lands, which a primed track places before its content.
     """
 
     starts = (
@@ -68,8 +101,6 @@ def plan_common_zero_timeline(
             for index, value in enumerate(retained_track_starts, start=1)
         ),
     )
-    origin = min(starts)
-    expected = tuple(value - origin for value in starts)
     encoded_start = _decimal(encoded_video_start, name="encoded video start")
     if sidecar_start_times is None:
         sidecar_starts = starts[1:]
@@ -80,16 +111,41 @@ def plan_common_zero_timeline(
         )
         if len(sidecar_starts) != len(retained_track_starts):
             raise ValueError("sidecar starts must match retained track count")
+    if sidecar_priming_seconds is None:
+        priming = (Decimal(0),) * len(retained_track_starts)
+    else:
+        priming = tuple(
+            _decimal(value, name=f"sidecar {index} priming")
+            for index, value in enumerate(sidecar_priming_seconds, start=1)
+        )
+        if len(priming) != len(retained_track_starts) or any(p < 0 for p in priming):
+            raise ValueError("sidecar priming must be one non-negative value per track")
+    origin = min(starts)
+    lead = max(
+        (p - (start - origin) for start, p in zip(starts[1:], priming)),
+        default=Decimal(0),
+    )
+    if lead > 0:
+        origin -= _whole_ms(lead / MS) * MS
+    expected_content = tuple(value - origin for value in starts)
+    offsets = tuple(
+        _whole_ms((desired - p - sidecar_start) * Decimal(1000))
+        for desired, p, sidecar_start in zip(
+            expected_content[1:], priming, sidecar_starts, strict=True
+        )
+    )
+    expected = (
+        expected_content[0],
+        *(
+            sidecar_start + offset / Decimal(1000)
+            for sidecar_start, offset in zip(sidecar_starts, offsets, strict=True)
+        ),
+    )
     return CommonTimelinePlan(
         origin_seconds=origin,
         expected_start_seconds=expected,
-        video_sync_offset_ms=(expected[0] - encoded_start) * Decimal(1000),
-        track_sync_offsets_ms=tuple(
-            (desired - sidecar_start) * Decimal(1000)
-            for desired, sidecar_start in zip(
-                expected[1:], sidecar_starts, strict=True
-            )
-        ),
+        video_sync_offset_ms=_whole_ms((expected[0] - encoded_start) * Decimal(1000)),
+        track_sync_offsets_ms=offsets,
     )
 
 
