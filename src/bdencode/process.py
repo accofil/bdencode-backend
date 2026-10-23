@@ -237,7 +237,10 @@ _DIAGNOSTIC_RULES: tuple[
         "bdj_runtime_unavailable",
         DiagnosticCategory.ENVIRONMENT,
         DiagnosticSeverity.WARNING,
-        re.compile(r"(?i)BD-J check:\s*Failed to load JVM library"),
+        # libbluray without Java, or Java without libbluray's BD-J jar (canada,
+        # Birds Without Names 2017: "bdj.c:801: BD-J check: Failed to load
+        # libbluray.jar"): only the disc's Java menus are affected.
+        re.compile(r"(?i)BD-J check:\s*Failed to load (?:JVM library|libbluray\.jar)"),
     ),
     (
         "output_timestamp_corrected",

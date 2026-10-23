@@ -341,3 +341,16 @@ def test_source_diagnostics_ignore_bdj_runtime_and_corrected_output_timestamps()
     }
     assert all(item.severity is DiagnosticSeverity.WARNING for item in diagnostics)
     assert not any(item.requires_review for item in diagnostics)
+
+
+def test_a_missing_bdj_jar_is_the_same_harmless_runtime_gap() -> None:
+    # canada, Birds Without Names 2017: Java present, libbluray's BD-J jar not.
+    (diagnostic,) = classify_media_diagnostics(
+        "bdj.c:801: BD-J check: Failed to load libbluray.jar\n"
+        "bdj.c:801: BD-J check: Failed to load libbluray.jar\n",
+        context="source",
+    )
+
+    assert diagnostic.code == "bdj_runtime_unavailable" and diagnostic.count == 2
+    assert diagnostic.severity is DiagnosticSeverity.WARNING
+    assert not diagnostic.requires_review
