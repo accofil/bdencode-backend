@@ -184,6 +184,8 @@ from .mux import (
     inspection_commands,
     mkvmerge_command,
     mkvmerge_warning_lines,
+    first_packet_probe_command,
+    parse_first_packet_time,
     parse_stream_start_times,
     parse_stream_start_times_by_type,
     plan_common_zero_timeline,
@@ -671,6 +673,40 @@ def _mkv_reference_inputs(scan: DiscScan, playlist_id: str) -> dict[str, Any]:
         "playlist_id": playlist_id,
         "source_file": source,
     }
+
+
+def _first_packet_seconds(timeline_path: Path) -> Decimal | None:
+    """The first packet time of a packet-timeline probe (None: no packets)."""
+
+    document = json.loads(timeline_path.read_text(encoding="utf-8"))
+    packets = document.get("packets") if isinstance(document, dict) else None
+    if not isinstance(packets, list):
+        raise ValueError(f"{timeline_path.name} has no packets array")
+    for packet in packets:
+        if not isinstance(packet, dict):
+            continue
+        for field in ("pts_time", "dts_time"):
+            value = packet.get(field)
+            if value not in (None, "", "N/A"):
+                return Decimal(str(value))
+    return None
+
+
+def _subtitle_shift_ms(
+    reference_timeline: Path, final_timeline: Path, origin_seconds: Decimal
+) -> Decimal | None:
+    """How far the final MKV moved a copied subtitle against the reference.
+
+    The final timeline is the reference's rebased onto the common zero, so the
+    first event must land at ``reference first - origin``.  None when either
+    side has no packets (the packet-count check covers that).
+    """
+
+    reference_first = _first_packet_seconds(reference_timeline)
+    final_first = _first_packet_seconds(final_timeline)
+    if reference_first is None or final_first is None:
+        return None
+    return (final_first - (reference_first - origin_seconds)) * Decimal(1000)
 
 
 def _track_timestamp_tolerance_ms(scan: DiscScan) -> int:
@@ -6167,6 +6203,35 @@ class PipelineWorker:
                 f"{label} stream-start report is missing or invalid"
             ) from exc
 
+    def _probe_first_packet(
+        self,
+        paths: JobPaths,
+        media_path: Path,
+        stream_spec: str,
+        *,
+        label: str,
+    ) -> Decimal | None:
+        """The first packet time of one stream; None when it has no packets."""
+
+        if not re.fullmatch(r"[a-z0-9-]+", label):
+            raise ValueError("unsafe first-packet probe label")
+        report = paths.analysis / f"{label}-first-packet.json"
+        command = first_packet_probe_command(media_path, stream_spec)
+        inputs = {"media_sha256": sha256_file(media_path), "argv": command}
+        marker = paths.stages / f"first-packet-{label}.json"
+        if not _valid_stage(marker, inputs, [report]):
+            self._runner(paths).run(
+                command,
+                cwd=paths.work,
+                stdout_path=report,
+                stderr_path=paths.logs / f"{label}-first-packet.log",
+            )
+            _write_stage(marker, inputs, [report])
+        try:
+            return parse_first_packet_time(json.loads(report.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise ReviewRequired(f"{label} first packet time is missing or invalid") from exc
+
     def _mux(self, job: Job, paths: JobPaths) -> None:
         scan, selection = self._load_prepared_scan_and_selection(job, paths)
         if not paths.encoded_video.is_file() or not paths.reference.is_file():
@@ -6314,19 +6379,14 @@ class PipelineWorker:
             raise ReviewRequired(
                 "reference video start time is missing or ambiguous"
             ) from exc
+        # Audio is planned from stream start times (codec priming and
+        # container rounding live there).  Subtitles are not: their ffprobe
+        # start_time is the container's start in the reference but the first
+        # event in a sidecar, and planning on that difference moved every
+        # subtitle so that its first event began at 0:00 (3.11.2 and older).
         retained_reference_starts: list[Decimal] = []
-        for _number, _item, stream, _output in ordered_sidecars:
-            key = (
-                (
-                    "audio",
-                    audio_ordinals[stream.id],
-                )
-                if stream.kind is StreamKind.AUDIO
-                else (
-                    "subtitle",
-                    subtitle_ordinals[stream.id],
-                )
-            )
+        for _number, _item, stream, _output in extracted_audio:
+            key = ("audio", audio_ordinals[stream.id])
             if key not in reference_starts_by_type:
                 raise ReviewRequired(f"reference start time is missing for {stream.id}")
             retained_reference_starts.append(reference_starts_by_type[key])
@@ -6338,7 +6398,7 @@ class PipelineWorker:
                 "encoded-video sidecar must contain exactly one stream"
             )
         sidecar_starts: list[Decimal] = []
-        for number, _item, _stream, output in ordered_sidecars:
+        for number, _item, _stream, output in extracted_audio:
             starts = self._probe_stream_starts(
                 paths, output, label=f"track-{number:02d}"
             )
@@ -6347,16 +6407,71 @@ class PipelineWorker:
                     f"track-{number:02d} sidecar must contain exactly one stream"
                 )
             sidecar_starts.append(next(iter(starts.values())))
-        timeline = plan_common_zero_timeline(
+        audio_timeline = plan_common_zero_timeline(
             reference_video_start,
             retained_reference_starts,
             encoded_video_start=next(iter(encoded_starts.values())),
             sidecar_start_times=sidecar_starts,
         )
+        # A subtitle sidecar is a stream copy with -copyts: its packets keep
+        # the reference's absolute times, which mkvmerge keeps too.  The
+        # offset only rebases them onto the common zero, corrected by any
+        # difference between the two first packets (normally none).
+        # ``expected_start_seconds`` stays what ffprobe reports for a subtitle
+        # of a multi-stream MKV (the container's start); the first-event
+        # times are kept apart for the track QC's absolute check.
+        subtitle_expected: list[Decimal] = []
+        subtitle_first_events: list[str | None] = []
+        subtitle_offsets: list[Decimal] = []
+        for number, _item, stream, output in extracted_subtitles:
+            container_key = ("subtitle", subtitle_ordinals[stream.id])
+            if container_key not in reference_starts_by_type:
+                raise ReviewRequired(f"reference start time is missing for {stream.id}")
+            reference_first = self._probe_first_packet(
+                paths,
+                paths.reference,
+                f"s:{subtitle_ordinals[stream.id]}",
+                label=f"reference-subtitle-{subtitle_ordinals[stream.id]:02d}",
+            )
+            sidecar_first = self._probe_first_packet(
+                paths, output, "s:0", label=f"track-{number:02d}"
+            )
+            if (reference_first is None) != (sidecar_first is None):
+                raise ReviewRequired(
+                    f"track-{number:02d} sidecar lost or gained subtitle packets",
+                    details={"stream_id": stream.id},
+                )
+            drift = (
+                Decimal(0)
+                if reference_first is None or sidecar_first is None
+                else reference_first - sidecar_first
+            )
+            subtitle_expected.append(
+                reference_starts_by_type[container_key] - audio_timeline.origin_seconds
+            )
+            subtitle_first_events.append(
+                None
+                if reference_first is None
+                else str(reference_first - audio_timeline.origin_seconds)
+            )
+            subtitle_offsets.append(
+                (drift - audio_timeline.origin_seconds) * Decimal(1000)
+            )
+        timeline = replace(
+            audio_timeline,
+            expected_start_seconds=(
+                *audio_timeline.expected_start_seconds,
+                *subtitle_expected,
+            ),
+            track_sync_offsets_ms=(
+                *audio_timeline.track_sync_offsets_ms,
+                *subtitle_offsets,
+            ),
+        )
         atomic_write_json(
             paths.timeline_json,
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "origin_seconds": str(timeline.origin_seconds),
                 "expected_start_seconds": [
                     str(value) for value in timeline.expected_start_seconds
@@ -6365,6 +6480,9 @@ class PipelineWorker:
                 "track_sync_offsets_ms": [
                     str(value) for value in timeline.track_sync_offsets_ms
                 ],
+                # Per retained subtitle, in order: where its first event must
+                # land in the final MKV (None: the stream has no packets).
+                "subtitle_first_event_seconds": subtitle_first_events,
             },
         )
         audio: list[MuxTrack] = []
@@ -6993,7 +7111,8 @@ class PipelineWorker:
                     (reference_hash_path, reference_timeline_path)
                 )
         track_mux_inputs = {
-            "policy_schema_version": 2,
+            # 3: subtitle tracks are also checked at their absolute place.
+            "policy_schema_version": 3,
             "reference_sha256": sha256_file(paths.reference),
             "final_mkv_sha256": sha256_file(output),
             "tracks": [
@@ -7021,6 +7140,16 @@ class PipelineWorker:
             track_mux_outputs,
         ):
             track_results: list[dict[str, Any]] = []
+            try:
+                timeline_origin = Decimal(
+                    str(
+                        json.loads(paths.timeline_json.read_text(encoding="utf-8"))[
+                            "origin_seconds"
+                        ]
+                    )
+                )
+            except (OSError, KeyError, TypeError, ValueError, ArithmeticError) as exc:
+                raise ReviewRequired("timeline plan is missing or invalid") from exc
             for record in track_mux_records:
                 for command_key, output_key, label in (
                     ("sidecar_command", "sidecar_hash_path", "sidecar"),
@@ -7232,6 +7361,34 @@ class PipelineWorker:
                             "report": track_mux_integrity_report.name,
                         },
                     )
+                # The packet comparison above is relative to each timeline's
+                # first packet, so a whole subtitle track moved in time passes
+                # it.  Its absolute place is checked against the reference.
+                if record["stream_type"] == "s" and record["copy_from_reference"]:
+                    shift_ms = _subtitle_shift_ms(
+                        record["reference_timeline_path"],
+                        record["final_timeline_path"],
+                        timeline_origin,
+                    )
+                    track_results[-1]["absolute_shift_ms"] = (
+                        None if shift_ms is None else str(shift_ms)
+                    )
+                    if shift_ms is not None and abs(shift_ms) > _track_timestamp_tolerance_ms(scan):
+                        atomic_write_json(
+                            track_mux_integrity_report,
+                            {
+                                "schema_version": 1,
+                                "status": "needs_review",
+                                "tracks": track_results,
+                            },
+                        )
+                        raise ReviewRequired(
+                            f"final mux moved a subtitle track by {shift_ms} ms",
+                            details={
+                                "stream_id": record["stream_id"],
+                                "report": track_mux_integrity_report.name,
+                            },
+                        )
             atomic_write_json(
                 track_mux_integrity_report,
                 {

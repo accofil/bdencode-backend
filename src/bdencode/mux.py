@@ -417,6 +417,55 @@ def parse_stream_start_times(document: Mapping[str, Any]) -> dict[int, Decimal]:
     return result
 
 
+def first_packet_probe_command(
+    input_path: Path, stream_spec: str, *, ffprobe: str = "ffprobe"
+) -> list[str]:
+    """The first packet's timestamps of one stream (``s:0``, ``a:1``, ...).
+
+    A subtitle's ffprobe ``start_time`` is not the time of its first event:
+    in a multi-stream file it is the container's start (inherited, usually
+    0), and in a single-stream text-subtitle sidecar it is missing because no
+    packet is read to probe it.  Subtitle timing is therefore measured on the
+    packets themselves, the same way on both sides.
+    """
+
+    if not re.fullmatch(r"[vas]:\d+", stream_spec):
+        raise ValueError("stream spec must be v:N, a:N or s:N")
+    return [
+        ffprobe,
+        "-v",
+        "error",
+        "-select_streams",
+        stream_spec,
+        "-show_entries",
+        "packet=pts_time,dts_time",
+        "-read_intervals",
+        "%+#1",
+        "-of",
+        "json",
+        str(input_path),
+    ]
+
+
+def parse_first_packet_time(document: Mapping[str, Any]) -> Decimal | None:
+    """The first packet's presentation time, or None for a stream without packets."""
+
+    packets = document.get("packets")
+    if not isinstance(packets, list):
+        raise ValueError("ffprobe first-packet report has no packets array")
+    if not packets:
+        return None
+    first = packets[0]
+    if not isinstance(first, Mapping):
+        raise ValueError("ffprobe first-packet entry is not an object")
+    raw = first.get("pts_time")
+    if raw in (None, "", "N/A"):
+        raw = first.get("dts_time")
+    if raw in (None, "", "N/A"):
+        raise ValueError("the first packet has no timestamp")
+    return _decimal(raw, name="first packet time")
+
+
 def parse_stream_start_times_by_type(
     document: Mapping[str, Any],
 ) -> dict[tuple[str, int], Decimal]:

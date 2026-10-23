@@ -847,6 +847,19 @@ class FakeRunner:
                         }
                     ),
                 )
+            elif (
+                command[0] == "ffprobe"
+                and "packet=pts_time,dts_time" in command
+                and "-read_intervals" in command
+            ):
+                # First-packet probe of a subtitle: the same absolute time in
+                # the reference and in its stream-copied sidecar.
+                self._write(
+                    stdout_path,
+                    json.dumps(
+                        {"packets": [{"pts_time": "12.000000", "dts_time": "12.000000"}]}
+                    ),
+                )
             elif command[0] == "ffprobe" and "packet=size" in command:
                 media_path = Path(command[-1])
                 packet_size = 900 if media_path.name == "video-encoded.mkv" else 1000
@@ -1891,6 +1904,7 @@ def test_dense_subtitle_declared_forced_fails_closed_before_mux(context):
         "mux_timeline",
         "extract_payload",
         "extract_timeline",
+        "mux_shift",
     ],
 )
 def test_final_subtitle_payload_integrity_is_fail_closed(context, failure_mode):
@@ -2045,6 +2059,17 @@ def test_final_subtitle_payload_integrity_is_fail_closed(context, failure_mode):
                 document["packets"][1]["dts_time"] = "3601.000000000"
                 self._write(stdout_path, json.dumps(document))
             elif (
+                stdout_path.name == "track-01-s-final-timeline.json"
+                and failure_mode == "mux_shift"
+            ):
+                # The 3.11.2 bug: the whole track moved, every packet by the
+                # same 12 s, so the relative packet comparison still passes.
+                document = json.loads(stdout_path.read_text(encoding="utf-8"))
+                for packet in document["packets"]:
+                    for field in ("pts_time", "dts_time"):
+                        packet[field] = f"{Decimal(packet[field]) + Decimal(12):.9f}"
+                self._write(stdout_path, json.dumps(document))
+            elif (
                 stdout_path.name == "track-01-s-reference.streamhash"
                 and failure_mode == "extract_payload"
             ):
@@ -2119,7 +2144,25 @@ def test_final_subtitle_payload_integrity_is_fail_closed(context, failure_mode):
 
     assert result.state is JobState.NEEDS_REVIEW
     assert result.resume_state is JobState.QC
-    if failure_mode in {
+    # The subtitle sidecar keeps the reference's absolute times: no offset,
+    # although its probed start differs from the reference's container start.
+    plan = json.loads(
+        (settings.job_root(job.id) / "analysis" / "timeline-plan.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert [Decimal(value) for value in plan["track_sync_offsets_ms"]] == [0]
+    assert plan["subtitle_first_event_seconds"] == ["12.000000"]
+    if failure_mode == "mux_shift":
+        assert "moved a subtitle track by 12000" in (result.status_message or "")
+        report = json.loads(
+            (
+                settings.job_root(job.id) / "analysis" / "track-mux-integrity.json"
+            ).read_text(encoding="utf-8")
+        )
+        assert report["tracks"][0]["timeline_verdict"]["passed"] is True
+        assert Decimal(report["tracks"][0]["absolute_shift_ms"]) == 12000
+    elif failure_mode in {
         "mux_payload",
         "mux_timeline",
         "extract_payload",
