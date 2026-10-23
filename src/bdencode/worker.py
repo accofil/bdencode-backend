@@ -26,7 +26,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from datetime import timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_EVEN, Decimal
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Literal, Mapping, Protocol, Sequence
@@ -184,6 +184,7 @@ from .mux import (
     inspection_commands,
     mkvmerge_command,
     mkvmerge_warning_lines,
+    encoder_priming_seconds,
     first_packet_probe_command,
     parse_first_packet_time,
     parse_stream_start_times,
@@ -206,6 +207,7 @@ from .process import (
     redact_argv,
 )
 from .progress import EncodeProgressReporter, FFmpegProgressParser
+from .qc import av_sync
 from .qc.artifacts import inspect_png
 from .qc.audio import (
     AUDIO_FRAME_CONTINUITY_SCHEMA_VERSION,
@@ -6407,11 +6409,29 @@ class PipelineWorker:
                     f"track-{number:02d} sidecar must contain exactly one stream"
                 )
             sidecar_starts.append(next(iter(starts.values())))
+        sidecar_priming: list[Decimal] = []
+        for _number, item, stream, _output in extracted_audio:
+            policy = effective_audio_policy(
+                item.action.value,
+                source_codec=stream.codec,
+                source_profile=stream.codec_profile,
+                source_channels=stream.channels,
+                source_sample_rate=stream.sample_rate,
+                source_bit_depth=stream.bit_depth,
+            )
+            sidecar_priming.append(
+                Decimal(0)
+                if item.action is TrackAction.COPY
+                else encoder_priming_seconds(
+                    policy.codec_name, policy.sample_rate or stream.sample_rate
+                )
+            )
         audio_timeline = plan_common_zero_timeline(
             reference_video_start,
             retained_reference_starts,
             encoded_video_start=next(iter(encoded_starts.values())),
             sidecar_start_times=sidecar_starts,
+            sidecar_priming_seconds=sidecar_priming,
         )
         # A subtitle sidecar is a stream copy with -copyts: its packets keep
         # the reference's absolute times, which mkvmerge keeps too.  The
@@ -6455,7 +6475,9 @@ class PipelineWorker:
                 else str(reference_first - audio_timeline.origin_seconds)
             )
             subtitle_offsets.append(
-                (drift - audio_timeline.origin_seconds) * Decimal(1000)
+                ((drift - audio_timeline.origin_seconds) * Decimal(1000)).quantize(
+                    Decimal(1), rounding=ROUND_HALF_EVEN
+                )
             )
         timeline = replace(
             audio_timeline,
@@ -6511,15 +6533,24 @@ class PipelineWorker:
         chapters = paths.work / "chapters.xml"
         chapters_path: Path | None = None
         if playlist.chapters:
+            # Chapter starts count from the title's first picture, as do the
+            # encode's forced chapter IDR frames; in the final MKV that
+            # picture sits at the video's expected start (0, or a few ms when
+            # a primed AC-3/E-AC-3 track moved the common zero earlier).
+            video_start = timeline.expected_start_seconds[0]
+            final_chapters = tuple(
+                float(Decimal(str(start)) + video_start) for start in playlist.chapters
+            )
             chapter_inputs = {
                 "format": "matroska-chapters-v1",
                 "scan_fingerprint": scan.fingerprint,
                 "playlist_id": playlist.playlist_id,
                 "chapter_starts": list(playlist.chapters),
+                "video_start_seconds": str(video_start),
             }
             chapter_marker = paths.stages / "chapters.json"
             if not _valid_stage(chapter_marker, chapter_inputs, [chapters]):
-                atomic_write_text(chapters, render_matroska_chapters(playlist.chapters))
+                atomic_write_text(chapters, render_matroska_chapters(final_chapters))
                 _write_stage(chapter_marker, chapter_inputs, [chapters])
             chapters_path = chapters
 
@@ -7492,9 +7523,23 @@ class PipelineWorker:
             timeline_expected_starts = tuple(
                 Decimal(str(value)) for value in expected_start_times
             )
+            # A subtitle's start_time in a multi-stream MKV is the container's
+            # start, not its first event: subtitles are checked at their first
+            # packet by the track QC instead (absolute_shift_ms).
+            timed_count = 1 + len(audio_policies)
             start_errors = validate_stream_start_times(
-                ffprobe_document,
-                expected_start_times=timeline_expected_starts,
+                {
+                    **ffprobe_document,
+                    "streams": [
+                        stream
+                        for stream in ffprobe_document.get("streams") or []
+                        if not (
+                            isinstance(stream, Mapping)
+                            and stream.get("codec_type") == "subtitle"
+                        )
+                    ],
+                },
+                expected_start_times=timeline_expected_starts[:timed_count],
             )
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ReviewRequired("timeline plan is missing or invalid") from exc
@@ -8229,6 +8274,10 @@ class PipelineWorker:
                 audio_manifest_path, {"schema_version": 4, "tracks": audio_results}
             )
             _write_stage(audio_marker, audio_inputs, audio_outputs)
+        av_sync_report = self._verify_av_sync(
+            job, paths, playlist, retained, output, audio_ordinals
+        )
+        reports.append(av_sync_report)
 
         for report in reports:
             kind = (
@@ -8265,6 +8314,132 @@ class PipelineWorker:
         self.queue.advance(
             job.id, JobState.COMPARISON, message="container and audio QC passed"
         )
+
+    def _verify_av_sync(
+        self,
+        job: Job,
+        paths: JobPaths,
+        playlist: PlaylistCandidate,
+        retained: Sequence[tuple[int, TrackSelection, MediaStream]],
+        output: Path,
+        audio_ordinals: Mapping[str, int],
+    ) -> Path:
+        """Measure each final audio track's sound against the source (qc.av_sync)."""
+
+        report = paths.analysis / "av-sync.json"
+        try:
+            origin = Decimal(
+                str(json.loads(paths.timeline_json.read_text(encoding="utf-8"))["origin_seconds"])
+            )
+        except (OSError, KeyError, TypeError, ValueError, ArithmeticError) as exc:
+            raise ReviewRequired("timeline plan is missing or invalid") from exc
+        duration = Decimal(str(playlist.duration_seconds))
+        inputs = {
+            "schema_version": 1,
+            "reference_sha256": sha256_file(paths.reference),
+            "output_sha256": sha256_file(output),
+            "origin_seconds": str(origin),
+            "window_seconds": str(av_sync.WINDOW_SECONDS),
+            "tolerance_ms": str(av_sync.TOLERANCE_MS),
+            "tracks": [stream.id for _number, _item, stream in retained],
+        }
+        marker = paths.stages / "qc-av-sync.json"
+        if not _valid_stage(marker, inputs, [report]):
+            root = _ensure_contained_directory(
+                paths.work / "av-sync", root=paths.work, description="A/V sync windows"
+            )
+            tracks: list[dict[str, Any]] = []
+            for final_ordinal, (number, item, stream) in enumerate(retained):
+                source_args = audio_decode_input_args(normalize_audio_codec_name(stream.codec))
+                final_args = audio_decode_input_args(
+                    normalize_audio_codec_name(expected_audio_codec(item.action.value, stream.codec))
+                )
+                windows: list[av_sync.SyncWindow] = []
+                for index, start in enumerate(av_sync.window_starts(duration)):
+                    reference_start = start + origin
+                    if reference_start < 0:
+                        continue
+                    reference_raw = root / f"audio-{number:02d}-reference-{index}.f32"
+                    final_raw = root / f"audio-{number:02d}-final-{index}.f32"
+                    for command, raw in (
+                        (
+                            av_sync.sync_window_command(
+                                paths.reference,
+                                audio_ordinals[stream.id],
+                                reference_start,
+                                reference_raw,
+                                input_args=source_args,
+                            ),
+                            reference_raw,
+                        ),
+                        (
+                            av_sync.sync_window_command(
+                                output, final_ordinal, start, final_raw, input_args=final_args
+                            ),
+                            final_raw,
+                        ),
+                    ):
+                        self._runner(paths).run(
+                            command,
+                            cwd=paths.work,
+                            stderr_path=paths.logs / f"{raw.stem}.log",
+                        )
+                    try:
+                        windows.append(
+                            av_sync.window_result(
+                                start,
+                                reference_start,
+                                av_sync.read_samples(reference_raw),
+                                av_sync.read_samples(final_raw),
+                            )
+                        )
+                    except ImportError:
+                        windows.append(
+                            av_sync.SyncWindow(
+                                str(start), str(reference_start), None, None, False, "numpy_missing"
+                            )
+                        )
+                    finally:
+                        reference_raw.unlink(missing_ok=True)
+                        final_raw.unlink(missing_ok=True)
+                verdict = av_sync.judge(windows)
+                tracks.append(
+                    {
+                        "track_number": number,
+                        "stream_id": stream.id,
+                        "action": item.action.value,
+                        **verdict.to_dict(),
+                    }
+                )
+            atomic_write_json(
+                report,
+                {"schema_version": 1, "origin_seconds": str(origin), "tracks": tracks},
+            )
+            _write_stage(marker, inputs, [report])
+        document = json.loads(report.read_text(encoding="utf-8"))
+        tracks = [track for track in document.get("tracks", []) if isinstance(track, dict)]
+        out_of_sync = [track for track in tracks if track.get("status") == "out_of_sync"]
+        if out_of_sync:
+            first = out_of_sync[0]
+            raise ReviewRequired(
+                f"audio track {first.get('stream_id')} is {first.get('lag_ms')} ms out of "
+                "sync with the source",
+                details={"report": report.name, "tracks": [t.get("stream_id") for t in out_of_sync]},
+            )
+        inconclusive = [track.get("stream_id") for track in tracks if track.get("status") == "inconclusive"]
+        if inconclusive:
+            self.database.add_event(
+                EventCreate(
+                    job_id=job.id,
+                    kind="worker.av-sync-warning",
+                    message=(
+                        "the audio sync of some tracks could not be measured (too quiet "
+                        "or no clear match in the sampled windows); the job continues"
+                    ),
+                    payload={"tracks": inconclusive, "report": report.name},
+                )
+            )
+        return report
 
     @staticmethod
     def _reference_png_pipeline(

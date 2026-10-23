@@ -702,6 +702,17 @@ class FakeRunner:
             path.write_bytes(data)
 
     @staticmethod
+    def sync_samples(delay_samples: int = 0) -> bytes:
+        """Two seconds of reproducible noise at 48 kHz, optionally delayed."""
+
+        import numpy as np
+
+        noise = np.random.default_rng(7).standard_normal(96_000).astype("<f4") * 0.1
+        if delay_samples:
+            noise = np.concatenate((np.zeros(delay_samples, dtype="<f4"), noise[:-delay_samples]))
+        return noise.tobytes()
+
+    @staticmethod
     def _frames() -> str:
         sample_count = 720
         return json.dumps(
@@ -785,6 +796,9 @@ class FakeRunner:
     ) -> None:
         command = tuple(os.fspath(item) for item in argv)
         self.commands.append(command)
+        if command[0] == "ffmpeg" and "f32le" in command and command[-1].endswith(".f32"):
+            # A/V sync window: the same sound in the reference and the final.
+            self._write(Path(command[-1]), self.sync_samples())
         if stderr_path is not None:
             self._write(stderr_path, "")
             if stderr_path.name.endswith("-analysis.log"):
@@ -1024,7 +1038,12 @@ class FakeRunner:
                 Path(matches[1].replace("\\:", ":")),
                 "n:1 mse_avg:1.0 psnr_avg:44.0 psnr_y:43.0 psnr_u:46.0 psnr_v:45.0\n",
             )
-        elif command[0] == "ffmpeg" and command[-1] != "-" and stdout_path is None:
+        elif (
+            command[0] == "ffmpeg"
+            and command[-1] != "-"
+            and stdout_path is None
+            and not command[-1].endswith(".f32")
+        ):
             output = Path(command[-1])
             self._write(output, _png() if output.suffix == ".png" else b"mock-media")
 
@@ -3328,6 +3347,187 @@ def test_an_mkvmerge_identify_data_loss_warning_blocks_every_qc_resume(context):
     )
 
 
+def test_an_audio_track_out_of_sync_with_the_source_stops_the_job(context):
+    """The final sound 10 ms late against the source: no other check sees it."""
+
+    database, settings, scan, scanner, runner, worker = context
+    audio = MediaStream(
+        id="audio:4352",
+        index=1,
+        pid=4352,
+        kind=StreamKind.AUDIO,
+        codec="ac3",
+        channels=2,
+        channel_layout="stereo",
+        sample_rate=48000,
+    )
+    scanner.result = replace(
+        scan,
+        playlists=(
+            replace(
+                scan.playlists[0],
+                streams=(*scan.playlists[0].streams, audio),
+            ),
+        ),
+    )
+
+    real_run = runner.run
+    spectrum_invocations: list[tuple[tuple[str, ...], Path | None]] = []
+
+    def run_with_audio_reports(argv, **kwargs):
+        command = tuple(os.fspath(item) for item in argv)
+        if command[0] == "ffmpeg" and any(
+            "showspectrumpic" in item for item in command
+        ):
+            spectrum_invocations.append((command, kwargs.get("stderr_path")))
+        real_run(argv, **kwargs)
+        if command[0] == "ffmpeg" and command[-1].endswith(".f32") and "-final-" in command[-1]:
+            runner._write(Path(command[-1]), runner.sync_samples(delay_samples=480))
+        stdout_path = kwargs.get("stdout_path")
+        if stdout_path is None:
+            return
+        if command[0] == "ffprobe" and "stream=index,codec_type,start_time" in command:
+            media_name = Path(command[-1]).name
+            if media_name == "reference.mkv":
+                streams = [
+                    {
+                        "index": 0,
+                        "codec_type": "video",
+                        "start_time": "0.040000",
+                    },
+                    {
+                        "index": 1,
+                        "codec_type": "audio",
+                        "start_time": "0.040000",
+                    },
+                ]
+            else:
+                streams = [
+                    {
+                        "index": 0,
+                        "codec_type": (
+                            "video" if media_name == "video-encoded.mkv" else "audio"
+                        ),
+                        "start_time": (
+                            "0.000000"
+                            if media_name == "video-encoded.mkv"
+                            else "0.040000"
+                        ),
+                    }
+                ]
+            runner._write(stdout_path, json.dumps({"streams": streams}))
+        elif command[0] == "mkvmerge" and "--identify" in command:
+            runner._write(
+                stdout_path,
+                json.dumps(
+                    {
+                        "container": {
+                            "properties": {"title": "Movie.2026.1080p.BluRay.x264"}
+                        },
+                        "tracks": [
+                            {
+                                "id": 0,
+                                "type": "video",
+                                "properties": {
+                                    "default_track": True,
+                                    "forced_track": False,
+                                },
+                            },
+                            {
+                                "id": 1,
+                                "type": "audio",
+                                "properties": {
+                                    "language": "en",
+                                    "track_name": "English Original Mix",
+                                    "default_track": True,
+                                    "forced_track": False,
+                                },
+                            },
+                        ],
+                        "attachments": [],
+                    }
+                ),
+            )
+        elif stdout_path.name == "ffprobe-streams.json":
+            runner._write(
+                stdout_path,
+                json.dumps(
+                    {
+                        "streams": [
+                            {
+                                "index": 0,
+                                "codec_name": "h264",
+                                "profile": "High",
+                                "level": 41,
+                                "codec_type": "video",
+                                "start_time": "0.000000",
+                                "width": 1920,
+                                "height": 1080,
+                                "pix_fmt": "yuv420p",
+                                "color_range": "tv",
+                                "color_space": "bt709",
+                                "color_transfer": "bt709",
+                                "color_primaries": "bt709",
+                                "chroma_location": "left",
+                            },
+                            {
+                                "index": 1,
+                                "codec_name": "ac3",
+                                "codec_type": "audio",
+                                "start_time": "0.000000",
+                            },
+                        ]
+                    }
+                ),
+            )
+        elif stdout_path.name.endswith("-probe.json"):
+            start_time = (
+                "0.040000" if "source-probe" in stdout_path.name else "0.000000"
+            )
+            runner._write(
+                stdout_path,
+                json.dumps(
+                    {
+                        "streams": [
+                            {
+                                "codec_type": "audio",
+                                "codec_name": "ac3",
+                                "sample_rate": "48000",
+                                "channels": 2,
+                                "channel_layout": "stereo",
+                                "nb_samples": "28848000",
+                                "start_time": start_time,
+                                "duration": "601",
+                            }
+                        ]
+                    }
+                ),
+            )
+
+    runner.run = run_with_audio_reports
+    job = _enqueue(database, scan.source)
+    claimed = JobQueue(database).claim_next()
+    assert claimed is not None
+    worker.process_one_stage(claimed)
+    ready = database.set_selection(
+        job.id,
+        _selection(
+            tracks=[{"stream_id": "audio:4352", "action": "copy", "language": "eng"}]
+        ),
+    )
+    paths = JobPaths.create(settings, job.id)
+
+    result = worker.process_job(ready)
+
+    assert result.state is JobState.NEEDS_REVIEW
+    assert result.resume_state is JobState.QC
+    assert "out of sync with the source" in (result.status_message or "")
+    av = json.loads((paths.analysis / "av-sync.json").read_text(encoding="utf-8"))
+    assert av["tracks"][0]["status"] == "out_of_sync"
+    assert Decimal(av["tracks"][0]["lag_ms"]) == 10
+    assert not list((paths.work / "av-sync").glob("*.f32"))
+
+
 def test_audio_spectrum_pngs_are_registered_as_spectrogram_artifacts(context):
     database, settings, scan, scanner, runner, worker = context
     audio = MediaStream(
@@ -3499,7 +3699,7 @@ def test_audio_spectrum_pngs_are_registered_as_spectrogram_artifacts(context):
     assert result.state is JobState.COMPLETED, result.status_message
     timeline = json.loads(paths.timeline_json.read_text(encoding="utf-8"))
     assert timeline["origin_seconds"] == "0.040000"
-    assert timeline["track_sync_offsets_ms"] == ["-40.000000"]
+    assert [Decimal(value) for value in timeline["track_sync_offsets_ms"]] == [-40]
     mux_command = next(
         command
         for command in runner.commands
@@ -3535,6 +3735,10 @@ def test_audio_spectrum_pngs_are_registered_as_spectrogram_artifacts(context):
     assert track_mux["status"] == "passed"
     assert track_mux["tracks"][0]["stream_type"] == "a"
     assert track_mux["tracks"][0]["payloads_match"] is True
+    av = json.loads((paths.analysis / "av-sync.json").read_text(encoding="utf-8"))
+    assert av["tracks"][0]["status"] == "passed"
+    assert Decimal(av["tracks"][0]["lag_ms"]) == 0
+    assert all(window["conclusive"] for window in av["tracks"][0]["windows"])
     spectra = [
         artifact
         for artifact in database.list_artifacts(job_id=job.id, limit=1000)
@@ -3716,7 +3920,9 @@ def test_lossy_audio_transcode_uses_target_qc_without_pcm_hash_gate(
                                 "profile": "High",
                                 "level": 41,
                                 "codec_type": "video",
-                                "start_time": "0.000000",
+                                # The E-AC-3 priming (5.333 ms) moved the
+                                # common zero: the video starts 5 ms later.
+                                "start_time": "0.005000",
                                 "width": 1920,
                                 "height": 1080,
                                 "pix_fmt": "yuv420p",
@@ -3891,6 +4097,15 @@ def test_lossy_audio_transcode_uses_target_qc_without_pcm_hash_gate(
     )
     assert audio_command[audio_command.index("-b:a") + 1] == "1024k"
     assert audio_command[audio_command.index("-ac") + 1] == "6"
+    if not (internal_final_audio_gap or clip_join):
+        # 256 samples of E-AC-3 priming: the other streams start 5 ms later.
+        plan = json.loads(
+            (settings.job_root(job.id) / "analysis" / "timeline-plan.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert Decimal(plan["video_sync_offset_ms"]) == 5
+        assert [Decimal(value) for value in plan["track_sync_offsets_ms"]] == [0]
 
 
 def test_missing_imgbb_credential_becomes_retryable_upload_failure(context):

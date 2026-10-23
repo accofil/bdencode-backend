@@ -590,6 +590,34 @@ def test_too_few_coinciding_i_frames_reduce_the_i_share_not_the_pair_count() -> 
     assert all(pair.dual_type_match for pair in pairs)
 
 
+def test_scarce_i_frames_are_placed_before_the_plentiful_p_and_b() -> None:
+    # The I Want Your Sex 4K job (3.11.3): short sample windows, an I-frame
+    # on both sides in only eight of them. Placed in timeline order, each I
+    # sat next to an already chosen P or B and the plan failed with eight
+    # usable I-frames there.
+    length = 120_000
+    windows = [k * 4_800 for k in range(25)]
+    sampled = [start + offset for start in windows for offset in range(48)]
+    i_windows = {windows[k] for k in (1, 4, 7, 10, 13, 16, 19, 22)}
+    encoded, source = [], []
+    for index in sampled:
+        kind = "I" if index in i_windows else ("P" if index % 3 == 1 else "B")
+        pts = Decimal(index) / Decimal(24)
+        encoded.append(FrameRecord(presentation_index=index, pts_seconds=pts, pict_type=kind))
+        source.append(FrameRecord(presentation_index=index, pts_seconds=pts, pict_type=kind))
+
+    pairs, adjusted = select_frame_pairs_reducing_i(
+        encoded, source, total_pairs=24, timeline_frames=length, dual_type_match=True
+    )
+
+    assert adjusted is None
+    assert {category: sum(pair.category == category for pair in pairs) for category in "IPB"} == {
+        "I": 8, "P": 8, "B": 8,
+    }
+    indexes = sorted(pair.presentation_index for pair in pairs)
+    assert min(right - left for left, right in zip(indexes, indexes[1:])) >= length // 96
+
+
 def test_enough_i_frames_keep_the_requested_split() -> None:
     frames = _frames("IPB" * 800)
     pairs, adjusted = select_frame_pairs_reducing_i(
