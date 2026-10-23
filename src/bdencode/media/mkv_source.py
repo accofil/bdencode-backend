@@ -61,9 +61,26 @@ PROBE_TIMEOUT_SECONDS = 180
 FRAME_PROBE_TIMEOUT_SECONDS = 90
 _EDGE_BYTES = 1024 * 1024
 
-NO_SOURCE_ID_WARNING = (
-    "The video track carries no SOURCE_ID tag (written by MakeMKV/mkvmerge from "
-    "the disc); make sure the file is an untouched disc remux, not an encode."
+# A consumer encoder signs the first access unit of its stream (an x264/x265
+# "user data unregistered" SEI with its version and settings); a disc's
+# professional encoders do not.  This is real evidence of an encode, unlike
+# a missing SOURCE_ID tag, which only MakeMKV writes: group remuxes made with
+# mkvmerge from the disc's m2ts (EPSiLON, FraMeSToR, ...) do not carry it.
+ENCODER_SIGNATURES = (
+    ("x264", "x264 - core"),
+    ("x265", "x265 (build"),
+    ("HandBrake", "HandBrake"),
+)
+# Some labels master their discs with x264/x265 themselves (The Florist 2026:
+# "x264 - core 164 ... bluray_compat=1 ... bitrate=30000 nal_hrd=vbr").  A
+# disc stream must be authored with these options; a home encode is not
+# (BDEncode's own: "bluray_compat=0 crf=18.5", "uhd-bd=0 rc=crf").
+DISC_MASTER_OPTIONS = {"x264": "bluray_compat=1", "x265": "uhd-bd=1"}
+ENCODER_SIGNATURE_FRAMES = 5
+ENCODER_SIGNATURE_WARNING = (
+    "The video stream carries a {encoder} encoder signature without disc "
+    "authoring options: the file is most likely an encode, not an untouched "
+    "disc remux."
 )
 
 
@@ -164,8 +181,11 @@ class MkvScanner:
         runner: CaptureRunner | None = None,
         capabilities: ToolCapabilities | None = None,
         source_root: Path = DEFAULT_SOURCE_ROOT,
+        ffmpeg: str | None = None,
     ) -> None:
         self.runner = runner or SubprocessCaptureRunner()
+        # Only the encoder-signature check copies a few packets with FFmpeg.
+        self.ffmpeg = ffmpeg or shutil.which("ffmpeg")
         self.capabilities = capabilities or ToolCapabilities(
             ffprobe=shutil.which("ffprobe"),
             mediainfo=shutil.which("mediainfo"),
@@ -208,8 +228,9 @@ class MkvScanner:
             for item in probe.get("chapters", []) or []
             if isinstance(item, Mapping)
         )
-        if not _tags(video_item).get("SOURCE_ID"):
-            warnings.append(NO_SOURCE_ID_WARNING)
+        encoder = self._encoder_signature(path, video_item)
+        if encoder is not None:
+            warnings.append(ENCODER_SIGNATURE_WARNING.format(encoder=encoder))
         if dropped:
             warnings.append(
                 "Not part of the title and left out: "
@@ -322,6 +343,49 @@ class MkvScanner:
                 "format, not a disc remux"
             )
         return kept, dropped
+
+    def _encoder_signature(self, path: Path, video: Mapping[str, Any]) -> str | None:
+        """The consumer encoder that signed the video stream, if any.
+
+        The first few access units are copied out as an elementary stream
+        (no decode); x264 and x265 put their signature in the first one.
+        """
+
+        codec = str(video.get("codec_name", "")).lower()
+        if codec not in {"h264", "hevc"}:
+            return None
+        ffmpeg = self.ffmpeg
+        if not ffmpeg:
+            return None
+        completed = self.runner.capture(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-nostdin",
+                "-v",
+                "error",
+                "-i",
+                os.fspath(path),
+                "-map",
+                "0:v:0",
+                "-c",
+                "copy",
+                "-frames:v",
+                str(ENCODER_SIGNATURE_FRAMES),
+                "-f",
+                codec,
+                "-",
+            ],
+            timeout=FRAME_PROBE_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if getattr(completed, "returncode", 1) != 0:
+            return None
+        stream = str(getattr(completed, "stdout", "") or "")
+        encoder = next((name for name, mark in ENCODER_SIGNATURES if mark in stream), None)
+        if encoder is not None and DISC_MASTER_OPTIONS.get(encoder, "\0") in stream:
+            return None  # the disc itself was mastered with this encoder
+        return encoder
 
     def _frame_metadata(
         self, path: Path, video: Mapping[str, Any]

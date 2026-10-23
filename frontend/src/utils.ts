@@ -304,6 +304,13 @@ export function audioQcFinding(message: string): string | undefined {
  * Checks that record a measurement artefact or an FFmpeg-build difference as a
  * warning and let the job continue (since 3.7.3), localised.
  */
+/** Scan warnings an older version stored that proved wrong; not shown any more. */
+export function retiredScanWarning(message: string): boolean {
+  // 3.10-3.12.0: a missing SOURCE_ID tag (only MakeMKV writes one) is no sign
+  // of an encode; 3.12.1 checks the encoder signature instead.
+  return message.startsWith("The video track carries no SOURCE_ID tag");
+}
+
 export function stabilityWarning(message: string): string | undefined {
   const flash = /^crop verification: (\d+) short flash\(es\) reach into the cropped border \((\d+) frame\(s\), longest ([\d.]+) s\); the crop is kept and the job continues$/.exec(message);
   if (flash) return t(`Crop-ellenőrzés: ${flash[1]} rövid felvillanás ér bele a levágott sávba (${flash[2]} képkocka, a leghosszabb ${flash[3]} mp). A crop marad, a job folytatódik.`, `Crop check: ${flash[1]} short flash(es) reach into the cropped border (${flash[2]} frame(s), longest ${flash[3]} s). The crop is kept and the job continues.`);
@@ -312,6 +319,16 @@ export function stabilityWarning(message: string): string | undefined {
   if (message === "the encoded video is not smaller than the source; the job continues") return t("A kódolt videó nem lett kisebb a forrásnál (alacsony bitrátájú vagy animációs lemeznél előfordul); a job folytatódik", "The encoded video is not smaller than the source (this happens with low-bitrate or animated discs); the job continues");
   if (message === "the final video stream is described differently by this FFmpeg build; the job continues") return t("Ez az FFmpeg-verzió másképp írja le a kész videósávot (profilnév, chroma-pozíció vagy szint); a kép megfelel a beállításoknak, a job folytatódik", "This FFmpeg build describes the final video stream differently (profile name, chroma location or level); the picture matches the settings and the job continues");
   if (message === "The libbluray playlist reader failed; playlist durations are ffprobe estimates and the duration check only warns.") return t("A libbluray playlist-olvasó nem futott le; a playlistek hossza az ffprobe becslése, ezért a hosszellenőrzés csak figyelmeztet.", "The libbluray playlist reader failed; playlist durations are ffprobe estimates and the duration check only warns.");
+  // MKV remux sources (3.10+).
+  const encoder = /^The video stream carries a (\S+) encoder signature without disc authoring options: the file is most likely an encode, not an untouched disc remux\.$/.exec(message);
+  if (encoder) return t(`A videófolyamban ${encoder[1]} kódoló aláírása van, lemezre írási beállítások nélkül: a fájl valószínűleg újrakódolás, nem érintetlen lemez-remux.`, message);
+  const dropped = /^Not part of the title and left out: (.+)\.$/.exec(message);
+  if (dropped) {
+    const items = dropped[1]
+      .replace(/cover image \(stream (\d+), ([^)]+)\)/g, (_all, index, codec) => t(`borítókép (${index}. sáv, ${codec})`, `cover image (stream ${index}, ${codec})`))
+      .replace(/(\w+) stream (\d+)/g, (_all, kind, index) => t(`${kind} (${index}. sáv)`, `${kind} stream ${index}`));
+    return t(`Nem része a filmnek, ezért kimarad: ${items}.`, `Not part of the title and left out: ${items}.`);
+  }
   return undefined;
 }
 

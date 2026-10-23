@@ -33,7 +33,7 @@ from bdencode.media.language import (
     settle_track_language,
 )
 from bdencode.media.mkv_source import (
-    NO_SOURCE_ID_WARNING,
+    ENCODER_SIGNATURE_WARNING,
     MkvScanner,
     MkvSourceError,
     is_mkv_source,
@@ -255,29 +255,40 @@ BD_PROBE: dict[str, Any] = {
 class ProbeRunner:
     """Answers the stream probe and the frame side-data probe."""
 
-    def __init__(self, probe: dict[str, Any], frames: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        probe: dict[str, Any],
+        frames: dict[str, Any] | None = None,
+        elementary: str = "\x00\x00\x00\x01\x67disc picture data",
+    ) -> None:
         self.probe = probe
         self.frames = frames or {"frames": []}
+        self.elementary = elementary
         self.commands: list[tuple[str, ...]] = []
 
     def capture(self, argv, *, timeout: float = 30, check: bool = True):
         command = tuple(os.fspath(item) for item in argv)
         self.commands.append(command)
+        if command[0] == "ffmpeg":
+            # The first access units copied out for the encoder signature.
+            return SimpleNamespace(returncode=0, stdout=self.elementary, stderr="")
         document = self.frames if "-show_frames" in command else self.probe
         return SimpleNamespace(returncode=0, stdout=json.dumps(document), stderr="")
 
 
 def _scan(tmp_path: Path, probe: dict[str, Any], frames: dict[str, Any] | None = None,
-          name: str = "Movie 2026 2160p UHD Blu-ray Remux.mkv") -> tuple[DiscScan, ProbeRunner]:
+          name: str = "Movie 2026 2160p UHD Blu-ray Remux.mkv",
+          elementary: str | None = None) -> tuple[DiscScan, ProbeRunner]:
     root = tmp_path / "storage"
     root.mkdir(exist_ok=True)
     source = root / name
     source.write_bytes(b"\x1a\x45\xdf\xa3" + b"remux" * 64)
-    runner = ProbeRunner(probe, frames)
+    runner = ProbeRunner(probe, frames) if elementary is None else ProbeRunner(probe, frames, elementary)
     scanner = MkvScanner(
         runner=runner,
         capabilities=ToolCapabilities(ffprobe="ffprobe"),
         source_root=root,
+        ffmpeg="ffmpeg",
     )
     return scanner.scan(source, content_kind=ContentKind.FILM), runner
 
@@ -303,7 +314,7 @@ def test_uhd_remux_scan_keeps_the_title_and_drops_the_cover(tmp_path: Path) -> N
     # The attached cover picture is not a video stream of the title.
     assert len(playlist.video_streams) == 1
     assert any("cover image (stream 8, mjpeg)" in item for item in scan.warnings)
-    assert NO_SOURCE_ID_WARNING not in scan.warnings
+    assert not any("encoder signature" in item for item in scan.warnings)
 
     video = playlist.video_streams[0].video
     assert video is not None
@@ -335,10 +346,12 @@ def test_uhd_remux_scan_keeps_the_title_and_drops_the_cover(tmp_path: Path) -> N
     assert english.status is LanguageStatus.DECLARED and not english.needs_review
     assert [item.source for item in english.evidence] == [LanguageSource.MATROSKA]
 
-    # One stream probe and one frame probe, both of the file itself.
-    assert len(runner.commands) == 2
+    # A stream probe, a frame probe and the encoder-signature copy, all of
+    # the file itself.
+    assert len(runner.commands) == 3
     for command in runner.commands:
-        assert command[-1] == os.fspath(scan.source)
+        read = command[command.index("-i") + 1] if command[0] == "ffmpeg" else command[-1]
+        assert read == os.fspath(scan.source)
         assert not any("bluray:" in item for item in command)
         assert "-playlist" not in command
 
@@ -365,8 +378,9 @@ def test_bd_remux_scan(tmp_path: Path) -> None:
     video = playlist.video_streams[0].video
     assert video is not None and video.codec is VideoCodec.AVC
     assert not (video.hdr10 or video.hdr10_plus or video.dolby_vision)
-    # SDR: no frame probe, and a remux without a cover has no warning.
-    assert len(runner.commands) == 1
+    # SDR: no frame probe (only the encoder-signature copy), and a remux
+    # without a cover has no warning.
+    assert [command[0] for command in runner.commands] == ["ffprobe", "ffmpeg"]
     assert scan.warnings == ()
 
 
@@ -381,11 +395,44 @@ def test_hdr10_plus_in_the_file_name_is_no_evidence(tmp_path: Path) -> None:
     assert video is not None and video.hdr10_plus is False and video.dolby_vision
 
 
-def test_missing_source_id_is_a_warning(tmp_path: Path) -> None:
+def test_a_group_remux_without_source_id_gives_no_warning(tmp_path: Path) -> None:
+    # Casanova S01 (EPSiLON): mkvmerge from the disc's m2ts, no SOURCE_ID
+    # tag (only MakeMKV writes one), no encoder signature: a real remux.
     probe = copy.deepcopy(BD_PROBE)
     del probe["streams"][0]["tags"]["SOURCE_ID"]
-    scan, _runner = _scan(tmp_path, probe)
-    assert NO_SOURCE_ID_WARNING in scan.warnings
+    scan, runner = _scan(tmp_path, probe)
+
+    assert not any("SOURCE_ID" in item or "encoder signature" in item for item in scan.warnings)
+    copy_command = next(command for command in runner.commands if command[0] == "ffmpeg")
+    assert copy_command[copy_command.index("-c") + 1] == "copy"
+    assert copy_command[copy_command.index("-frames:v") + 1] == "5"
+    assert copy_command[copy_command.index("-f") + 1] == "h264"
+
+
+@pytest.mark.parametrize(
+    ("signature", "encoder"),
+    [
+        # BDEncode's own outputs, as found on nvme.
+        ("x264 - core 164 r3204 373697b - options: bluray_compat=0 crf=18.5 nal_hrd=none", "x264"),
+        ("x265 (build 199) - 3.5+1-f0c1022b6 - options: high-tier=1 uhd-bd=0 rc=crf crf=18.0", "x265"),
+    ],
+)
+def test_an_encoder_signature_is_a_warning(tmp_path: Path, signature: str, encoder: str) -> None:
+    scan, _runner = _scan(tmp_path, BD_PROBE, elementary="\x00\x00\x01\x06\x05" + signature)
+    assert ENCODER_SIGNATURE_WARNING.format(encoder=encoder) in scan.warnings
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        # The Florist 2026 disc: the label mastered it with x264 itself.
+        "x264 - core 164 r3204 373697b - options: bluray_compat=1 bitrate=30000 vbv_maxrate=35000 nal_hrd=vbr",
+        "x265 (build 199) - 3.5 - options: uhd-bd=1 hrd bitrate=60000",
+    ],
+)
+def test_a_disc_mastered_with_x264_or_x265_is_not_an_encode(tmp_path: Path, signature: str) -> None:
+    scan, _runner = _scan(tmp_path, BD_PROBE, elementary="\x00\x00\x01\x06\x05" + signature)
+    assert not any("encoder signature" in item for item in scan.warnings)
 
 
 def _without_video(probe: dict[str, Any]) -> dict[str, Any]:
