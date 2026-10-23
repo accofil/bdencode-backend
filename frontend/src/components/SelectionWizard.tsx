@@ -61,7 +61,7 @@ import { normalizeStoredSelection } from "../selection";
 import type { StoredTrackSelection } from "../selection";
 import { encoderHelp } from "../encoderHelp";
 import { imageHostOrderText, imageUploadProviderLabels, UPLOAD_IMAGE_SET_LABELS, uploadImageSet, useImageHostOrder } from "../uploads";
-import { basename, formatDuration, humanize, stabilityWarning, suggestedOutputName } from "../utils";
+import { basename, formatDuration, humanize, retiredScanWarning, stabilityWarning, suggestedOutputName } from "../utils";
 import {
   buildReleaseName,
   channelLayout,
@@ -584,6 +584,7 @@ export function SelectionWizard({
     setValidation(null);
   }
 
+  const shownScanWarnings = scan.warnings.filter((warning) => !retiredScanWarning(warning));
   const retainedTracks = tracks.filter((item) => item.action !== "omit");
   const unresolvedTracks = retainedTracks.filter((item) => !trackLanguageSettled(
     playlist?.streams.find((stream) => stream.id === item.stream_id),
@@ -652,9 +653,9 @@ export function SelectionWizard({
         ))}
       </div>
 
-      {scan.warnings.length > 0 && (
+      {shownScanWarnings.length > 0 && (
         <Notice tone="warning" title={t("A scan figyelmeztetései", "Scan warnings")}>
-          <ul>{scan.warnings.map((warning) => <li key={warning}>{stabilityWarning(warning) ?? warning}</li>)}</ul>
+          <ul>{shownScanWarnings.map((warning) => <li key={warning}>{stabilityWarning(warning) ?? warning}</li>)}</ul>
         </Notice>
       )}
 
