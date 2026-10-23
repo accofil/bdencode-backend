@@ -553,14 +553,56 @@ def _globally_distributed_frames(
     *,
     timeline_frames: int,
     minimum_separation_frames: int,
+    relax_separation: bool = False,
 ) -> list[FrameRecord]:
-    """Select one type at each global target instead of clustered type groups."""
+    """Select one type at each global target instead of clustered type groups.
 
+    The scarcest type is placed first: the separation rule is checked against
+    every frame already chosen, so when the common P and B frames were placed
+    first, a sample with few coinciding source/encode I-frames (a long-GOP
+    4K encode) found each of them next to a chosen P or B and failed, although
+    eight were there.  With ``relax_separation`` (the last resort, after fewer
+    I pairs did not fit either) the separation is halved down to about half a
+    second before giving up.
+    """
+
+    separation = minimum_separation_frames
+    floor = max(1, min(minimum_separation_frames, 12)) if relax_separation else separation
+    while True:
+        try:
+            return _distributed_frames_once(
+                candidates,
+                requested,
+                timeline_frames=timeline_frames,
+                minimum_separation_frames=separation,
+            )
+        except FrameSelectionError:
+            if separation <= floor:
+                raise
+            separation = max(floor, separation // 2)
+
+
+def _distributed_frames_once(
+    candidates: Mapping[str, Sequence[FrameRecord]],
+    requested: Mapping[str, int],
+    *,
+    timeline_frames: int,
+    minimum_separation_frames: int,
+) -> list[FrameRecord]:
     schedule = _category_schedule(requested)
+    targets = [
+        (position, category, position * (timeline_frames - 1) / (len(schedule) + 1))
+        for position, category in enumerate(schedule, start=1)
+    ]
+    scarcity = {
+        category: len(candidates[category]) / max(1, requested.get(category, 0))
+        for category in FRAME_TYPES
+    }
     selected: list[FrameRecord] = []
     used_indexes: set[int] = set()
-    for position, category in enumerate(schedule, start=1):
-        target = position * (timeline_frames - 1) / (len(schedule) + 1)
+    for position, category, target in sorted(
+        targets, key=lambda item: (scarcity[item[1]], item[0])
+    ):
         eligible = [
             item
             for item in candidates[category]
@@ -606,35 +648,29 @@ def select_frame_pairs_reducing_i(
     can hold fewer such pictures than the requested I share.  Then the I count
     steps down (never below one) and the freed slots go to P and B, which every
     window holds plenty of.  Every other rule (alignment, dual type, spread) is
-    unchanged.  Returns the pairs and the adjusted counts, ``None`` when the
-    request was met as asked.
+    unchanged.  Only when no I count fits with the usual spread is the
+    separation relaxed (``relax_separation``), first for the request as asked.
+    Returns the pairs and the adjusted counts, ``None`` when the request was
+    met as asked.
     """
 
-    try:
-        return (
-            select_frame_pairs(
-                encoded,
-                reference,
-                total_pairs=total_pairs,
-                timeline_frames=timeline_frames,
-                dual_type_match=dual_type_match,
-                type_counts=type_counts,
-                pts_tolerance=pts_tolerance,
-            ),
-            None,
-        )
-    except FrameSelectionError as first_error:
-        requested = dict(type_counts) if type_counts is not None else _balanced_type_counts(total_pairs)
-        available_i = len(
-            _aligned_candidates(encoded, reference, pts_tolerance, dual_type_match)["I"]
-        )
-        for i_count in range(min(requested["I"] - 1, available_i), 0, -1):
-            moved = requested["I"] - i_count
-            adjusted = {
+    requested = dict(type_counts) if type_counts is not None else _balanced_type_counts(total_pairs)
+    available_i = len(
+        _aligned_candidates(encoded, reference, pts_tolerance, dual_type_match)["I"]
+    )
+    plans: list[dict[str, int] | None] = [None]
+    for i_count in range(min(requested["I"] - 1, available_i), 0, -1):
+        moved = requested["I"] - i_count
+        plans.append(
+            {
                 "I": i_count,
                 "P": requested["P"] + moved - moved // 2,
                 "B": requested["B"] + moved // 2,
             }
+        )
+    first_error: FrameSelectionError | None = None
+    for relax in (False, True):
+        for adjusted in plans:
             try:
                 return (
                     select_frame_pairs(
@@ -643,14 +679,17 @@ def select_frame_pairs_reducing_i(
                         total_pairs=total_pairs,
                         timeline_frames=timeline_frames,
                         dual_type_match=dual_type_match,
-                        type_counts=adjusted,
+                        type_counts=type_counts if adjusted is None else adjusted,
                         pts_tolerance=pts_tolerance,
+                        relax_separation=relax,
                     ),
                     adjusted,
                 )
-            except FrameSelectionError:
+            except FrameSelectionError as exc:
+                first_error = first_error or exc
                 continue
-        raise first_error
+    assert first_error is not None
+    raise first_error
 
 
 def _aligned_candidates(
@@ -686,6 +725,7 @@ def select_frame_pairs(
     timeline_frames: int | None = None,
     minimum_separation_frames: int | None = None,
     type_counts: Mapping[str, int] | None = None,
+    relax_separation: bool = False,
 ) -> list[FramePair]:
     """Select identical presentation frames, categorized by final encode type.
 
@@ -730,6 +770,7 @@ def select_frame_pairs(
                 requested,
                 timeline_frames=timeline_frames,
                 minimum_separation_frames=separation,
+                relax_separation=relax_separation,
             )
         except FrameSelectionError as exc:
             qualifier = "aligned dual-type" if dual_type_match else "aligned"
