@@ -89,5 +89,9 @@ def test_windows_sit_inside_the_title_and_the_command_decodes_mono_48k(tmp_path:
     )
     assert command[command.index("-ss") + 1] == "2700.000000"
     assert command.index("-ss") < command.index("-i")
+    # An absolute timestamp, not a distance from the file's start time (a
+    # reference starting at 0.042 s measured a correct mux one frame late).
+    assert command[command.index("-seek_timestamp") + 1] == "1"
+    assert command.index("-seek_timestamp") < command.index("-ss")
     assert command[command.index("-map") + 1] == "0:a:1"
     assert ["-ac", "1", "-ar", "48000", "-f", "f32le"] == command[command.index("-ac"):command.index("-f") + 2]

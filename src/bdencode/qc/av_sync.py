@@ -77,8 +77,12 @@ def sync_window_command(
 ) -> list[str]:
     """Decode one window to raw mono 48 kHz float samples.
 
-    ``-ss`` before ``-i`` with FFmpeg's default accurate seek starts the output
-    at exactly ``start_seconds`` of the input timeline, the same way for the
+    ``start_seconds`` is an absolute timestamp of the input.  FFmpeg's input
+    ``-ss`` alone counts from the file's start time instead, which double
+    counted a reference starting at 0.042 s (canada, Birds Without Names
+    2017: a correct mux measured one frame, 41.667 ms, late); with
+    ``-seek_timestamp 1`` it is the timestamp itself.  FFmpeg's default
+    accurate seek then starts the output exactly there, the same way for the
     reference and the final MKV.
     """
 
@@ -90,6 +94,8 @@ def sync_window_command(
         "-nostdin",
         "-v",
         "error",
+        "-seek_timestamp",
+        "1",
         "-ss",
         f"{start_seconds:.6f}",
         *input_args,

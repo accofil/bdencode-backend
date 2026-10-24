@@ -8335,7 +8335,8 @@ class PipelineWorker:
             raise ReviewRequired("timeline plan is missing or invalid") from exc
         duration = Decimal(str(playlist.duration_seconds))
         inputs = {
-            "schema_version": 1,
+            # 2: windows are sought by absolute timestamp (-seek_timestamp 1).
+            "schema_version": 2,
             "reference_sha256": sha256_file(paths.reference),
             "output_sha256": sha256_file(output),
             "origin_seconds": str(origin),
