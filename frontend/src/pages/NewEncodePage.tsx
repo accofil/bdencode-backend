@@ -165,7 +165,15 @@ export function NewEncodePage() {
     return needle ? values.filter((entry) => entry.name.toLocaleLowerCase("hu").includes(needle)) : values;
   }, [folderFilter, sources.data]);
 
-  const root = sources.data?.roots.find((value) => (sources.data?.path ?? "").startsWith(value)) ?? sources.data?.roots[0];
+  const roots = sources.data?.roots ?? [];
+  // The root holding the current folder (the longest match, so that
+  // /storage2 never counts as inside /storage).
+  const root = roots
+    .filter((value) => {
+      const current = sources.data?.path ?? "";
+      return current === value || current.startsWith(`${value}/`) || current.startsWith(`${value}\\`);
+    })
+    .sort((left, right) => right.length - left.length)[0] ?? roots[0];
   const breadcrumbs = useMemo(() => {
     const current = sources.data?.path;
     if (!current || !root) return [];
@@ -231,6 +239,23 @@ export function NewEncodePage() {
             </div>
             <Button variant="ghost" icon={<RefreshCw size={16} />} onClick={() => void sources.refetch()} loading={sources.isFetching}>{t("Frissítés", "Refresh")}</Button>
           </div>
+
+          {roots.length > 1 && (
+            <div className="source-roots" role="group" aria-label={t("Tárhely", "Storage")}>
+              {roots.map((value) => (
+                <button
+                  type="button"
+                  key={value}
+                  className={value === root ? "active" : ""}
+                  aria-pressed={value === root}
+                  title={value}
+                  onClick={() => { setBrowsePath(value); setFolderFilter(""); }}
+                >
+                  <HardDriveIcon />{basename(value)}
+                </button>
+              ))}
+            </div>
+          )}
 
           <div className="source-browser__toolbar">
             <nav className="breadcrumbs" aria-label={t("Mappaútvonal", "Folder path")}>
