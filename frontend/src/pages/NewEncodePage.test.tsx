@@ -31,6 +31,35 @@ describe("NewEncodePage", () => {
     });
   });
 
+  it("switches between source roots when there are several", async () => {
+    vi.mocked(api.sources).mockImplementation(async (path?: string) => {
+      const current = path ?? "/home/accofil/storage";
+      return {
+        roots: ["/home/accofil/storage", "/home/accofil/torrents"],
+        path: current,
+        entries: current.startsWith("/home/accofil/torrents")
+          ? [{ name: "qbittorrent", path: "/home/accofil/torrents/qbittorrent", is_bluray: false, kind: "folder" }]
+          : [{ name: "MOVIE_DISC", path: "/home/accofil/storage/MOVIE_DISC", is_bluray: true }],
+      };
+    });
+    renderApp(<NewEncodePage />, "/new");
+
+    const storage = await screen.findByRole("button", { name: "storage", pressed: true });
+    const torrents = screen.getByRole("button", { name: "torrents", pressed: false });
+    expect(storage).toHaveAttribute("title", "/home/accofil/storage");
+    fireEvent.click(torrents);
+
+    expect(await screen.findByText("qbittorrent")).toBeInTheDocument();
+    expect(api.sources).toHaveBeenLastCalledWith("/home/accofil/torrents");
+    expect(screen.getByRole("button", { name: "torrents", pressed: true })).toBeInTheDocument();
+  });
+
+  it("shows no root switcher for a single source root", async () => {
+    renderApp(<NewEncodePage />, "/new");
+    await screen.findAllByText("Blu-ray forrás");
+    expect(screen.queryByRole("group", { name: "Tárhely" })).not.toBeInTheDocument();
+  });
+
   it("walks the wizard in Hungarian", async () => {
     renderApp(<NewEncodePage />, "/new");
 
