@@ -113,6 +113,48 @@ describe("ComparisonPanel", () => {
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
   });
 
+  it("copies the 400 px BBCode and, separately, the Aither comparison", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("bbcode-main")) return Promise.resolve({ ok: true, status: 200, text: vi.fn().mockResolvedValue("[url=v][img=400]i[/img][/url]") } as unknown as Response);
+        if (url.includes("bbcode-aither")) return Promise.resolve({ ok: true, status: 200, text: vi.fn().mockResolvedValue("[comparison=Source, Encode]a b[/comparison]") } as unknown as Response);
+        return Promise.resolve(jsonResponse(videoManifest));
+      }),
+    );
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const artifacts = [
+      makeArtifact({ id: "video-manifest", kind: "VIDEO_COMPARISON", name: "video-comparison.json", mime_type: "application/json" }),
+      makeArtifact({ id: "bbcode-main", kind: "BBCODE", name: "comparison.bbcode", mime_type: "text/plain" }),
+      makeArtifact({ id: "bbcode-aither", kind: "BBCODE", name: "comparison-aither.bbcode", mime_type: "text/plain" }),
+    ];
+    renderApp(<ComparisonPanel artifacts={artifacts} />);
+
+    const general = await screen.findByRole("button", { name: "BBCode másolása (400 px)" });
+    const aither = screen.getByRole("button", { name: "Aither comparison másolása" });
+    await waitFor(() => expect(general).toBeEnabled());
+    await waitFor(() => expect(aither).toBeEnabled());
+    fireEvent.click(aither);
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith("[comparison=Source, Encode]a b[/comparison]"));
+    fireEvent.click(general);
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith("[url=v][img=400]i[/img][/url]"));
+  });
+
+  it("offers no Aither button for a job without the separate comparison", async () => {
+    renderApp(
+      <ComparisonPanel
+        artifacts={[
+          makeArtifact({ id: "video-manifest", kind: "VIDEO_COMPARISON", name: "video-comparison.json", mime_type: "application/json" }),
+          makeArtifact({ id: "bbcode-main", kind: "BBCODE", name: "comparison.bbcode", mime_type: "text/plain" }),
+        ]}
+      />,
+    );
+    expect(await screen.findByRole("button", { name: "BBCode másolása (400 px)" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Aither comparison másolása" })).not.toBeInTheDocument();
+  });
+
   it("shows a real warning instead of broken images when a frame artifact is absent", async () => {
     renderApp(
       <ComparisonPanel

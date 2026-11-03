@@ -135,3 +135,64 @@ def test_ten_pairs_are_published_b_first_and_spread_over_the_runtime() -> None:
     assert p_indexes == [2000, 23000]
     # I-frames only when B and P run out.
     assert [item["category"] for item in published_pairs(make_pairs("IIIIIIIIBP"))].count("I") == 8
+
+
+# --- 3.13.0: resized gallery and the separate Aither comparison ----------------
+
+from bdencode.tracker_bbcode import (  # noqa: E402
+    GALLERY_WIDTH,
+    aither_comparison_bbcode,
+    gallery_bbcode,
+    published_pairs,
+)
+
+
+def published_upload(pairs: list[dict]) -> dict[str, dict]:
+    """What a job uploads: the published pairs, their screenshots, the spectra."""
+
+    uploaded = upload_all(published_pairs(pairs))
+    for role in ("source", "encode"):
+        name = f"audio-01-{role}-spectrum.png"
+        uploaded[name] = {"image_url": f"https://i.example/{name}", "viewer_url": f"https://v.example/{name}"}
+    return uploaded
+
+
+def test_the_gallery_shows_every_picture_at_400_pixels_linked_to_its_full_size() -> None:
+    uploaded = published_upload(PAIRS)
+    text = "\n".join(gallery_bbcode(PAIRS, uploaded))
+
+    assert GALLERY_WIDTH == 400
+    assert "[img]" not in text
+    # Each uploaded picture appears exactly once, at 400 px, behind its viewer link.
+    for name, item in uploaded.items():
+        assert text.count(f"[img=400]{item['image_url']}[/img]") == 1, name
+        assert f"[url={item['viewer_url']}][img=400]{item['image_url']}" in text
+
+
+def test_the_gallery_puts_source_before_encode_in_time_order() -> None:
+    uploaded = published_upload(PAIRS)
+    lines = gallery_bbcode(PAIRS, uploaded)
+    rows = [line for line in lines if line.count("[img=400]") == 2 and "-reference" in line]
+
+    published = published_pairs(PAIRS)
+    assert len(rows) == len(published)
+    for row, pair in zip(rows, published):
+        assert row.index(pair["reference_sdr_png"]) < row.index(pair["encode_sdr_png"])
+    assert lines[lines.index("[center][b]Source | Encode[/b]") + 2].startswith("01 · ")
+    assert "[center][b]Audio spectrum: Source | Encode[/b]" in lines
+
+
+def test_the_aither_comparison_is_one_block_of_full_size_b_and_p_urls() -> None:
+    uploaded = published_upload(PAIRS)
+    (block,) = aither_comparison_bbcode(PAIRS, uploaded)
+
+    assert block.startswith("[comparison=Source, Encode]") and block.endswith("[/comparison]")
+    urls = block.removeprefix("[comparison=Source, Encode]").removesuffix("[/comparison]").split()
+    expected = [pair for pair in published_pairs(PAIRS) if pair["category"] in {"B", "P"}]
+    assert len(urls) == 2 * len(expected)
+    assert all("[img" not in url and url.startswith("https://i.example/") for url in urls)
+    assert urls[0].endswith(expected[0]["reference_sdr_png"]) and urls[1].endswith(expected[0]["encode_sdr_png"])
+
+
+def test_no_uploaded_pairs_means_no_aither_comparison() -> None:
+    assert aither_comparison_bbcode(PAIRS, {}) == []

@@ -5524,3 +5524,27 @@ def test_a_full_source_decode_from_before_3_7_3_is_not_repeated(context):
     assert worker._source_integrity_current(paths, "ab" * 32)
     # Another reference still needs its own decode.
     assert not worker._source_integrity_current(paths, "cd" * 32)
+
+
+def test_an_uploaded_job_publishes_a_400px_bbcode_and_a_separate_aither_comparison(context):
+    client = _FakeUploadClient("imgbb")
+    worker, uploading, paths = _advance_to_uploading(context, (lambda: client,))
+    database = context[0]
+
+    result = worker.process_job(uploading)
+
+    assert result.state is JobState.COMPLETED, result.status_message
+    general = (paths.comparison / "comparison.bbcode").read_text(encoding="utf-8")
+    assert "[img=400]" in general and "[img]" not in general
+    aither = (paths.comparison / "comparison-aither.bbcode").read_text(encoding="utf-8")
+    assert aither.startswith("[comparison=Source, Encode]https://i.ibb.co/test/")
+    completed = worker.settings.completed_root / "Movie.2026.1080p.BluRay.x264" / "comparison"
+    assert (completed / "comparison-aither.bbcode").read_bytes() == (
+        paths.comparison / "comparison-aither.bbcode"
+    ).read_bytes()
+    names = {
+        artifact.name
+        for artifact in database.list_artifacts(job_id=uploading.id, limit=1000)
+        if artifact.kind is ArtifactKind.BBCODE
+    }
+    assert names == {"comparison.bbcode", "comparison-aither.bbcode"}
