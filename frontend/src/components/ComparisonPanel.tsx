@@ -59,10 +59,14 @@ export function nearbyWeakWindow(pair: VideoComparisonPair, weak: MeasuredWindow
     && at <= window.end_seconds + NEAR_WEAK_WINDOW_SECONDS) ?? null;
 }
 
+/** The separate Aither [comparison=Source, Encode] block (3.13.0). */
+const AITHER_COMPARISON_NAME = "comparison-aither.bbcode";
+
 export function ComparisonPanel({ artifacts }: { artifacts: Artifact[] }) {
   const videoManifestArtifact = artifacts.find((artifact) => artifact.kind === "VIDEO_COMPARISON" && artifact.mime_type === "application/json");
   const audioManifestArtifact = artifacts.find((artifact) => artifact.kind === "AUDIO_COMPARISON" && artifact.mime_type === "application/json");
-  const bbcodeArtifact = artifacts.find((artifact) => artifact.kind === "BBCODE");
+  const bbcodeArtifact = artifacts.find((artifact) => artifact.kind === "BBCODE" && artifact.name !== AITHER_COMPARISON_NAME);
+  const aitherArtifact = artifacts.find((artifact) => artifact.kind === "BBCODE" && artifact.name === AITHER_COMPARISON_NAME);
   const imagesByName = useMemo(() => new Map(
     artifacts
       .filter((artifact) => artifact.mime_type === "image/png")
@@ -84,14 +88,20 @@ export function ComparisonPanel({ artifacts }: { artifacts: Artifact[] }) {
     queryFn: () => fetchArtifactText(bbcodeArtifact!.id),
     enabled: Boolean(bbcodeArtifact),
   });
-  const [copied, setCopied] = useState(false);
+  const aither = useQuery({
+    queryKey: ["artifact-text", aitherArtifact?.id],
+    queryFn: () => fetchArtifactText(aitherArtifact!.id),
+    enabled: Boolean(aitherArtifact),
+  });
+  const [copied, setCopied] = useState<"bbcode" | "aither" | null>(null);
   const [inspect, setInspect] = useState<number | null>(null);
 
-  async function copyBbcode() {
-    if (!bbcode.data) return;
-    await copyText(bbcode.data);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
+  async function copyBbcode(which: "bbcode" | "aither") {
+    const text = which === "bbcode" ? bbcode.data : aither.data;
+    if (!text) return;
+    await copyText(text);
+    setCopied(which);
+    window.setTimeout(() => setCopied(null), 1600);
   }
 
   const scoredWindows = useMemo(() => windowsByScore(measuredWindows(video.data)), [video.data]);
@@ -111,8 +121,14 @@ export function ComparisonPanel({ artifacts }: { artifacts: Artifact[] }) {
     <div className="comparison-panel">
       {bbcodeArtifact && (
         <Card className="bbcode-card">
-          <div><span className="eyebrow">{t("Megosztás", "Sharing")}</span><h3>{t("BBCode csomag", "BBCode package")}</h3><p>{t("Az ellenőrzött képtárhelyre feltöltött source/encode párok fórumba illeszthető kódja.", "Forum-ready code for the source/encode pairs uploaded to the verified image host.")}</p></div>
-          <Button variant="secondary" icon={copied ? <Check size={17} /> : <Clipboard size={17} />} onClick={() => void copyBbcode()} disabled={!bbcode.data}>{copied ? t("Másolva", "Copied") : t("BBCode másolása", "Copy BBCode")}</Button>
+          <div><span className="eyebrow">{t("Megosztás", "Sharing")}</span><h3>{t("BBCode csomag", "BBCode package")}</h3><p>{t(
+            "Az ellenőrzött képtárhelyre feltöltött képek fórumba illeszthető kódja: a source/encode párok egymás mellett, 400 px széles képekkel, kattintásra teljes méretben. Külön választható az Aither interaktív összehasonlítása ([comparison=Source, Encode]).",
+            "Forum-ready code for the pictures uploaded to the verified image host: the source/encode pairs side by side, 400 px wide, full size on click. Aither's interactive comparison ([comparison=Source, Encode]) is a separate option.",
+          )}</p></div>
+          <div className="bbcode-card__actions">
+            <Button variant="secondary" icon={copied === "bbcode" ? <Check size={17} /> : <Clipboard size={17} />} onClick={() => void copyBbcode("bbcode")} disabled={!bbcode.data}>{copied === "bbcode" ? t("Másolva", "Copied") : t("BBCode másolása (400 px)", "Copy BBCode (400 px)")}</Button>
+            {aitherArtifact && <Button variant="secondary" icon={copied === "aither" ? <Check size={17} /> : <Clipboard size={17} />} onClick={() => void copyBbcode("aither")} disabled={!aither.data}>{copied === "aither" ? t("Másolva", "Copied") : t("Aither comparison másolása", "Copy Aither comparison")}</Button>}
+          </div>
         </Card>
       )}
 

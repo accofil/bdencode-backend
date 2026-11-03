@@ -317,7 +317,9 @@ from .live_progress import (
 )
 from .review import read_upload_override, video_metrics_accepted
 from .tracker_bbcode import (
+    aither_comparison_bbcode,
     encoder_summary,
+    gallery_bbcode,
     published_pairs,
     screenshot_pair_numbers,
     tracker_bbcode,
@@ -10314,22 +10316,34 @@ class PipelineWorker:
             )
 
         bbcode = paths.comparison / "comparison.bbcode"
+        aither_comparison = paths.comparison / "comparison-aither.bbcode"
+        pairs_document = video_manifest.get("pairs")
+        published = pairs_document if isinstance(pairs_document, list) else []
         lines = [f"[b]{selection.output_name} — comparison[/b]"]
         if uploaded and provider_lock:
             lines.append(f"[i]Image host: {provider_lock}[/i]")
-        for name in sorted(uploaded):
-            item = uploaded[name]
-            lines.extend((f"[b]{name}[/b]", str(item["bbcode"])))
-        if not uploaded:
+        if uploaded:
+            # GALLERY_WIDTH-pixel pictures, each linked to its full size.
+            lines.extend(gallery_bbcode(published, uploaded))
+        else:
             lines.append(
                 "[i]Image upload was disabled; see the lossless PNG sidecars.[/i]"
             )
-        pairs_document = video_manifest.get("pairs")
+        # Aither's interactive comparison as a separate, ready-to-paste
+        # option, for every job (not only Aither tracker jobs).
+        comparison_lines = aither_comparison_bbcode(published, uploaded)
+        bbcode_outputs = [checkpoint, bbcode]
+        if comparison_lines:
+            atomic_write_text(aither_comparison, "\n".join(comparison_lines) + "\n")
+            _assert_public_sidecar_safe(aither_comparison)
+            bbcode_outputs.append(aither_comparison)
+        else:
+            aither_comparison.unlink(missing_ok=True)
         encode_log = paths.logs / "video-encode.log"
         lines.extend(
             tracker_bbcode(
                 selection.tracker_profile.value,
-                pairs_document if isinstance(pairs_document, list) else [],
+                published,
                 uploaded,
                 encoder_log=(
                     sanitize_text(
@@ -10352,7 +10366,7 @@ class PipelineWorker:
                 "provider": provider_lock,
                 "images": {path.name: sha256_file(path) for path in pngs},
             },
-            [checkpoint, bbcode],
+            bbcode_outputs,
         )
         self._stop_at_operator_boundary(job.id)
 
@@ -10401,13 +10415,12 @@ class PipelineWorker:
             video_manifest_path,
             paths.analysis / "audio-comparison.json",
             *metric_sidecars,
-            checkpoint,
-            bbcode,
+            *bbcode_outputs,
         ):
             _assert_public_sidecar_safe(public_metadata)
         upload_evidence_pins = _assert_stage_outputs_current(
             upload_marker,
-            [checkpoint, bbcode],
+            bbcode_outputs,
             stage_name="upload checkpoint",
         )
         pinned_public_files = {
@@ -10516,8 +10529,7 @@ class PipelineWorker:
             sidecar
             for sidecar in (
                 video_manifest_path,
-                checkpoint,
-                bbcode,
+                *bbcode_outputs,
                 *metric_sidecars,
                 *(path for path in pngs if path.parent == paths.comparison),
             )
@@ -10544,13 +10556,14 @@ class PipelineWorker:
                 f"{SAMPLE_DIRECTORY}/{sample.name}",
                 mime_type="video/x-matroska",
             )
-        self._register_artifact(
-            job.id,
-            bbcode,
-            DatabaseArtifactKind.BBCODE,
-            bbcode.name,
-            mime_type="text/plain",
-        )
+        for bbcode_file in bbcode_outputs[1:]:
+            self._register_artifact(
+                job.id,
+                bbcode_file,
+                DatabaseArtifactKind.BBCODE,
+                bbcode_file.name,
+                mime_type="text/plain",
+            )
         self._register_artifact(
             job.id,
             final_output,

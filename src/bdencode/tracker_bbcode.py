@@ -147,6 +147,106 @@ def _screenshots(
     ]
 
 
+GALLERY_WIDTH = 400
+_SPECTRUM = re.compile(r"^audio-(\d+)-(source|encode)-spectrum\.png$")
+
+
+def _thumbnail(item: Mapping[str, Any], width: int) -> str:
+    """A ``width``-pixel picture linked to the host's full-size view."""
+
+    image = item.get("image_url")
+    viewer = item.get("viewer_url") or image
+    if not isinstance(image, str) or not image:
+        return str(item.get("bbcode", ""))
+    return f"[url={viewer}][img={width}]{image}[/img][/url]"
+
+
+def gallery_bbcode(
+    pairs: Sequence[Mapping[str, Any]],
+    uploaded: Mapping[str, Mapping[str, Any]],
+    *,
+    width: int = GALLERY_WIDTH,
+) -> list[str]:
+    """Every uploaded picture at ``width`` pixels, each linked to its full size.
+
+    The source/encode pairs side by side in time order (instead of one
+    full-size picture per line by file name, which put every encode before
+    its source), then the clean screenshots and the audio spectra.
+    """
+
+    lines: list[str] = []
+    shown: set[str] = set()
+    rows = []
+    for pair in published_pairs(pairs):
+        reference = _image(pair, "reference", uploaded)
+        encode = _image(pair, "encode", uploaded)
+        if reference is not None and encode is not None:
+            rows.append((pair, reference, encode))
+    if rows:
+        lines.extend(("", "[center][b]Source | Encode[/b]"))
+        for number, (pair, reference, encode) in enumerate(rows, start=1):
+            lines.extend(
+                (
+                    "",
+                    f"{number:02d} · {pair.get('category')}-frame · "
+                    f"{_timestamp(pair.get('encoded_pts_seconds'))}",
+                    f"{_thumbnail(reference, width)} {_thumbnail(encode, width)}",
+                )
+            )
+        lines.append("[/center]")
+        for _pair, reference, encode in rows:
+            shown.update((str(reference.get("image_url")), str(encode.get("image_url"))))
+    screenshots = [
+        item for item in _screenshots(pairs, uploaded) if item.get("image_url") not in shown
+    ]
+    if screenshots:
+        lines.extend(("", "[center][b]Screenshots[/b]"))
+        lines.append(" ".join(_thumbnail(item, width) for item in screenshots))
+        lines.append("[/center]")
+        shown.update(str(item.get("image_url")) for item in screenshots)
+    spectra: dict[str, dict[str, Mapping[str, Any]]] = {}
+    for name, item in uploaded.items():
+        match = _SPECTRUM.match(name)
+        if match:
+            spectra.setdefault(match.group(1), {})[match.group(2)] = item
+    if spectra:
+        lines.extend(("", "[center][b]Audio spectrum: Source | Encode[/b]"))
+        for track in sorted(spectra):
+            row = [spectra[track][role] for role in ("source", "encode") if role in spectra[track]]
+            lines.append(" ".join(_thumbnail(item, width) for item in row))
+            shown.update(str(item.get("image_url")) for item in row)
+        lines.append("[/center]")
+    rest = [
+        uploaded[name] for name in sorted(uploaded) if uploaded[name].get("image_url") not in shown
+    ]
+    if rest:
+        lines.append("")
+        lines.extend(_thumbnail(item, width) for item in rest)
+    return lines
+
+
+def aither_comparison_bbcode(
+    pairs: Sequence[Mapping[str, Any]],
+    uploaded: Mapping[str, Mapping[str, Any]],
+) -> list[str]:
+    """Aither's interactive comparison: one ``[comparison=Source, Encode]``
+    block of full-size source/encode URLs (B and P pairs, time order)."""
+
+    rows = _complete(pairs, uploaded)
+    if not rows:
+        return []
+    urls = " ".join(
+        f"{reference['image_url']} {encode['image_url']}" for _pair, reference, encode in rows
+    )
+    lines = [f"[comparison=Source, Encode]{urls}[/comparison]"]
+    if len(rows) < COMPARISON_MINIMUM:
+        lines.append(
+            f"[i]Only {len(rows)} B/P pairs were uploaded; Aither asks for at least "
+            f"{COMPARISON_MINIMUM}.[/i]"
+        )
+    return lines
+
+
 def aither_bbcode(
     pairs: Sequence[Mapping[str, Any]],
     uploaded: Mapping[str, Mapping[str, Any]],
@@ -165,21 +265,8 @@ def aither_bbcode(
         )
         lines.append("[/center]")
     if rows:
-        urls = " ".join(
-            f"{reference['image_url']} {encode['image_url']}" for _pair, reference, encode in rows
-        )
-        lines.extend(
-            (
-                "",
-                "[b]Aither — comparison (same frame type, B preferred)[/b]",
-                f"[comparison=Source, Encode]{urls}[/comparison]",
-            )
-        )
-        if len(rows) < COMPARISON_MINIMUM:
-            lines.append(
-                f"[i]Only {len(rows)} B/P pairs were uploaded; Aither asks for at least "
-                f"{COMPARISON_MINIMUM}.[/i]"
-            )
+        lines.extend(("", "[b]Aither — comparison (same frame type, B preferred)[/b]"))
+        lines.extend(aither_comparison_bbcode(pairs, uploaded))
     if encoder_log:
         lines.extend(("", f"[spoiler={codec} log][code]", encoder_log, "[/code][/spoiler]"))
     return lines
@@ -231,6 +318,9 @@ def tracker_bbcode(
 __all__ = [
     "COMPARISON_MAXIMUM",
     "COMPARISON_MINIMUM",
+    "GALLERY_WIDTH",
+    "aither_comparison_bbcode",
+    "gallery_bbcode",
     "PUBLISHED_PAIR_COUNT",
     "SCREENSHOT_COUNTS",
     "aither_bbcode",
