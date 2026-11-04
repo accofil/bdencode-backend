@@ -8,3 +8,4 @@ Makefile text eol=lf
 *.service text eol=lf
 *.service.in text eol=lf
 *.conf.in text eol=lf
+install/bdencode-eac3to text eol=lf
