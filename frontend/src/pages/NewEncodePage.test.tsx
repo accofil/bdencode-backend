@@ -12,6 +12,7 @@ vi.mock("../api/client", async (importOriginal) => {
     api: {
       ...actual.api,
       sources: vi.fn(),
+      createJob: vi.fn(),
     },
   };
 });
@@ -20,6 +21,7 @@ describe("NewEncodePage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+    localStorage.setItem("bdencode:new-job-draft", JSON.stringify({ purpose: "encode" }));
     vi.mocked(api.sources).mockResolvedValue({
       roots: ["/storage"],
       path: "/storage",
@@ -29,6 +31,35 @@ describe("NewEncodePage", () => {
         { name: "Extras", path: "/storage/Extras", is_bluray: false },
       ],
     });
+  });
+
+  it("asks first what the job is for, and shows only that job's steps", async () => {
+    localStorage.clear();
+    renderApp(<NewEncodePage />, "/new");
+    expect(screen.getByRole("heading", { name: "Mit szeretnél csinálni?" })).toBeInTheDocument();
+    expect(screen.queryByText("Tartalom")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Hang vagy felirat illesztése/ }));
+    expect(await screen.findByRole("heading", { name: /Melyik encode-ra, remuxra vagy lemezre/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Munkamód$/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Tartalom$/ })).toBeInTheDocument();
+  });
+
+  it("remembers the purpose on the job, and fitting needs no encode settings", async () => {
+    localStorage.setItem("bdencode:new-job-draft", JSON.stringify({ purpose: "fit" }));
+    vi.mocked(api.createJob).mockResolvedValue({ id: "new" } as never);
+    renderApp(<NewEncodePage />, "/new");
+    fireEvent.click(await screen.findByRole("button", { name: "MOVIE_DISC kiválasztása" }));
+    fireEvent.click(screen.getByRole("button", { name: "Tovább" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Munka létrehozása és scan" }));
+    await vi.waitFor(() => expect(api.createJob).toHaveBeenCalled());
+    expect(vi.mocked(api.createJob).mock.calls[0][0].settings).toMatchObject({ purpose: "fit" });
+  });
+
+  it("goes back to the choice from the first step", async () => {
+    renderApp(<NewEncodePage />, "/new");
+    await screen.findByRole("button", { name: "MOVIE_DISC kiválasztása" });
+    fireEvent.click(screen.getByRole("button", { name: "Vissza" }));
+    expect(screen.getByRole("heading", { name: "Mit szeretnél csinálni?" })).toBeInTheDocument();
   });
 
   it("switches between source roots when there are several", async () => {

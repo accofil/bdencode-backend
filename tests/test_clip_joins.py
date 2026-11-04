@@ -30,6 +30,22 @@ SUMMARY = (
 )
 
 
+def test_ffmpegs_second_report_of_a_cut_packet_belongs_to_the_join_only_there() -> None:
+    """God Forgives, I Don't (1967): FFmpeg 5.1 follows each join's "Packet corrupt"
+    with this line; the same line far from a join stays source damage."""
+
+    line = "bluray:/x/y: corrupt input packet in stream 0\n"
+    near = "frame=1 fps=1 q=-1.0 size=1kB time=00:41:30.00 speed=1x    \r" + line
+    near += "frame=2 fps=1 q=-1.0 size=1kB time=00:41:33.00 speed=1x    \r"
+    far = "frame=3 fps=1 q=-1.0 size=1kB time=01:10:00.00 speed=1x    \r" + line
+    far += "frame=4 fps=1 q=-1.0 size=1kB time=01:10:03.00 speed=1x    \r"
+    split = split_clip_join_lines(near + far, 1, moments=[2492.4])
+    assert split is not None
+    remaining, joined = split
+    assert joined == (line.strip(),)
+    assert line.strip() in remaining
+
+
 def test_the_messages_of_a_clip_join_are_set_apart() -> None:
     log = PROGRESS * 20 + JOIN + SUMMARY + PROGRESS * 3
 

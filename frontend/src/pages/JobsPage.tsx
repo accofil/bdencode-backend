@@ -85,7 +85,7 @@ export function JobsPage({ mode }: { mode: "queue" | "archive" }) {
         eyebrow={mode === "queue" ? t("Munkafolyamat", "Workflow") : t("Előzmények", "History")}
         title={mode === "queue" ? t("Várólista", "Queue") : t("Elkészült munkák", "Finished jobs")}
         description={mode === "queue" ? t("Az új lemezek scanje és beállítása a futó encode mellett is elkészülhet. Kódolni mindig csak az első jóváhagyott munka fog; a többi kész paraméterekkel várakozik.", "New discs can be scanned and set up while an encode runs. Only the first approved job encodes; the others wait with their settings ready.") : t("Kész, hibás és megszakított kódolások visszakereshető mellékletekkel.", "Finished, failed and cancelled encodes with searchable attachments.")}
-        actions={<Link className="button button--primary" to="/new"><CirclePlus size={18} /><span>{t("Új kódolás", "New encode")}</span></Link>}
+        actions={<Link className="button button--primary" to="/new"><CirclePlus size={18} /><span>{t("Új munka", "New job")}</span></Link>}
       />
 
       <div className="toolbar">

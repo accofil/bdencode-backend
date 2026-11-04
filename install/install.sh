@@ -182,7 +182,7 @@ fi
 install -d -m 0750 \
     "$data_root" "$data_root/state" "$data_root/state/backups" \
     "$data_root/state/overrides" "$data_root/jobs" "$data_root/completed" \
-    "$data_root/release-kits" "$data_root/cache" "$data_root/cache/build" \
+    "$data_root/release-kits" "$data_root/seeding" "$data_root/cache" "$data_root/cache/build" \
     "$data_root/updates" "$app_root/releases" \
     "$app_root/tools/releases"
 assert_path_components_without_symlinks "$credential_directory"
@@ -543,7 +543,7 @@ sudo flock -x "$installer_apt_lock" apt-get \
     -o Dir::Etc::preferencesparts=/dev/null \
     install -y --no-install-recommends --no-upgrade \
     build-essential ca-certificates curl ffmpeg fonts-dejavu-core git libbluray-bin libbluray-dev \
-    dpkg-repack man-db mediainfo meson mkvtoolnix nasm ninja-build openssh-client pkg-config \
+    dpkg-repack man-db mediainfo lsdvd meson mkvtoolnix nasm ninja-build openssh-client p7zip-full pkg-config \
     python3-pip python3-venv sqlite3 tesseract-ocr tesseract-ocr-eng tesseract-ocr-hun \
     util-linux x264 x265 xxd
 
@@ -876,10 +876,11 @@ render_credential_dropin() {
 # Image host keys; the System page can set them too.  Keep in sync with
 # WORKER_CREDENTIALS in install/credentials_helper.py.
 worker_credential_names=(imgbb-api-key catbox-userhash freeimage-api-key)
-# qBittorrent credentials are no longer bound: since 3.0 nothing seeds.
 # Keep in sync with API_CREDENTIALS in install/credentials_helper.py.
 api_credential_names=(
     tracker-aither-api-token
+    tracker-ncore-cookies
+    qbittorrent-password
     openai-api-key
     anthropic-api-key
 )

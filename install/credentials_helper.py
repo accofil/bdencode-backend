@@ -42,7 +42,13 @@ from typing import Any, Callable, Mapping, Sequence
 
 API_UNIT = "bdencode-api.service"
 # Must match ``api_credential_names`` in install/install.sh.
-API_CREDENTIALS = ("tracker-aither-api-token", "openai-api-key", "anthropic-api-key")
+API_CREDENTIALS = (
+    "tracker-aither-api-token",
+    "tracker-ncore-cookies",
+    "qbittorrent-password",
+    "openai-api-key",
+    "anthropic-api-key",
+)
 # Must match ``worker_credential_names`` in install/install.sh and
 # ``HOST_CREDENTIALS`` in src/bdencode/upload_settings.py.
 WORKER_CREDENTIALS = ("imgbb-api-key", "catbox-userhash", "freeimage-api-key")
@@ -52,6 +58,10 @@ KEY_RE = re.compile(r"[A-Za-z0-9_\-]{20,400}")
 SETTABLE: dict[str, re.Pattern[str]] = {
     "openai-api-key": KEY_RE,
     "anthropic-api-key": KEY_RE,
+    # Must match the validators in src/bdencode/tracker_settings.py.
+    "tracker-aither-api-token": KEY_RE,
+    "tracker-ncore-cookies": re.compile(r"[ -~]{3,3000}"),
+    "qbittorrent-password": re.compile(r"[ -~]{1,200}"),
     "imgbb-api-key": re.compile(r"[A-Za-z0-9]{32}"),
     "freeimage-api-key": re.compile(r"[A-Za-z0-9]{32}"),
     "catbox-userhash": re.compile(r"[A-Za-z0-9]{16,64}"),

@@ -34,7 +34,7 @@ export type JobOperation =
 export type DiscType = "AUTO" | "BD" | "UHD";
 export type ContentType = "FILM" | "CONCERT" | "ANIME" | "SERIES";
 export type DetailLevel = "beginner" | "advanced" | "pro";
-export type TrackAction = "copy" | "flac" | "ac3" | "eac3" | "dts" | "omit";
+export type TrackAction = "copy" | "flac" | "flac16" | "ac3" | "eac3" | "dts" | "omit";
 export type ImageUploadProvider = "auto" | "imgbb" | "catbox" | "freeimage";
 /** Which comparison pictures are published (HDR titles have native and SDR views). */
 export type UploadImageSet = "all" | "sdr" | "native";
@@ -80,6 +80,8 @@ export interface CapabilitiesResponse {
     comparison_images?: string;
     /** Aither-style remuxes: eac3to under Wine on this host. */
     remux?: { available: boolean; eac3to: boolean; wine: boolean; dolby_vision: boolean };
+    /** Tracks from another source, fitted by comparing the pictures. */
+    external_sources?: { available: boolean; missing: string[]; dvd_missing: string[] };
     [key: string]: unknown;
   };
 }
@@ -445,6 +447,7 @@ export interface ReleaseProfileList {
 export type ReleasePreparationState =
   | "NOT_PREPARED"
   | "PREPARING"
+  | "BUILDING_TORRENT"
   | "NEEDS_REVIEW"
   | "READY"
   | "SEEDING_CHECK"
@@ -454,6 +457,55 @@ export type ReleasePreparationState =
   | "PUBLISHED"
   | "FAILED"
   | "UNKNOWN";
+
+export interface DupeMatch {
+  name: string;
+  url: string;
+  size: number | null;
+  exact: boolean;
+  trumpable: boolean;
+}
+
+/** The fields of one tracker's upload; the others stay undefined. */
+export interface UploadFields {
+  name: string;
+  description: string;
+  anonymous?: boolean;
+  personal_release?: boolean;
+  mod_queue?: boolean;
+  title_hu?: string;
+  title_en?: string;
+  title_other?: string;
+  country?: string;
+  runtime?: string;
+  directors?: string;
+  cast?: string;
+  subtitles?: string;
+  audio?: string;
+  extras?: string;
+  menu?: boolean;
+}
+
+export interface UploadPlan {
+  tracker: "aither" | "ncore";
+  release_name: string;
+  torrent_sha256: string;
+  info_hash: string;
+  files: string[];
+  seeding: { automatic: boolean; category: string };
+  fields: UploadFields;
+  facts: Record<string, unknown>;
+  problems: string[];
+}
+
+export type TrackerSecretKind = "aither" | "ncore" | "qbittorrent";
+
+export interface TrackerSettingsStatus {
+  aither: { configured: boolean };
+  ncore: { configured: boolean };
+  qbittorrent: { url: string; username: string; password_set: boolean; configured: boolean };
+  key_management?: { available: boolean; results: unknown[] };
+}
 
 export interface ReleaseMetadataPayload {
   schema_version: 1;
@@ -490,8 +542,6 @@ export interface ReleasePreparation {
   payload_sha256?: string;
   kit_ready?: boolean;
   manifest_sha256?: string | null;
-  // The torrent fields and the qBittorrent/publication receipts only appear
-  // on records made before 3.0; BDEncode no longer seeds or uploads.
   torrent_infohash?: string | null;
   torrent_sha256?: string | null;
   receipts?: Record<string, unknown> | unknown[] | null;
@@ -901,8 +951,8 @@ export interface TrackSelection {
 
 export interface SelectionPayload {
   schema_version: 2;
-  /** "remux": an untouched Aither-style remux; omitted means an encode. */
-  mode?: "encode" | "remux";
+  /** "remux": an untouched Aither-style remux; "fit": tracks added to a finished MKV; omitted means an encode. */
+  mode?: "encode" | "remux" | "fit";
   playlist_id: string;
   angle: number;
   output_name: string;
@@ -925,6 +975,89 @@ export interface SelectionPayload {
   tracker_profile?: "aither" | "ncore";
   /** A remux's MKV tags (the guide's IMDB/TMDB IDs). */
   remux?: { imdb?: string; tmdb?: string };
+  /** Audio and subtitles from other sources, fitted to this title's picture. */
+  external_sources?: ExternalSourceSelection[];
+}
+
+export interface ExternalTrackSelection {
+  stream: string;
+  language: string;
+  name?: string | null;
+  default?: boolean;
+  position: number;
+  pitch: "restore" | "keep";
+}
+
+export interface ExternalSubtitleSelection {
+  path: string;
+  language: string;
+  name?: string | null;
+  default?: boolean;
+  forced?: boolean;
+}
+
+export interface ExternalSourceSelection {
+  id: string;
+  path: string;
+  tracks: ExternalTrackSelection[];
+  subtitles: ExternalSubtitleSelection[];
+  approved_map_sha256?: string | null;
+}
+
+export interface ExternalProbe {
+  kind: string;
+  path: string;
+  fps: string;
+  duration_seconds: number;
+  width: number | null;
+  height: number | null;
+  tracks: { stream: string; codec: string; channels: number; sample_rate: number; bit_rate: number | null; language: string | null; title: string | null }[];
+  support: { available: boolean; missing: string[]; dvd_missing: string[] };
+}
+
+export interface ExternalMapSegment {
+  target_start: number;
+  target_end: number;
+  offset: number;
+  boundary_uncertainty_frames: number;
+  similarity_median: number;
+  similarity_p10: number;
+}
+
+export interface ExternalReview {
+  id: string;
+  path: string;
+  kind: string;
+  fps: string;
+  target_fps: string;
+  map_sha256: string;
+  map: {
+    mode: string;
+    target_frames: number;
+    donor_frames: number;
+    matched_frames: number;
+    unmatched_frames: number;
+    similarity_median: number;
+    share_at_least_0_8: number;
+    segments: ExternalMapSegment[];
+  };
+  tracks: {
+    stream: string;
+    language: string;
+    pitch: string;
+    codec: string;
+    channels: number;
+    copy: boolean;
+    encoding: { codec: string; bit_rate: number; dialnorm: number | null } | null;
+    silent_samples: number;
+    file: string;
+  }[];
+  subtitles: { file: string; language: string; kept: number; dropped: number; clipped: number }[];
+}
+
+export interface ExternalReviewItem {
+  selection: ExternalSourceSelection;
+  review: ExternalReview;
 }
 
 export interface TrackerFinding {
@@ -936,9 +1069,9 @@ export interface TrackerFinding {
 export interface SelectionValidation {
   valid: boolean;
   playlist_id: string;
-  encoder: "x264" | "x265" | "remux";
-  /** "remux" when the plan is a remux (no encoder settings). */
-  mode?: "encode" | "remux";
+  encoder: "x264" | "x265" | "remux" | "fit";
+  /** "remux" when the plan is a remux, "fit" when it only adds tracks (no encoder settings). */
+  mode?: "encode" | "remux" | "fit";
   settings: Record<string, unknown>;
   ffmpeg_video_args: string[];
   crop: { left: number; top: number; right: number; bottom: number };

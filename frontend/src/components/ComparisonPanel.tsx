@@ -401,6 +401,7 @@ function audioComparisonLabels(): Record<AudioComparisonTrack["action"], string>
   return {
     copy: t("Veszteségmentes másolás", "Lossless copy"),
     flac: t("FLAC konverzió", "FLAC conversion"),
+    flac16: t("16 bites FLAC", "16-bit FLAC"),
     ac3: t("AC-3 konverzió", "AC-3 conversion"),
     eac3: t("E-AC-3 konverzió", "E-AC-3 conversion"),
     dts: t("DTS core kimenet", "DTS core output"),

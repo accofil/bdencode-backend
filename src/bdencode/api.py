@@ -51,6 +51,15 @@ from .ai_settings import (
     submit_named_credential_request,
     validate_api_key,
 )
+from .tracker_settings import (
+    SECRET_CREDENTIALS,
+    TrackerSecret,
+    TrackerSettings,
+    save_settings as save_tracker_settings,
+    settings_path as tracker_settings_path,
+    tracker_status,
+    validate_secret as validate_tracker_secret,
+)
 from .upload_settings import (
     HOST_CREDENTIALS,
     UploadHost,
@@ -60,6 +69,7 @@ from .upload_settings import (
     upload_status,
     validate_upload_key,
 )
+from .external.source import external_support
 from .db import (
     Database,
     NotFoundError,
@@ -148,6 +158,7 @@ from .analyzer import MkvAnalyzer
 from .api_extras import register_extra_routes
 from .release import ReleaseMetadata, ReleasePreparationState
 from .release_profiles import RELEASE_PROFILE_VALIDATION_ERROR
+from .release_publish import AitherUploadRequest, NcoreUploadRequest
 from .release_service import (
     ReleasePreparationView,
     ReleaseService,
@@ -288,6 +299,17 @@ class ReleaseActionRequest(_ApiRequest):
     expected_version: int = Field(ge=1)
 
 
+class DuplicateAcknowledgementRequest(_ApiRequest):
+    expected_version: int = Field(ge=1)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class TrackerSecretBody(_ApiRequest):
+    # No length bounds here: a failed field constraint would echo the value in
+    # the 422 body.  ``validate_secret`` checks the format without it.
+    value: str = Field(repr=False)
+
+
 class CompletedReleaseDeleteRequest(_ApiRequest):
     confirmation: str = Field(min_length=1, max_length=255)
     expected_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -397,7 +419,7 @@ def create_app(
         return release_service
 
     application = FastAPI(
-        title="BDEncode Backend",
+        title="Accofil BDEncode",
         version=__version__,
         docs_url=f"{API_PREFIX}/docs",
         redoc_url=f"{API_PREFIX}/redoc",
@@ -590,6 +612,9 @@ def create_app(
                 "ai_recommendation": True,
                 "ai_recommendation_requires_confirmation": True,
                 "audio_transcode_presets": audio_presets_payload(),
+                # Since 4.0: a torrent, the upload and the seed, each by the operator.
+                "external_sources": external_support(),
+                "tracker_upload": {"trackers": ["aither", "ncore"]},
                 # Aither-style remuxes: eac3to under Wine on this host.
                 "remux": remux_support(),
             },
@@ -1444,6 +1469,30 @@ def create_app(
         except (KeyError, TypeError, ValueError) as exc:
             raise ConfigurationError(f"stored scan result is invalid: {exc}") from exc
 
+        if selection.is_fit:
+            return SelectionValidationResponse(
+                valid=True,
+                mode="fit",
+                playlist_id=selection.playlist_id,
+                encoder="fit",
+                settings={},
+                ffmpeg_video_args=[],
+                crop=asdict(selection.crop),
+                temporal_filter=selection.temporal_filter.value,
+                tracker_profile=selection.tracker_profile.value,
+                tracker_findings=[
+                    item.to_dict()
+                    for item in tracker_findings(
+                        selection.tracker_profile,
+                        encoder="fit",
+                        playlist=scan.playlist(selection.playlist_id),
+                        tracks=selection.tracks,
+                        remux=True,
+                        external=selection.external_sources,
+                    )
+                ],
+                advisory_warnings=[],
+            )
         if selection.is_remux:
             support = remux_support()
             if not support["available"]:
@@ -1475,6 +1524,7 @@ def create_app(
                         playlist=scan.playlist(selection.playlist_id),
                         tracks=selection.tracks,
                         remux=True,
+                        external=selection.external_sources,
                     )
                 ],
                 advisory_warnings=[],
@@ -1539,6 +1589,8 @@ def create_app(
                         encoder=selection.settings.encoder.value,
                         playlist=scan.playlist(selection.playlist_id),
                         tracks=selection.tracks,
+                        content_type=job.content_type.value,
+                        external=selection.external_sources,
                     )
                 ),
                 *plan.decisions.get("video_policy", {}).get("tracker", {}).get("findings", []),
@@ -2092,6 +2144,155 @@ def create_app(
         return service.dupe_check(
             preparation_id, expected_version=request.expected_version
         )
+
+    @application.post(
+        f"{API_PREFIX}/release-preparations/{{preparation_id}}/torrent",
+        response_model=ReleasePreparationView,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def build_release_torrent(
+        preparation_id: str, request: ReleaseActionRequest
+    ) -> ReleasePreparationView:
+        """Hard link the payload and hash it in the background."""
+
+        service = configured_release_service()
+        return service.view(
+            service.publisher.start_torrent(
+                preparation_id, expected_version=request.expected_version
+            )
+        )
+
+    @application.post(
+        f"{API_PREFIX}/release-preparations/{{preparation_id}}/acknowledge-duplicates",
+        response_model=ReleasePreparationView,
+    )
+    def acknowledge_release_duplicates(
+        preparation_id: str, request: DuplicateAcknowledgementRequest
+    ) -> ReleasePreparationView:
+        service = configured_release_service()
+        return service.view(
+            service.publisher.acknowledge_duplicates(
+                preparation_id,
+                expected_version=request.expected_version,
+                reason=request.reason,
+            )
+        )
+
+    @application.get(f"{API_PREFIX}/release-preparations/{{preparation_id}}/upload-plan")
+    def release_upload_plan(preparation_id: str) -> dict[str, Any]:
+        """What would go up, for the operator to read and correct; sends nothing."""
+
+        service = configured_release_service()
+        return service.publisher.upload_plan(preparation_id)
+
+    @application.post(
+        f"{API_PREFIX}/release-preparations/{{preparation_id}}/upload/aither",
+        response_model=ReleasePreparationView,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def upload_release_to_aither(
+        preparation_id: str, request: AitherUploadRequest
+    ) -> ReleasePreparationView:
+        service = configured_release_service()
+        return service.view(service.publisher.upload(preparation_id, request))
+
+    @application.post(
+        f"{API_PREFIX}/release-preparations/{{preparation_id}}/upload/ncore",
+        response_model=ReleasePreparationView,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def upload_release_to_ncore(
+        preparation_id: str, request: NcoreUploadRequest
+    ) -> ReleasePreparationView:
+        service = configured_release_service()
+        return service.view(service.publisher.upload(preparation_id, request))
+
+    @application.post(
+        f"{API_PREFIX}/release-preparations/{{preparation_id}}/seed",
+        response_model=ReleasePreparationView,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def seed_release(
+        preparation_id: str, request: ReleaseActionRequest
+    ) -> ReleasePreparationView:
+        """Try the seed again, after qBittorrent was down."""
+
+        service = configured_release_service()
+        return service.view(
+            service.publisher.start_seed(
+                preparation_id, expected_version=request.expected_version
+            )
+        )
+
+    @application.get(f"{API_PREFIX}/release-preparations/{{preparation_id}}/site-torrent")
+    def release_site_torrent(preparation_id: str) -> Response:
+        """The tracker's torrent for seeding by hand; it holds the account's passkey."""
+
+        service = configured_release_service()
+        _name, data = service.publisher.site_torrent(preparation_id)
+        return Response(
+            content=data,
+            media_type="application/x-bittorrent",
+            headers={
+                "Content-Disposition": 'attachment; filename="release.torrent"',
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @application.get(f"{API_PREFIX}/system/trackers")
+    def trackers_status() -> dict[str, Any]:
+        """Whether the logins are set and where qBittorrent is; never a secret."""
+
+        return tracker_status(settings.state_root if settings is not None else None)
+
+    @application.put(f"{API_PREFIX}/system/tracker-settings")
+    def update_tracker_settings(body: TrackerSettings) -> dict[str, Any]:
+        if settings is None:
+            raise ConfigurationError("the tracker settings need the service configuration")
+        save_tracker_settings(tracker_settings_path(settings.state_root), body)
+        return trackers_status()
+
+    def _tracker_secret_request(
+        kind: TrackerSecret, action: Literal["set", "delete"], value: str | None = None
+    ) -> dict[str, Any]:
+        request_id = _submit_key_change(
+            SECRET_CREDENTIALS[kind],
+            action,
+            value,
+            code="tracker_secret_management_unavailable",
+            unavailable=(
+                "Ezen a szerveren a tracker-belépés a weboldalról nem állítható be.",
+                "The tracker login cannot be set from the web page on this server.",
+            ),
+        )
+        return {"request_id": request_id, "kind": kind, "action": action}
+
+    @application.put(
+        f"{API_PREFIX}/system/tracker-credentials/{{kind}}",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def set_tracker_secret(kind: TrackerSecret, body: TrackerSecretBody) -> dict[str, Any]:
+        """Hand a new login to the root helper; the API restarts to load it."""
+
+        try:
+            value = validate_tracker_secret(kind, body.value)
+        except ValueError as exc:
+            raise ConfigurationError(str(exc), code="tracker_secret_invalid") from exc
+        return _tracker_secret_request(kind, "set", value)
+
+    @application.delete(
+        f"{API_PREFIX}/system/tracker-credentials/{{kind}}",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def delete_tracker_secret(kind: TrackerSecret) -> dict[str, Any]:
+        return _tracker_secret_request(kind, "delete")
+
+    @application.post(f"{API_PREFIX}/system/trackers/{{kind}}/check")
+    def check_tracker_connection(kind: TrackerSecret) -> dict[str, str]:
+        """A read-only look at the tracker or at qBittorrent with the stored login."""
+
+        service = configured_release_service()
+        return {"result": service.publisher.check_connection(kind)}
 
     @application.delete(
         f"{API_PREFIX}/release-preparations/{{preparation_id}}",

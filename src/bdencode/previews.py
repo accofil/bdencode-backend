@@ -27,7 +27,7 @@ MAX_DURATION = 30.0
 DEFAULT_DURATION = 20.0
 ALLOWED_HEIGHTS = (360, 480, 720)
 DEFAULT_HEIGHT = 720
-MAX_PREVIEWS_PER_JOB = 12
+MAX_PREVIEWS_PER_JOB = 40
 MAX_CACHE_BYTES = 2 * 1024**3
 TRANSCODE_TIMEOUT_SECONDS = 240
 PREVIEW_NAME_RE = re.compile(
@@ -133,6 +133,109 @@ def preview_command(
     command.extend(("-c:a", "aac", "-b:a", "128k", "-ac", "2") if has_audio else ("-an",))
     command.extend(("-movflags", "+faststart", "-f", "mp4", "-y", str(output)))
     return command
+
+
+def _filter_path(path: Path) -> str:
+    """A path as one value inside an FFmpeg filter graph."""
+
+    text = str(path).replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:")
+    return text.replace("[", "\\[").replace("]", "\\]").replace(",", "\\,")
+
+
+FIT_AUDIO_MODES = ("fitted", "original", "both")
+
+
+def fit_excerpt_command(
+    reference: Path,
+    fitted: Path,
+    output: Path,
+    request: PreviewRequest,
+    *,
+    audio: str,
+    hdr: bool,
+    video_start_seconds: float = 0.0,
+    fitted_shift_seconds: float = 0.0,
+    subtitle: Path | None = None,
+    ffmpeg: str = "ffmpeg",
+) -> list[str]:
+    """An excerpt of the title with a fitted track, before anything is encoded.
+
+    ``both`` puts the title's own first track in the left ear and the fitted one
+    in the right: their common sound echoes if they are apart, whatever the
+    delay of the browser or the headphones.
+    """
+
+    if audio not in FIT_AUDIO_MODES:
+        raise PreviewError("invalid", "audio must be fitted, original or both")
+    start = float(request.start_seconds)
+    video = preview_filter(request.height, hdr=hdr)
+    if subtitle is not None:
+        # The filter counts from the file's start; the input seek resets the clock.
+        video = (
+            f"setpts=PTS+{start}/TB,subtitles=filename='{_filter_path(subtitle)}':charenc=UTF-8,"
+            f"setpts=PTS-{start}/TB,{video}"
+        )
+    graph = [f"[0:v:0]{video}[v]"]
+    if audio == "both":
+        graph.append("[0:a:0]aresample=48000,aformat=channel_layouts=mono[left]")
+        graph.append("[1:a:0]aresample=48000,aformat=channel_layouts=mono[right]")
+        graph.append("[left][right]join=inputs=2:channel_layout=stereo[a]")
+        audio_map = "[a]"
+    elif audio == "original":
+        audio_map = "0:a:0"
+    else:
+        audio_map = "1:a:0"
+    return [
+        ffmpeg,
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "error",
+        "-filter_threads",
+        "2",
+        "-seek_timestamp",
+        "1",
+        "-ss",
+        f"{start + video_start_seconds:.6f}",
+        "-i",
+        str(reference),
+        "-ss",
+        f"{max(0.0, start - fitted_shift_seconds):.6f}",
+        "-i",
+        str(fitted),
+        "-t",
+        str(request.duration_seconds),
+        "-filter_complex",
+        ";".join(graph),
+        "-map",
+        "[v]",
+        "-map",
+        audio_map,
+        "-sn",
+        "-dn",
+        "-c:v",
+        "libx264",
+        "-threads",
+        "2",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "24",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "160k",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        "-f",
+        "mp4",
+        "-y",
+        str(output),
+    ]
 
 
 def probe_command(source: Path, *, ffprobe: str = "ffprobe") -> list[str]:
@@ -307,6 +410,70 @@ class PreviewService:
         # for the same excerpt share one partial file name, so another thread
         # must never start (or clean up) while this one is still writing or
         # renaming it; a request that waited also re-checks for a finished file.
+        with _TRANSCODE_LOCK:
+            try:
+                if target.is_file() and target.stat().st_size > 0:
+                    return self._record(target), False
+                completed = self._invoke(command, TRANSCODE_TIMEOUT_SECONDS)
+                if (
+                    completed.returncode != 0
+                    or not partial.is_file()
+                    or partial.stat().st_size == 0
+                ):
+                    raise PreviewError(
+                        "transcode_failed",
+                        "ffmpeg could not create the excerpt"
+                        + (f": {completed.stderr.strip()[-300:]}" if completed.stderr else ""),
+                    )
+                os.replace(partial, target)
+            finally:
+                partial.unlink(missing_ok=True)
+            self._prune(directory, keep=target.name)
+        return self._record(target), True
+
+    def ensure_fit(
+        self,
+        job_id: str,
+        reference: Path,
+        fitted: Path,
+        request: PreviewRequest,
+        *,
+        audio: str,
+        video_start_seconds: float = 0.0,
+        fitted_shift_seconds: float = 0.0,
+        subtitle: Path | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """An excerpt with a fitted track; the file name scheme is the player's."""
+
+        if not reference.is_file() or not fitted.is_file():
+            raise PreviewError("no_output", "the fitted track is not available")
+        info = self.media_info(reference)
+        directory = self.directory(job_id)
+        details = fitted.stat()
+        material = (
+            f"fit|{fitted.name}|{details.st_size}|{details.st_mtime_ns}|{request}|{audio}|"
+            f"{subtitle.name if subtitle else ''}|{subtitle.stat().st_mtime_ns if subtitle else ''}"
+        )
+        key = hashlib.sha256(material.encode("utf-8")).hexdigest()[:10]
+        target = directory / (
+            f"preview-{request.start_seconds}s-{request.duration_seconds}s-{request.height}p-{key}.mp4"
+        )
+        if target.is_file() and target.stat().st_size > 0:
+            return self._record(target), False
+        directory.mkdir(mode=0o750, parents=True, exist_ok=True)
+        partial = directory / f".{target.name}.partial"
+        command = fit_excerpt_command(
+            reference,
+            fitted,
+            partial,
+            request,
+            audio=audio,
+            hdr=bool((info.get("video") or {}).get("hdr")),
+            video_start_seconds=video_start_seconds,
+            fitted_shift_seconds=fitted_shift_seconds,
+            subtitle=subtitle,
+            ffmpeg=self.ffmpeg,
+        )
         with _TRANSCODE_LOCK:
             try:
                 if target.is_file() and target.stat().st_size > 0:

@@ -73,6 +73,7 @@ def sync_window_command(
     output: Path,
     *,
     input_args: Sequence[str] = (),
+    seconds: Decimal = WINDOW_SECONDS,
     ffmpeg: str = "ffmpeg",
 ) -> list[str]:
     """Decode one window to raw mono 48 kHz float samples.
@@ -104,7 +105,7 @@ def sync_window_command(
         "-map",
         f"0:a:{audio_ordinal}",
         "-t",
-        f"{WINDOW_SECONDS:.3f}",
+        f"{seconds:.3f}",
         "-ac",
         "1",
         "-ar",
@@ -146,14 +147,14 @@ def read_samples(path: Path) -> Any:
     return np.fromfile(path, dtype="<f4")
 
 
-def judge(windows: Sequence[SyncWindow]) -> SyncVerdict:
+def judge(windows: Sequence[SyncWindow], *, tolerance_ms: Decimal = TOLERANCE_MS) -> SyncVerdict:
     conclusive = [window for window in windows if window.conclusive and window.lag_ms is not None]
     if not conclusive:
-        return SyncVerdict("inconclusive", None, tuple(windows))
+        return SyncVerdict("inconclusive", None, tuple(windows), str(tolerance_ms))
     lags = [Decimal(window.lag_ms) for window in conclusive]  # type: ignore[arg-type]
     worst = max(lags, key=abs)
-    status = "passed" if all(abs(lag) <= TOLERANCE_MS for lag in lags) else "out_of_sync"
-    return SyncVerdict(status, str(worst), tuple(windows))
+    status = "passed" if all(abs(lag) <= tolerance_ms for lag in lags) else "out_of_sync"
+    return SyncVerdict(status, str(worst), tuple(windows), str(tolerance_ms))
 
 
 def window_result(

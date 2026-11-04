@@ -201,7 +201,7 @@ az első sikeres kép előtt engedélyezett a váltás. Kézi választásnál ni
 
 Új kliensnek `schema_version: 2` értéket kell küldenie. A backend az 1-es sémájú, már sorban álló selectiont kompatibilitásból elfogadja és 2-es effektív tervvé migrálja; egy régi BD/x264 terv explicit `chroma_qp_offset: 0` értéke ekkor effektív `-2` lesz.
 
-Minden audio- és feliratsávhoz explicit művelet szükséges. Audiónál: `copy`, `flac`, `ac3`, `eac3`, `dts` vagy `omit`; feliratnál csak `copy` vagy `omit`. Minden megtartott felirathoz explicit `subtitle_kind` (`full` vagy `forced`) kell, és a `forced` flagnek ezzel egyeznie kell. Az audio célok determinisztikusak: AC-3 640 kb/s, E-AC-3 1024 kb/s, DTS core 1536 kb/s, mind 48 kHz-en és legfeljebb 5.1 csatornával. DTS-HD forrás `dts` céljánál a beágyazott core újrakódolás nélkül kerül kiemelésre. Az effektív presetek a `GET /api/v1/capabilities` válasz `constraints.audio_transcode_presets` mezőjében is olvashatók. `temporal_filter`: `progressive`, `ivtc_tff`, `ivtc_bff`, `bwdif_tff`, `bwdif_bff`, `hybrid_safe_bob_tff`, `hybrid_safe_bob_bff`.
+Minden audio- és feliratsávhoz explicit művelet szükséges. Audiónál: `copy`, `flac`, `flac16`, `ac3`, `eac3`, `dts` vagy `omit`; feliratnál csak `copy` vagy `omit`. Minden megtartott felirathoz explicit `subtitle_kind` (`full` vagy `forced`) kell, és a `forced` flagnek ezzel egyeznie kell. Az audio célok determinisztikusak: AC-3 640 kb/s, E-AC-3 1024 kb/s, DTS core 1536 kb/s, mind 48 kHz-en és legfeljebb 5.1 csatornával. DTS-HD forrás `dts` céljánál a beágyazott core újrakódolás nélkül kerül kiemelésre. Az effektív presetek a `GET /api/v1/capabilities` válasz `constraints.audio_transcode_presets` mezőjében is olvashatók. `temporal_filter`: `progressive`, `ivtc_tff`, `ivtc_bff`, `bwdif_tff`, `bwdif_bff`, `hybrid_safe_bob_tff`, `hybrid_safe_bob_bff`.
 
 Az opcionális `tracker_profile` (3.0-tól) értéke `aither` vagy `ncore`; elhagyva (`none`) az általános mód érvényes.
 
@@ -263,6 +263,33 @@ DELETE /jobs/{id}/previews/{name}
 ```
 
 Csak kész (`OUTPUT` artifaktummal rendelkező) munkánál, és csak akkor, ha az MKV a `completed` vagy a `jobs` gyökéren belül van. A `duration_seconds` 5–30, a `height` 360, 480 vagy 720. A `POST` `201`-et ad új és `200`-at már meglévő (gyorsítótárból kiszolgált) kivonatnál; a válasz `created` mezője jelzi. Hibakódok: `invalid` (422), `no_output` (409), `not_found` (404), `unavailable` (503, hiányzó ffmpeg/ffprobe), `timeout` (504), `probe_failed` és `transcode_failed` (502). A kivonat H.264/AAC MP4, HDR forrásnál SDR-re tone-map-elt; nem része a kiadásnak, a completed fának vagy a torrentnek.
+
+### Külső források (4.0)
+
+A selection `external_sources` listája más forrásból származó hangsávokat és SRT-feliratokat kér. A worker a referencia után illeszti őket, majd `NEEDS_REVIEW` állapotban (`code: external_source_review`) megáll, amíg az operátor jóvá nem hagyja a térképet.
+
+```json
+{"external_sources": [{
+  "id": "e1",
+  "path": "/home/accofil/torrents/.../film.iso",
+  "tracks": [{"stream": "#0x80", "language": "hun", "default": true, "position": 0, "pitch": "restore"}],
+  "subtitles": [{"path": "/home/accofil/torrents/.../film.srt", "language": "hun", "forced": false, "default": false}],
+  "approved_map_sha256": null
+}]}
+```
+
+- `GET /api/v1/external-sources/probe?path=`: a forrás fajtája, képfrissítése és hangsávjai.
+- `GET /api/v1/jobs/{id}/external-review`: a selection-bejegyzések és az elkészült illesztések (térkép, sávok, feliratok).
+- `POST /api/v1/jobs/{id}/external-review/{source}/approve` (`{"map_sha256": "..."}`): a megmutatott térkép jóváhagyása; más lenyomatnál `409`.
+- `POST /api/v1/jobs/{id}/external-review/{source}/pitch` (`{"stream": "#0x80", "pitch": "keep"}`): új hangmagasság, a jóváhagyás törlődik, a sáv újra elkészül.
+- `POST /api/v1/jobs/{id}/external-review/{source}/discard`: a forrás kihagyása.
+- `POST /api/v1/jobs/{id}/external-review/{source}/excerpts` (`track`, `subtitle`, `audio`: `fitted`, `original` vagy `both`, `start_seconds`, `duration_seconds`, `height`): böngészőben játszható kivonat a még kódolatlan címből; a tartalmat a `GET .../previews/{name}` adja.
+
+A `capabilities` válasz `constraints.external_sources` mezője mondja meg, hogy a gépen megvannak-e az eszközök.
+
+A `POST /api/v1/jobs` kérés `settings.purpose` mezője (`encode`, `fit` vagy `encode_fit`) a munka célját rögzíti; a varázsló ebből tudja, mit mutasson. Régebbi munkáknál hiányzik.
+
+**`mode: "fit"` selection:** kész MKV-ra illeszt, kódolás nélkül. Kötelező: `playlist_id`, `tracks`, `output_name`, `upload_images` és legalább egy `external_sources` bejegyzés. A sávok művelete csak `copy` vagy `omit` lehet, a `default` és a `language` felülírja a fájlét. Lemezre `fit_needs_mkv` hibát ad, ott `mode: "remux"` kell külső forrással. A worker állapotai a szokásosak: `ENCODING` az illesztés előkészítése, `MUXING` a saját sávok kiválasztása, `QC` a külső sávok muxolása és ellenőrzése, `COMPARISON` a képernyőképek.
 
 ### Adatbázis és mentések
 
@@ -372,7 +399,7 @@ POST /release-preparations/{id}/dupe-check
 
 A dupe check csak `READY` csomagból indul. Közvetlenül a hálózati kérés előtt újraellenőrzi a preparationhöz kötött trackerprofil teljes digestjét, valamint a completed payload tulajdonosi rekordját, közvetlen útvonalát, méretét és SHA-256 hashét. A kérés idején az állapot `SEEDING_CHECK`. A tracker válasza receiptként rögzül: `CLEAR` esetén az állapot `READY_TO_PUBLISH` (a felületen „Dupe check: tiszta”), találatnál `NEEDS_REVIEW`, bizonytalan kimenetnél `UNKNOWN`.
 
-A 2.x `POST /release-preparations/{id}/export`, `/seed` és `/upload` végpont 3.0-ban megszűnt (`404`).
+A 2.x `POST /release-preparations/{id}/export` és `/upload` végpont 3.0-ban megszűnt. 4.0-tól a beépített `aither` és `ncore` profil új végpontokat kap: `POST .../torrent`, `POST .../dupe-check`, `POST .../acknowledge-duplicates`, `GET .../upload-plan`, `POST .../upload/aither`, `POST .../upload/ncore`, `POST .../seed`, `GET .../site-torrent`; a Rendszer lapé: `GET /system/trackers`, `PUT /system/tracker-settings`, `PUT` és `DELETE /system/tracker-credentials/{kind}`, `POST /system/trackers/{kind}/check`. A részletek: [RELEASE_4_0.md](RELEASE_4_0.md).
 
 ### Előkészítés törlése
 

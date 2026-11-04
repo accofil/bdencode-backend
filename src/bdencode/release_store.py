@@ -87,11 +87,19 @@ _TRANSITIONS: dict[ReleasePreparationState, frozenset[ReleasePreparationState]] 
         {
             ReleasePreparationState.PREPARING,
             ReleasePreparationState.SEEDING_CHECK,
+            # The operator judged the hits of the duplicate check.
+            ReleasePreparationState.READY_TO_PUBLISH,
             ReleasePreparationState.FAILED,
+        }
+    ),
+    ReleasePreparationState.BUILDING_TORRENT: frozenset(
+        {
+            ReleasePreparationState.READY,
         }
     ),
     ReleasePreparationState.READY: frozenset(
         {
+            ReleasePreparationState.BUILDING_TORRENT,
             ReleasePreparationState.SEEDING_CHECK,
             ReleasePreparationState.SEEDING,
             ReleasePreparationState.READY_TO_PUBLISH,
@@ -119,20 +127,24 @@ _TRANSITIONS: dict[ReleasePreparationState, frozenset[ReleasePreparationState]] 
         {
             ReleasePreparationState.READY,
             ReleasePreparationState.READY_TO_PUBLISH,
+            ReleasePreparationState.PUBLISHED,
             ReleasePreparationState.UNKNOWN,
         }
     ),
     ReleasePreparationState.PUBLISHING: frozenset(
         {
             ReleasePreparationState.PUBLISHED,
+            # The tracker refused it for certain: fix it and approve again.
+            ReleasePreparationState.READY_TO_PUBLISH,
             ReleasePreparationState.NEEDS_REVIEW,
             ReleasePreparationState.UNKNOWN,
             ReleasePreparationState.FAILED,
         }
     ),
     ReleasePreparationState.FAILED: frozenset({ReleasePreparationState.PREPARING}),
-    ReleasePreparationState.UNKNOWN: frozenset(),
-    ReleasePreparationState.PUBLISHED: frozenset(),
+    # An unclear upload is looked up again, never simply repeated.
+    ReleasePreparationState.UNKNOWN: frozenset({ReleasePreparationState.SEEDING_CHECK}),
+    ReleasePreparationState.PUBLISHED: frozenset({ReleasePreparationState.SEEDING}),
 }
 
 
@@ -520,6 +532,7 @@ class ReleaseStore:
         return frozenset(
             {
                 ReleasePreparationState.PREPARING,
+                ReleasePreparationState.BUILDING_TORRENT,
                 ReleasePreparationState.SEEDING_CHECK,
                 ReleasePreparationState.SEEDING,
                 ReleasePreparationState.PUBLISHING,
@@ -725,6 +738,7 @@ class ReleaseStore:
 
         recoverable = {
             ReleasePreparationState.PREPARING: ReleasePreparationState.FAILED,
+            ReleasePreparationState.BUILDING_TORRENT: ReleasePreparationState.READY,
             ReleasePreparationState.SEEDING_CHECK: ReleasePreparationState.UNKNOWN,
             ReleasePreparationState.SEEDING: ReleasePreparationState.UNKNOWN,
             ReleasePreparationState.PUBLISHING: ReleasePreparationState.UNKNOWN,
@@ -757,6 +771,13 @@ class ReleaseStore:
                         if rollback is not None:
                             rollbacks.append(rollback)
                     target = recoverable[record.state]
+                    if (
+                        record.state is ReleasePreparationState.SEEDING
+                        and record.publication_receipt is not None
+                        and record.publication_receipt.get("outcome") == "PUBLISHED"
+                    ):
+                        # The upload is on the tracker for certain; only the seed is open.
+                        target = ReleasePreparationState.PUBLISHED
                     cursor = connection.execute(
                         """
                         UPDATE release_preparations

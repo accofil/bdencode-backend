@@ -1,3 +1,6 @@
+import { jobPurpose } from "../utils";
+import { ExternalSourcesCard } from "./ExternalSources";
+import type { ExternalSourceSelection } from "../api/types";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -78,7 +81,7 @@ import {
   TRACKER_PROFILE_LABELS,
 } from "../releaseName";
 import type { TrackerProfile } from "../releaseName";
-import { arrangeForTracker, plannedOrder } from "../trackerArrangement";
+import { aitherEncodeAudio, arrangeForTracker, plannedOrder } from "../trackerArrangement";
 import { FieldHelpButton } from "./EncoderHelp";
 import { languageLabel } from "./ReviewPanels";
 import { ProfileLibraryPanel } from "./ProfileLibraryPanel";
@@ -103,13 +106,15 @@ function groupLabel(group: string): string {
   return label ? tx(label) : humanize(group);
 }
 
-const AUDIO_TRACK_ACTIONS: TrackAction[] = ["copy", "flac", "ac3", "eac3", "dts", "omit"];
+const AUDIO_TRACK_ACTIONS: TrackAction[] = ["copy", "flac", "flac16", "ac3", "eac3", "dts", "omit"];
 function audioActionDetails(action: TrackAction): { label: string; description: string } {
   switch (action) {
     case "copy":
       return { label: "Copy", description: t("Az eredeti hangsáv változtatás nélkül", "The original audio track, unchanged") };
     case "flac":
       return { label: "FLAC", description: t("Veszteségmentes PCM-konverzió, eredeti csatornaszám", "Lossless PCM conversion, original channel count") };
+    case "flac16":
+      return { label: "FLAC 16", description: t("16 bites FLAC; mélyebb forrásnál ditherrel", "16-bit FLAC; dithered from a deeper source") };
     case "ac3":
       return { label: "AC-3", description: t("640 kb/s · 48 kHz · legfeljebb 5.1", "640 kb/s · 48 kHz · up to 5.1") };
     case "eac3":
@@ -121,9 +126,9 @@ function audioActionDetails(action: TrackAction): { label: string; description: 
   }
 }
 
-const AUDIO_TRANSCODE_ACTIONS = new Set<TrackAction>(["flac", "ac3", "eac3", "dts"]);
+const AUDIO_TRANSCODE_ACTIONS = new Set<TrackAction>(["flac", "flac16", "ac3", "eac3", "dts"]);
 
-export type WizardMode = "encode" | "remux";
+export type WizardMode = "encode" | "remux" | "fit";
 
 /** What a remux may do with a stream: keep it untouched (Blu-ray LPCM as FLAC) or leave it out. */
 export function remuxActions(stream: MediaStream): TrackAction[] {
@@ -136,6 +141,23 @@ function isEmbeddedCore(stream: MediaStream, playlist: Playlist | undefined): bo
   return stream.kind === "audio"
     && stream.codec.toLowerCase() === "ac3"
     && Boolean(playlist?.streams.some((other) => other.id !== stream.id && other.pid === stream.pid && other.codec.toLowerCase() === "truehd"));
+}
+
+/** A finished file's flags stay as they are: only what to keep and any language the operator set. */
+function fitPayloadTracks(tracks: TrackSelection[]): TrackSelection[] {
+  return tracks.map(({ stream_id, action, order, language }) => (
+    { stream_id, action, order, ...(language ? { language } : {}) } as TrackSelection
+  ));
+}
+
+/** What a finished file's track can do: stay as it is or be left out. */
+export function fitActions(): TrackAction[] {
+  return ["copy", "omit"];
+}
+
+/** Adding tracks to a finished file keeps everything it already has. */
+function fitTracks(playlist: Playlist): TrackSelection[] {
+  return initialTrackSelections(playlist).map((track) => ({ ...track, action: "copy" }));
 }
 
 /** A track plan converted to what a remux allows: a TrueHD brings its AC-3 by itself. */
@@ -360,8 +382,26 @@ export function SelectionWizard({
   // A remux needs eac3to (Wine) on the host and the disc itself, not an existing MKV remux.
   const remuxPossible = scan.source_kind !== "mkv";
   const remuxAvailable = remuxPossible && Boolean(capabilities.data?.constraints.remux?.available);
-  const [mode, setMode] = useState<WizardMode>(initial?.mode === "remux" ? "remux" : "encode");
+  const purpose = jobPurpose(job);
+  // Only tracks are added: a finished MKV stays as it is, and a disc, which
+  // cannot take new tracks, becomes a remux with them.
+  const fitOnly = purpose === "fit";
+  const [mode, setMode] = useState<WizardMode>(
+    initial?.mode === "remux" || initial?.mode === "fit"
+      ? initial.mode
+      : fitOnly
+        ? (scan.source_kind === "mkv" ? "fit" : "remux")
+        : "encode",
+  );
+  const [externalSources, setExternalSources] = useState<ExternalSourceSelection[]>(() => {
+    const stored = (job.selection as { external_sources?: unknown } | null | undefined)?.external_sources;
+    return Array.isArray(stored) ? (stored as ExternalSourceSelection[]) : [];
+  });
   const remuxMode = mode === "remux";
+  const fitMode = mode === "fit";
+  // Neither has a video step: the picture stays untouched.
+  const untouched = remuxMode || fitMode;
+  const externalShown = purpose === "fit" || purpose === "encode_fit" || externalSources.length > 0;
   const [imdb, setImdb] = useState(initial?.remux.imdb ?? "");
   const [tmdb, setTmdb] = useState(initial?.remux.tmdb ?? "");
   const [playlistId, setPlaylistId] = useState(defaultPlaylist?.playlist_id ?? "");
@@ -369,7 +409,7 @@ export function SelectionWizard({
     initialPlaylist ? Math.min(initial?.angle ?? 1, initialPlaylist.angle_count) : 1,
   );
   const [tracks, setTracks] = useState<TrackSelection[]>(
-    defaultPlaylist ? mergeTrackSelections(defaultPlaylist, initialPlaylist ? initial?.tracks : []) : [],
+    fitMode && !initial && defaultPlaylist ? fitTracks(defaultPlaylist) : defaultPlaylist ? mergeTrackSelections(defaultPlaylist, initialPlaylist ? initial?.tracks : []) : [],
   );
   const initialDetail = normalizeDetailLevel(initial?.detailLevel ?? job.settings.detail_level);
   const [detailLevel, setDetailLevel] = useState<DetailLevel>(initialDetail);
@@ -449,7 +489,18 @@ export function SelectionWizard({
     initializedRecommendation.current = key;
   }, [detailLevel, encoder, recommendation.data, schema.data]);
 
-  const payload = useMemo<SelectionPayload>(() => remuxMode ? {
+  const payload = useMemo<SelectionPayload>(() => fitMode ? {
+    schema_version: 2,
+    mode: "fit",
+    playlist_id: playlistId,
+    angle: 1,
+    output_name: outputName.trim().replace(/\.mkv$/i, ""),
+    tracks: fitPayloadTracks(tracks),
+    upload_images: uploadImages,
+    image_upload_provider: selectedImageProvider,
+    upload_image_set: "all",
+    external_sources: externalSources,
+  } : remuxMode ? {
     schema_version: 2,
     mode: "remux",
     playlist_id: playlistId,
@@ -463,6 +514,7 @@ export function SelectionWizard({
     ...(imdb.trim() || tmdb.trim()
       ? { remux: { ...(imdb.trim() ? { imdb: imdb.trim() } : {}), ...(tmdb.trim() ? { tmdb: tmdb.trim() } : {}) } }
       : {}),
+    ...(externalSources.length ? { external_sources: externalSources } : {}),
   } : {
     schema_version: 2,
     playlist_id: playlistId,
@@ -482,7 +534,8 @@ export function SelectionWizard({
     upload_image_set: selectedImageSet,
     dual_type_match: true,
     ...(trackerProfile !== "none" ? { tracker_profile: trackerProfile } : {}),
-  }, [angle, autoCrf, crop, detailLevel, dynamicHdr, imdb, outputName, playlist, playlistId, remuxMode, selectedImageProvider, selectedImageSet, settings, temporalFilter, tmdb, trackerProfile, tracks, uploadImages]);
+    ...(externalSources.length ? { external_sources: externalSources } : {}),
+  }, [angle, autoCrf, crop, detailLevel, dynamicHdr, externalSources, fitMode, imdb, outputName, playlist, playlistId, remuxMode, selectedImageProvider, selectedImageSet, settings, temporalFilter, tmdb, trackerProfile, tracks, uploadImages]);
 
   const validate = useMutation({
     mutationFn: () => api.validateSelection(job.id, payload, job.version),
@@ -535,7 +588,7 @@ export function SelectionWizard({
     if (!selected) return;
     setPlaylistId(id);
     setAngle(1);
-    setTracks(remuxMode ? remuxTracks(initialTrackSelections(selected), selected) : initialTrackSelections(selected));
+    setTracks(fitMode ? fitTracks(selected) : remuxMode ? remuxTracks(initialTrackSelections(selected), selected) : initialTrackSelections(selected));
     setTemporalFilter(suggestedTemporalFilter(selected));
     const selectedVideo = selected.streams.find((stream) => stream.kind === "video")?.video;
     setColorDraft(suggestedSourceColor(selectedVideo, scan.disc_kind));
@@ -572,9 +625,21 @@ export function SelectionWizard({
     setAiApplied(true);
   }
 
+  function chooseTrackerProfile(profile: TrackerProfile) {
+    setTrackerProfile(profile);
+    setValidation(null);
+    if (untouched || !playlist) {
+      setArrangementNotes([]);
+      return;
+    }
+    const result = aitherEncodeAudio(profile, tracks, playlist, job.content_type);
+    setTracks(result.tracks);
+    setArrangementNotes(result.notes);
+  }
+
   function applyTrackerArrangement(profile: TrackerProfile) {
     if (!playlist) return;
-    const result = arrangeForTracker(profile, tracks, playlist, encoder);
+    const result = arrangeForTracker(profile, tracks, playlist, encoder, job.content_type);
     setTracks(remuxMode ? remuxTracks(result.tracks, playlist) : result.tracks);
     setArrangementNotes(result.notes.length ? result.notes : [t("A sávterv már megfelel a szabályoknak.", "The track plan already meets the rules.")]);
     setValidation(null);
@@ -687,8 +752,10 @@ export function SelectionWizard({
   );
   const canNext = step === 1
     ? Boolean(playlist) && (!remuxMode || remuxAvailable)
-    : step === 2
-      ? hasCompleteTrackPlan && unclassifiedRetainedSubtitles.length === 0
+    : step === 2 && fitOnly && externalSources.length === 0
+      ? false
+      : step === 2
+      ? hasCompleteTrackPlan && (fitMode || unclassifiedRetainedSubtitles.length === 0)
       : step === 3
         ? Boolean(outputName.trim())
         : true;
@@ -698,23 +765,27 @@ export function SelectionWizard({
       <div className="selection-wizard__header">
         <div>
           <span className="eyebrow">{t("Scan elkészült", "Scan complete")}</span>
-          <h2>{remuxMode ? t("Remux beállításai", "Remux settings") : t("Kódolási beállítások", "Encoding settings")}</h2>
-          <p>{remuxMode
+          <h2>{fitMode ? t("Sávok illesztése kész fájlra", "Fitting tracks to a finished file") : remuxMode ? t("Remux beállításai", "Remux settings") : t("Kódolási beállítások", "Encoding settings")}</h2>
+          <p>{fitMode
+            ? t("A fájl videója és megtartott sávjai bájtra azonosak maradnak; csak a külső forrásból illesztett sávok kerülnek hozzá.", "The file's video and kept tracks stay byte for byte; only the tracks fitted from the external source are added.")
+            : fitOnly
+            ? t("A lemez nem bővíthető, ezért remux készül belőle a külső sávokkal.", "A disc cannot take new tracks, so a remux is made with the external tracks.")
+            : remuxMode
             ? t("Remux: a lemez videója és hangja érintetlenül kerül MKV-ba (eac3to + mkvmerge, az Aither REMUX útmutatója szerint; a Dolby Vision két rétege egy sávba kerül). Csak a Blu-ray LPCM lesz FLAC.", "Remux: the disc's video and audio go into an MKV untouched (eac3to + mkvmerge, following Aither's REMUX guide; Dolby Vision's two layers become one track). Only Blu-ray LPCM becomes FLAC.")
             : t("Jóváhagyás után a szerveroldalon ellenőrzött terv kódolásra kész állapotban vár a sorára; külön indítógomb nincs.", "Once approved, the server-checked plan waits in the queue ready to encode; there is no separate start button.")}</p>
         </div>
         <div className="codec-lockup">
           <span>{scan.disc_kind === "uhd" ? "UHD" : "BD"}</span>
-          <strong>{remuxMode ? "REMUX" : encoder}</strong>
-          <small>{remuxMode ? (videoStream?.video?.dolby_vision ? t("érintetlen · Dolby Vision", "untouched · Dolby Vision") : t("érintetlen · eac3to", "untouched · eac3to")) : scan.disc_kind === "uhd" ? t("HDR10 megtartással", "HDR10 retained") : "SDR Blu-ray"}</small>
+          <strong>{fitMode ? t("ILLESZTÉS", "FIT") : remuxMode ? "REMUX" : encoder}</strong>
+          <small>{fitMode ? t("nincs kódolás", "no encode") : remuxMode ? (videoStream?.video?.dolby_vision ? t("érintetlen · Dolby Vision", "untouched · Dolby Vision") : t("érintetlen · eac3to", "untouched · eac3to")) : scan.disc_kind === "uhd" ? t("HDR10 megtartással", "HDR10 retained") : "SDR Blu-ray"}</small>
         </div>
       </div>
 
-      <div className={remuxMode ? "wizard-steps" : "wizard-steps wizard-steps--four"}>
+      <div className={untouched ? "wizard-steps" : "wizard-steps wizard-steps--four"}>
         {([
           [1, "Playlist"],
           [2, t("Sávok", "Tracks")],
-          ...(remuxMode ? [] : [[3, t("Videó", "Video")]]),
+          ...(untouched ? [] : [[3, t("Videó", "Video")]]),
           [4, t("Ellenőrzés", "Check")],
         ] as Array<[number, string]>).map(([target, label], index) => (
           <button
@@ -736,7 +807,7 @@ export function SelectionWizard({
         </Notice>
       )}
 
-      {step === 1 && remuxPossible && (
+      {step === 1 && remuxPossible && !fitOnly && (
         <Card className="mode-card">
           <div className="section-heading">
             <div><span className="section-heading__icon"><Clapperboard size={19} /></span><div><h3>{t("Mit készítsünk?", "What to make?")}</h3><p>{t(`Kódolás ${encoder}-tel, vagy érintetlen remux`, `An ${encoder} encode, or an untouched remux`)}</p></div></div>
@@ -807,14 +878,14 @@ export function SelectionWizard({
 
       {step === 2 && playlist && (
         <div className="track-sections">
-          <Card className="tracker-card">
+          <Card className={fitMode ? "tracker-card tracker-card--hidden" : "tracker-card"}>
             <div className="section-heading">
               <div><span className="section-heading__icon"><Trophy size={19} /></span><div><h3>{t("Tracker-szabályok", "Tracker rules")}</h3><p>{t("Melyik oldal szabályai szerint készüljön a release", "Which site's rules the release should follow")}</p></div></div>
             </div>
             <div className="tracker-card__controls">
               <label className="field">
                 <span>{t("Tracker-profil", "Tracker profile")}</span>
-                <select aria-label={t("Tracker-profil", "Tracker profile")} value={trackerProfile} onChange={(event) => { setTrackerProfile(event.target.value as TrackerProfile); setArrangementNotes([]); setValidation(null); }}>
+                <select aria-label={t("Tracker-profil", "Tracker profile")} value={trackerProfile} onChange={(event) => chooseTrackerProfile(event.target.value as TrackerProfile)}>
                   {(Object.keys(TRACKER_PROFILE_LABELS) as TrackerProfile[]).map((value) => <option key={value} value={value}>{TRACKER_PROFILE_LABELS[value]}</option>)}
                 </select>
                 <small>{trackerProfile === "ncore"
@@ -864,7 +935,7 @@ export function SelectionWizard({
             selections={tracks}
             onUpdate={updateTrack}
             analysis={playlist.track_analysis}
-            actionsFor={remuxMode ? remuxActions : undefined}
+            actionsFor={fitMode ? fitActions : remuxMode ? remuxActions : undefined}
           />
           <TrackTable
             title={t("Feliratok", "Subtitles")}
@@ -873,7 +944,7 @@ export function SelectionWizard({
             selections={tracks}
             onUpdate={updateTrack}
             analysis={playlist.track_analysis}
-            actionsFor={remuxMode ? remuxActions : undefined}
+            actionsFor={fitMode ? fitActions : remuxMode ? remuxActions : undefined}
           />
           {unclassifiedRetainedSubtitles.length > 0 && (
             <Notice tone="warning" title={t("Felirattípus megadása szükséges", "Subtitle type required")}>
@@ -896,6 +967,14 @@ export function SelectionWizard({
             </Notice>
           )}
         </div>
+      )}
+
+      {step === 2 && playlist && externalShown && (
+        <ExternalSourcesCard
+          value={externalSources}
+          onChange={setExternalSources}
+          available={capabilities.data?.constraints.external_sources?.available ?? false}
+        />
       )}
 
       {step === 3 && playlist && (
@@ -1110,10 +1189,11 @@ export function SelectionWizard({
             <div className="review-summary-grid">
               <div><ListVideo size={18} /><span><small>Playlist</small><strong>{playlistId} · {formatDuration(playlist?.duration_seconds)}</strong></span></div>
               <div><Music size={18} /><span><small>{t("Megtartott sávok", "Kept tracks")}</small><strong>{retainedTracks.length}</strong></span></div>
-              {remuxMode ? (
+              {externalSources.length > 0 && <div><Music size={18} /><span><small>{t("Külső sávok (jóváhagyásra várnak)", "External tracks (await approval)")}</small><strong>{externalSources.reduce((sum, item) => sum + item.tracks.length + item.subtitles.length, 0)}</strong></span></div>}
+              {untouched ? (
                 <>
                   <div><Settings2 size={18} /><span><small>{t("Videó", "Video")}</small><strong>{t("érintetlen", "untouched")} · {(videoStream?.codec ?? "").toUpperCase()}</strong></span></div>
-                  <div><Sparkles size={18} /><span><small>{t("Képek", "Pictures")}</small><strong>{t("képernyőképek · eac3to-napló", "screenshots · eac3to log")}</strong></span></div>
+                  <div><Sparkles size={18} /><span><small>{t("Képek", "Pictures")}</small><strong>{fitMode ? t("képernyőképek", "screenshots") : t("képernyőképek · eac3to-napló", "screenshots · eac3to log")}</strong></span></div>
                 </>
               ) : (
                 <>
@@ -1133,11 +1213,11 @@ export function SelectionWizard({
                 <input aria-label={t("Release-tag", "Release tag")} maxLength={32} value={releaseTag} placeholder={t("pl. TAG", "e.g. TAG")} onChange={(event) => setReleaseTag(event.target.value)} />
                 <small>{t("A böngésző megjegyzi. Aither-névben „-TAG”, magyar névben „HUN-TAG” alakban jelenik meg.", "The browser remembers it. It appears as “-TAG” in an Aither name and as “HUN-TAG” in a Hungarian name.")}</small>
               </label>
-              <Button variant="secondary" icon={<Tag size={17} />} onClick={suggestReleaseName}>
+              <Button variant="secondary" icon={<Tag size={17} />} onClick={suggestReleaseName} disabled={fitMode}>
                 {t("Név javaslata", "Suggest name")} ({remuxMode ? "Aither remux" : namingStyle(trackerProfile) === "hungarian" ? t("magyar szabvány", "Hungarian standard") : "Aither"})
               </Button>
             </div>
-            {remuxMode && (
+            {remuxMode && !fitMode && (
               <div className="release-name-tools">
                 <label className="field">
                   <span>IMDb ID</span>
@@ -1164,14 +1244,14 @@ export function SelectionWizard({
                 </select>
                 <small>{t("Automatikus módban csak az első sikeres kép előtt válthat szolgáltatót; kézi módban nincs failover.", "In automatic mode the host can only change before the first successful image; manual mode has no failover.")}</small>
               </label>
-              {!remuxMode && <label className="field">
+              {!untouched && <label className="field">
                 <span>{t("Feltöltött képek", "Uploaded images")}</span>
                 <select aria-label={t("Feltöltött képek köre", "Set of uploaded images")} value={selectedImageSet} disabled={!uploadImages} onChange={(event) => { setSelectedImageSet(event.target.value as UploadImageSet); setValidation(null); }}>
                   {Object.entries(UPLOAD_IMAGE_SET_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                 </select>
                 <small>{t("HDR-filmnél minden képpárnak natív és SDR-re leképezett nézete is van; az egyik elhagyása felezi a feltöltést. A helyi PNG-k mind megmaradnak.", "For an HDR film every image pair has a native and an SDR tone-mapped view; leaving one out halves the upload. All local PNGs are kept.")}</small>
               </label>}
-              {!remuxMode && <label className="toggle-row">
+              {!untouched && <label className="toggle-row">
                 <span><strong>{t("Szigorú I/P/B típusazonosság · kötelező", "Strict I/P/B type match · required")}</strong><small>{t("Progresszív forrásnál a source és az encode képtípusa mindig azonos; ez nem kapcsolható ki.", "For a progressive source the source and encode frame types always match; this cannot be turned off.")}</small></span>
                 <input type="checkbox" checked disabled aria-label={t("Szigorú I/P/B típusazonosság kötelező", "Strict I/P/B type match required")} /><span className="toggle" aria-hidden="true" />
               </label>}
@@ -1180,7 +1260,7 @@ export function SelectionWizard({
             {!validation && (
               <Notice tone="info" title={t("Még nincs jóváhagyva", "Not approved yet")}>{t("Az „Ellenőrzés” gomb a backend valódi plannerével validálja a sávokat, cropot, HDR-t és x264/x265 paramétereket, de még nem indít kódolást.", "The “Check plan” button validates the tracks, crop, HDR and x264/x265 parameters with the backend's real planner, but does not start encoding yet.")}</Notice>
             )}
-            {!remuxMode && needsColorConfirmation && !colorConfirmed && (
+            {!untouched && needsColorConfirmation && !colorConfirmed && (
               <Notice tone="warning" title={t("A forrás színadatait még jóvá kell hagynod", "You still need to approve the source colour data")}>
                 <p>{t("A lemezből hiányzik:", "Missing from the disc:")} {reportedMissingColorFields.map((field) => SOURCE_COLOR_FIELD_LABELS[field]).join(", ")}.</p>
                 <p>{safeColorRecommendation
@@ -1237,7 +1317,13 @@ export function SelectionWizard({
               : t("A backend ugyanazzal a logikával ellenőriz, amelyet a worker kódoláskor használ.", "The backend checks with the same logic the worker uses when encoding.")}</p>
             {validation && (
               <>
-                {validation.mode === "remux" ? (
+                {validation.mode === "fit" ? (
+                  <dl className="summary-list">
+                    <div><dt>{t("Mód", "Mode")}</dt><dd>{t("Sávok illesztése", "Fitting tracks")}</dd></div>
+                    <div><dt>{t("Kódolás", "Encode")}</dt><dd>{t("nincs", "none")}</dd></div>
+                    <div><dt>QC</dt><dd>{t("a fájl saját sávjai bájtra azonosak, a külső sávok a térkép szerinti helyen", "the file's own tracks byte for byte, the external tracks where the map puts them")}</dd></div>
+                  </dl>
+                ) : validation.mode === "remux" ? (
                   <dl className="summary-list">
                     <div><dt>{t("Mód", "Mode")}</dt><dd>Remux</dd></div>
                     <div><dt>{t("Bontás", "Demux")}</dt><dd>eac3to 3.36 (Wine)</dd></div>
@@ -1261,11 +1347,11 @@ export function SelectionWizard({
                 {validation.tracker_profile && validation.tracker_profile !== "none" && (validation.tracker_findings?.length ?? 0) === 0 && (
                   <Notice tone="success">{t(`A sávterv megfelel a(z) ${TRACKER_PROFILE_LABELS[validation.tracker_profile as TrackerProfile] ?? validation.tracker_profile} szabályainak.`, `The track plan meets the ${TRACKER_PROFILE_LABELS[validation.tracker_profile as TrackerProfile] ?? validation.tracker_profile} rules.`)}</Notice>
                 )}
-                {validation.mode !== "remux" && <details className="command-preview"><summary><Copy size={15} /> {t("FFmpeg videóparaméterek", "FFmpeg video parameters")}</summary><code>{validation.ffmpeg_video_args.join(" ")}</code></details>}
+                {validation.mode !== "remux" && validation.mode !== "fit" && <details className="command-preview"><summary><Copy size={15} /> {t("FFmpeg videóparaméterek", "FFmpeg video parameters")}</summary><code>{validation.ffmpeg_video_args.join(" ")}</code></details>}
               </>
             )}
             {!validation ? (
-              <Button icon={<Check size={17} />} onClick={() => validate.mutate()} loading={validate.isPending} disabled={!remuxMode && needsColorConfirmation && !colorConfirmed}>{t("Terv ellenőrzése", "Check plan")}</Button>
+              <Button icon={<Check size={17} />} onClick={() => validate.mutate()} loading={validate.isPending} disabled={!untouched && needsColorConfirmation && !colorConfirmed}>{t("Terv ellenőrzése", "Check plan")}</Button>
             ) : (
               <Button icon={<Clapperboard size={18} />} onClick={() => save.mutate()} loading={save.isPending}>{t("Jóváhagyás és automatikus indítás", "Approve and start automatically")}</Button>
             )}
@@ -1274,8 +1360,8 @@ export function SelectionWizard({
       )}
 
       <div className="wizard-footer">
-        <Button variant="ghost" icon={<ArrowLeft size={17} />} onClick={() => setStep((value) => Math.max(1, remuxMode && value === 4 ? 2 : value - 1))} disabled={step === 1}>{t("Vissza", "Back")}</Button>
-        {step < 4 && <Button icon={<ArrowRight size={17} />} onClick={() => { setStep((value) => Math.min(4, remuxMode && value === 2 ? 4 : value + 1)); setValidation(null); }} disabled={!canNext}>{t("Tovább", "Next")}</Button>}
+        <Button variant="ghost" icon={<ArrowLeft size={17} />} onClick={() => setStep((value) => Math.max(1, untouched && value === 4 ? 2 : value - 1))} disabled={step === 1}>{t("Vissza", "Back")}</Button>
+        {step < 4 && <Button icon={<ArrowRight size={17} />} onClick={() => { setStep((value) => Math.min(4, untouched && value === 2 ? 4 : value + 1)); setValidation(null); }} disabled={!canNext}>{t("Tovább", "Next")}</Button>}
       </div>
     </div>
   );

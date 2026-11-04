@@ -5,6 +5,9 @@ import { audioCodecFamily, type TrackerProfile } from "./releaseName";
 /** Formats an nCore 1080p encode may not carry: they become E-AC3 (DD+) 5.1, 1024 kbps. */
 const NCORE_1080P_FORBIDDEN = new Set(["TRUEHD", "DTSHDMA", "DTSHDHRA", "DTSX", "LPCM"]);
 
+/** What Aither's trumping rule calls lossless, for a live action encode up to 1080p. */
+const AITHER_LOSSLESS = new Set(["TRUEHD", "DTSHDMA", "DTSX", "LPCM", "FLAC"]);
+
 const ISO639_2_TO_BCP47: Record<string, string> = {
   hun: "hu", eng: "en", ger: "de", deu: "de", fre: "fr", fra: "fr", ita: "it", spa: "es",
   jpn: "ja", kor: "ko", chi: "zh", zho: "zh", rus: "ru", pol: "pl", cze: "cs", ces: "cs",
@@ -69,6 +72,57 @@ const languageName = (code: string) => {
   return name ? t(name.hu, name.en) : code;
 };
 
+function isAitherLiveAction1080p(playlist: Playlist, contentType: string | undefined): boolean {
+  const height = playlist.streams.find((stream) => stream.kind === "video")?.video?.height ?? 0;
+  return height > 0 && height <= 1080 && (contentType ?? "").toUpperCase() !== "ANIME";
+}
+
+function aitherAudioChange(stream: MediaStream, action: TrackSelection["action"]): "eac3" | "flac16" | null {
+  if (action !== "copy" && action !== "flac") return null;
+  if (!AITHER_LOSSLESS.has(audioCodecFamily(stream.codec, stream.codec_profile))) return null;
+  if ((stream.channels ?? 0) > 2) return "eac3";
+  return "flac16";
+}
+
+function aitherAudioNote(language: string, stream: MediaStream, change: "eac3" | "flac16"): string {
+  const name = languageName(language);
+  const source = stream.codec_profile || stream.codec;
+  if (change === "flac16") {
+    return t(
+      `A(z) ${name} ${source} sáv 16 bites FLAC lesz: az Aither 1080p encode-on a veszteségmentes hangot legfeljebb 2 csatornánál és így engedi.`,
+      `The ${name} ${source} track becomes 16-bit FLAC: at 1080p Aither allows lossless audio only up to 2 channels and in this form.`,
+    );
+  }
+  const downmix = (stream.channels ?? 0) > 6;
+  return t(
+    `A(z) ${name} ${source} sáv E-AC3 (DD+) 5.1, 1024 kbps lesz, mert a veszteségmentes többcsatornás hang miatt az Aitheren az 1080p encode trumpolható${downmix ? `; a(z) ${stream.channels} csatorna 5.1-re keveredik` : ""}.`,
+    `The ${name} ${source} track becomes E-AC3 (DD+) 5.1, 1024 kbps, because lossless multichannel audio makes a 1080p encode trumpable on Aither${downmix ? `; the ${stream.channels} channels are downmixed to 5.1` : ""}.`,
+  );
+}
+
+/**
+ * The audio default when Aither is chosen for an encode: only lossless tracks
+ * the operator kept change, and the plan's other choices stay as they are.
+ */
+export function aitherEncodeAudio(
+  profile: TrackerProfile,
+  tracks: TrackSelection[],
+  playlist: Playlist,
+  contentType?: string,
+): TrackerArrangement {
+  if (profile !== "aither" || !isAitherLiveAction1080p(playlist, contentType)) return { tracks, notes: [] };
+  const notes: string[] = [];
+  const changed = tracks.map((track) => {
+    const stream = playlist.streams.find((item) => item.id === track.stream_id);
+    if (!stream || stream.kind !== "audio") return track;
+    const change = aitherAudioChange(stream, track.action);
+    if (!change) return track;
+    notes.push(aitherAudioNote(languageOf(track, stream), stream, change));
+    return { ...track, action: change };
+  });
+  return { tracks: changed, notes };
+}
+
 /**
  * Rearrange a track plan for a tracker's rules: allowed languages and formats,
  * output order and the default audio.  Choices the operator already made to
@@ -79,6 +133,7 @@ export function arrangeForTracker(
   tracks: TrackSelection[],
   playlist: Playlist,
   encoder: "x264" | "x265",
+  contentType?: string,
 ): TrackerArrangement {
   if (profile === "none") return { tracks, notes: [] };
   const notes: string[] = [];
@@ -116,6 +171,13 @@ export function arrangeForTracker(
       continue;
     }
     const family = audioCodecFamily(item.stream.codec, item.stream.codec_profile);
+    if (profile === "aither" && isAitherLiveAction1080p(playlist, contentType)) {
+      const change = aitherAudioChange(item.stream, actionOf(item));
+      if (change) {
+        update(item.track.stream_id, { action: change });
+        notes.push(aitherAudioNote(item.language, item.stream, change));
+      }
+    }
     if (profile === "ncore" && encoder === "x264" && actionOf(item) === "copy" && NCORE_1080P_FORBIDDEN.has(family)) {
       update(item.track.stream_id, { action: "eac3" });
       const downmix = (item.stream.channels ?? 0) > 6;

@@ -310,6 +310,7 @@ def remux_bbcode(
     eac3to_log: str,
     notes: Sequence[str] = (),
     width: int = GALLERY_WIDTH,
+    kind: str = "remux",
 ) -> list[str]:
     """A remux's description: screenshots and the eac3to log.
 
@@ -318,7 +319,7 @@ def remux_bbcode(
     ``[imgw]``.  ``notes`` are eac3to's warnings, shown above the log.
     """
 
-    lines = [f"[b]{output_name} — remux[/b]"]
+    lines = [f"[b]{output_name} — {kind}[/b]"]
     if uploaded and provider:
         lines.append(f"[i]Image host: {provider}[/i]")
     pictures = [

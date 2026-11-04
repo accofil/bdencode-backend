@@ -50,8 +50,14 @@ import type {
   SelectionPayload,
   SelectionValidation,
   SourceBrowserResponse,
+  ExternalProbe,
+  ExternalReviewItem,
   StatisticsResponse,
   TrackerReleaseProfile,
+  TrackerSecretKind,
+  TrackerSettingsStatus,
+  UploadFields,
+  UploadPlan,
   UploadResetRequest,
 } from "./types";
 
@@ -239,6 +245,46 @@ export const api = {
         body: JSON.stringify({ expected_version: expectedVersion }),
       },
     ),
+  buildReleaseTorrent: (preparationId: string, expectedVersion: number) =>
+    apiFetch<ReleasePreparation>(
+      `/release-preparations/${encodeURIComponent(preparationId)}/torrent`,
+      { method: "POST", body: JSON.stringify({ expected_version: expectedVersion }) },
+    ),
+  acknowledgeReleaseDuplicates: (preparationId: string, expectedVersion: number, reason: string) =>
+    apiFetch<ReleasePreparation>(
+      `/release-preparations/${encodeURIComponent(preparationId)}/acknowledge-duplicates`,
+      { method: "POST", body: JSON.stringify({ expected_version: expectedVersion, reason }) },
+    ),
+  releaseUploadPlan: (preparationId: string) =>
+    apiFetch<UploadPlan>(`/release-preparations/${encodeURIComponent(preparationId)}/upload-plan`),
+  uploadRelease: (
+    preparationId: string,
+    tracker: UploadPlan["tracker"],
+    request: UploadFields & { expected_version: number; confirm_release_name: string; torrent_sha256: string },
+  ) =>
+    apiFetch<ReleasePreparation>(
+      `/release-preparations/${encodeURIComponent(preparationId)}/upload/${tracker}`,
+      { method: "POST", body: JSON.stringify(request) },
+    ),
+  seedRelease: (preparationId: string, expectedVersion: number) =>
+    apiFetch<ReleasePreparation>(
+      `/release-preparations/${encodeURIComponent(preparationId)}/seed`,
+      { method: "POST", body: JSON.stringify({ expected_version: expectedVersion }) },
+    ),
+  releaseSiteTorrentUrl: (preparationId: string) =>
+    `${API_ROOT}/release-preparations/${encodeURIComponent(preparationId)}/site-torrent`,
+  trackerSettings: () => apiFetch<TrackerSettingsStatus>("/system/trackers"),
+  saveTrackerSettings: (settings: { schema_version: 1; qbittorrent_url: string; qbittorrent_username: string }) =>
+    apiFetch<TrackerSettingsStatus>("/system/tracker-settings", { method: "PUT", body: JSON.stringify(settings) }),
+  setTrackerSecret: (kind: TrackerSecretKind, value: string) =>
+    apiFetch<{ request_id: string }>(`/system/tracker-credentials/${kind}`, {
+      method: "PUT",
+      body: JSON.stringify({ value }),
+    }),
+  deleteTrackerSecret: (kind: TrackerSecretKind) =>
+    apiFetch<{ request_id: string }>(`/system/tracker-credentials/${kind}`, { method: "DELETE" }),
+  checkTrackerConnection: (kind: TrackerSecretKind) =>
+    apiFetch<{ result: string }>(`/system/trackers/${kind}/check`, { method: "POST" }),
   validateReleasePreparation: (preparationId: string, expectedVersion: number) =>
     apiFetch<ReleaseValidationResult>(
       `/release-preparations/${encodeURIComponent(preparationId)}/validate`,
@@ -311,6 +357,33 @@ export const api = {
     request: { start_seconds: number; duration_seconds: number; height: number },
   ) =>
     apiFetch<PreviewRecord>(`/jobs/${encodeURIComponent(jobId)}/previews`, {
+      method: "POST",
+      body: JSON.stringify(request),
+    }),
+  probeExternalSource: (path: string) =>
+    apiFetch<ExternalProbe>(`/external-sources/probe?path=${encodeURIComponent(path)}`),
+  externalReview: (jobId: string) =>
+    apiFetch<{ items: ExternalReviewItem[] }>(`/jobs/${encodeURIComponent(jobId)}/external-review`),
+  approveExternalSource: (jobId: string, sourceId: string, mapSha256: string) =>
+    apiFetch<Job>(`/jobs/${encodeURIComponent(jobId)}/external-review/${encodeURIComponent(sourceId)}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ map_sha256: mapSha256 }),
+    }),
+  discardExternalSource: (jobId: string, sourceId: string) =>
+    apiFetch<Job>(`/jobs/${encodeURIComponent(jobId)}/external-review/${encodeURIComponent(sourceId)}/discard`, {
+      method: "POST",
+    }),
+  setExternalPitch: (jobId: string, sourceId: string, stream: string, pitch: "restore" | "keep") =>
+    apiFetch<Job>(`/jobs/${encodeURIComponent(jobId)}/external-review/${encodeURIComponent(sourceId)}/pitch`, {
+      method: "POST",
+      body: JSON.stringify({ stream, pitch }),
+    }),
+  createExternalExcerpt: (
+    jobId: string,
+    sourceId: string,
+    request: { track: number; subtitle: number | null; audio: "fitted" | "original" | "both"; start_seconds: number; duration_seconds: number; height: number },
+  ) =>
+    apiFetch<PreviewRecord>(`/jobs/${encodeURIComponent(jobId)}/external-review/${encodeURIComponent(sourceId)}/excerpts`, {
       method: "POST",
       body: JSON.stringify(request),
     }),

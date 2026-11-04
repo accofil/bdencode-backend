@@ -73,6 +73,7 @@ class ReleaseModel(BaseModel):
 class ReleasePreparationState(StrEnum):
     NOT_PREPARED = "NOT_PREPARED"
     PREPARING = "PREPARING"
+    BUILDING_TORRENT = "BUILDING_TORRENT"
     NEEDS_REVIEW = "NEEDS_REVIEW"
     READY = "READY"
     SEEDING_CHECK = "SEEDING_CHECK"

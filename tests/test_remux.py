@@ -16,6 +16,7 @@ from bdencode.media.bluray import (
     VideoProperties,
 )
 from bdencode.remux import (
+    decoded_md5_command,
     RemuxError,
     RemuxTrack,
     audio_track_name,
@@ -487,3 +488,13 @@ def test_the_eac3to_wrapper_is_valid_shell() -> None:
     checked = subprocess.run(["sh", "-n", str(wrapper)], capture_output=True, text=True)
 
     assert checked.returncode == 0, checked.stderr
+
+
+def test_the_hash_of_a_track_does_not_depend_on_its_timestamps() -> None:
+    """A multi-clip title's audio timestamps step back at the joins; -xerror then
+    stopped the QC of God Forgives, I Don't (1967) although every sample matched."""
+
+    command = decoded_md5_command("r.mkv", "a:0")
+    assert "-xerror" in command
+    assert command[command.index("-af") + 1] == "asetpts=N/SR/TB"
+    assert "-af" not in decoded_md5_command("r.mkv", "v:0")

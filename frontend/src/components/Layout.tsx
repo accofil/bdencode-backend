@@ -25,7 +25,7 @@ import { Notice } from "./ui";
 function navigation() {
   return [
     { to: "/", label: t("Áttekintés", "Overview"), icon: Gauge, end: true },
-    { to: "/new", label: t("Új kódolás", "New encode"), icon: CirclePlus },
+    { to: "/new", label: t("Új munka", "New job"), icon: CirclePlus },
     { to: "/queue", label: t("Várólista", "Queue"), icon: ListOrdered },
     { to: "/archive", label: t("Elkészült munkák", "Finished jobs"), icon: Archive },
     { to: "/comparisons", label: t("Összehasonlítások", "Comparisons"), icon: AudioWaveform },
@@ -135,7 +135,7 @@ export function Layout() {
             <span />
           </span>
           <div>
-            <strong>BDEncode</strong>
+            <strong>Accofil BDEncode</strong>
             <small>Studio Console</small>
             {serverVersion && <span className="brand-version" title={t("A szerveren futó verzió", "Version running on the server")}>v{serverVersion}</span>}
           </div>

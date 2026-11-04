@@ -135,6 +135,42 @@ export const HELP_SOURCES: HelpSource[] = [
 
 export const HELP_SECTIONS: HelpSection[] = [
   {
+    id: "external",
+    title: { hu: "Hang és felirat más forrásból", en: "Audio and subtitles from another source" },
+    paragraphs: [
+      {
+        hu: "Az Új munka oldalon három út közül választhatsz: Kódolás vagy remux, Hang vagy felirat illesztése (kész encode-ra vagy remuxra kódolás nélkül; lemezből remux készül a sávokkal), illetve Kódolás és illesztés.",
+        en: "On the New job page there are three paths: Encode or remux, Fit audio or subtitles (onto a finished encode or remux with no encoding; a disc becomes a remux with the tracks), and Encode and fit.",
+      },
+      {
+        hu: "A program a két képet hasonlítja össze kockáról kockára, nem a hangot, mert a régi filmek nyelvi változatainak saját hangmestere van. Így eltérő sebességnél (PAL) és eltérő vágásnál is pontos. Kódolás előtt megáll: a kártyán meghallgathatod az illesztési pontokat, és jóvá kell hagynod.",
+        en: "The program compares the two pictures frame by frame, not the sound, because on old films each language has its own sound master. So it is exact with another speed (PAL) and another cut too. It stops before the encode: you can listen to the splice points on the card, and you must approve.",
+      },
+      {
+        hu: "Fülpróba: bal fülben a saját hang, jobb fülben az illesztett; a közös zene csúszásnál visszhangos, és a fejhallgató késése ezt nem befolyásolja. Eltérő hangmesterek közt kisebb visszhang akkor is lehet, ha az illesztés pontos, ezért a szájmozgást is figyeld.",
+        en: "Ear test: the title's own audio in the left ear, the fitted one in the right; shared music echoes if they are apart, whatever the headphones' delay. Between different sound masters a slight echo can remain even when the fit is exact, so watch the lips too.",
+      },
+      {
+        hu: "Hangmagasság: az alapértelmezett visszaállítás pontosan visszafordítja a PAL-gyorsítást; ha a szinkront PAL-képre vették fel, a hangok mélyebbek lehetnek, ezért a kártyán átállítható. Ahol a forrásból hiányzik a kép, a sáv néma, ezt a kártya időpontokkal kiírja.",
+        en: "Pitch: the default restore exactly undoes the PAL speed-up; if the dub was recorded to the PAL picture the voices can be deeper, so it can be changed on the card. Where the source lacks the picture the track is silent, and the card lists those times.",
+      },
+    ],
+  },
+  {
+    id: "aither-audio",
+    title: { hu: "Aither: hang az 1080p encode-okon", en: "Aither: audio on 1080p encodes" },
+    paragraphs: [
+      {
+        hu: "Az élőszereplős 1080p encode a veszteségmentes 5.1 hang miatt trumpolható. Kivétel a csak 2 csatornás hang, ha 16 bites FLAC. 2160p-n fordított a szabály: ott a veszteséges fősáv trumpolható.",
+        en: "A live action 1080p encode is trumpable because of lossless 5.1 audio. The exception is audio of only 2 channels, as 16-bit FLAC. At 2160p the rule is the reverse: a lossy main track is trumpable there.",
+      },
+      {
+        hu: "Aither-profilnál a program ezeket a sávokat magától átállítja: 2 csatorna fölött E-AC-3 1024 kbps, legfeljebb 2 csatornán FLAC 16 (mélyebb forrásból ditherrel). A 7.1 lekeveredik, mert az ffmpeg E-AC-3 kódolója 5.1-ig megy.",
+        en: "Under the Aither profile the program switches these tracks by itself: above 2 channels to E-AC-3 1024 kbps, up to 2 channels to FLAC 16 (dithered from a deeper source). 7.1 is downmixed, because FFmpeg's E-AC-3 encoder goes up to 5.1.",
+      },
+    ],
+  },
+  {
     id: "ncore",
     title: { hu: "nCore és a magyar release-szabvány", en: "nCore and the Hungarian release standard" },
     paragraphs: [

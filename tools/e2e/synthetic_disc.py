@@ -247,6 +247,8 @@ def main() -> int:
                         help="rows of letterbox to crop at the top and the bottom (the RPU active area is zeroed)")
     parser.add_argument("--scenes", type=int, default=30, help="number of two-second scenes (UHD: 12 is plenty)")
     parser.add_argument("--auto-crf", type=float, default=90.0, help="VMAF target; 0 uses a fixed CRF 18")
+    parser.add_argument("--external", action="store_true",
+                        help="also fit a track from a generated 25 fps source to the encode (use --scenes 80)")
     parser.add_argument("--tracker", choices=("none", "aither", "ncore"), default="none",
                         help="follow a tracker's rules: chapter IDR frames, B-heavy comps, screenshots, nCore x265 level")
     args = parser.parse_args()
@@ -423,14 +425,56 @@ def main() -> int:
     }
     if args.tracker != "none":
         selection["tracker_profile"] = args.tracker
+    if args.external:
+        donor = source_root / "external-pal.mkv"
+        run(["ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-y", "-i", str(master),
+             "-map", "0:v:0", "-map", "0:a:0", "-vf", "scale=720:404,setpts=N/(25*TB),fps=25",
+             "-af", "atempo=1.04270833", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+             "-pix_fmt", "yuv420p", "-c:a", "ac3", "-b:a", "224k", str(donor)])
+        selection["external_sources"] = [{
+            "id": "e1", "path": str(donor),
+            "tracks": [{"stream": "a:0", "language": "hun", "default": True, "position": 0}],
+        }]
     job = database.set_selection(job.id, selection)
     final = worker.process_job(job)
+    if args.external:
+        if final.state is not JobState.NEEDS_REVIEW:
+            print("the external source did not stop for approval", final.state.value, final.status_message, file=sys.stderr)
+            return 1
+        print("stopped:", final.status_message, flush=True)
+        review_path = settings.job_root(final.id) / "work" / "external" / "e1" / "review.json"
+        if not review_path.is_file():
+            for event in database.list_events(job_id=final.id, limit=5000)[-4:]:
+                print("  ", event.kind, (event.message or "")[:200], str(event.payload)[:400], flush=True)
+            return 1
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+        print("fit:", {key: value for key, value in review["map"].items() if key != "segments"},
+              review["map"]["segments"], review["tracks"], flush=True)
+        selection["external_sources"][0]["approved_map_sha256"] = review["map_sha256"]
+        final = worker.process_job(database.set_selection(final.id, selection))
     elapsed = time.time() - started
     print(f"[{elapsed:6.1f}s] FINAL {final.state.value}", flush=True)
     report = settings.job_root(final.id) / "analysis" / "crf-search.json"
     if report.is_file():
         print(json.dumps(json.loads(report.read_text(encoding="utf-8")).get("probes"), indent=None))
     status = 0 if final.state is JobState.COMPLETED else 1
+    if args.external and final.state is JobState.COMPLETED:
+        output = next((settings.completed_root).rglob("*.mkv"), None)
+        identified = json.loads(subprocess.run(
+            ["mkvmerge", "--identify", "--identification-format", "json", str(output)],
+            capture_output=True, text=True, check=False,
+        ).stdout)
+        names = [(item["type"], item["codec"], item["properties"].get("language"), item["properties"].get("default_track"))
+                 for item in identified["tracks"]]
+        verdict = json.loads(
+            (settings.job_root(final.id) / "analysis" / "external-merge-streams.json").read_text(encoding="utf-8")
+        )
+        print("final tracks:", names, flush=True)
+        print("merge:", verdict["streams_unchanged"],
+              [{key: value for key, value in track.items() if key != "windows"} for track in verdict["tracks"]], flush=True)
+        if not any(item[1] == "AC-3" and item[2] == "hun" for item in names):
+            print("the fitted track is not in the final file", file=sys.stderr)
+            status = 1
     if args.dolby_vision and final.state is JobState.COMPLETED:
         output = next((settings.completed_root).rglob("*.mkv"), None)
         summary = dolby_vision_summary(output) if output else {"frames": 0, "profile": 0}
