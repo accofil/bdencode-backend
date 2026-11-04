@@ -248,7 +248,8 @@ def main() -> int:
     parser.add_argument("--scenes", type=int, default=30, help="number of two-second scenes (UHD: 12 is plenty)")
     parser.add_argument("--auto-crf", type=float, default=90.0, help="VMAF target; 0 uses a fixed CRF 18")
     parser.add_argument("--external", action="store_true",
-                        help="also fit a track from a generated 25 fps source to the encode (use --scenes 80)")
+                        help="experimental: also fit a track from a generated 25 fps source; the regular scenes "
+                             "can stop at the picture match, so a stop here proves nothing about real sources")
     parser.add_argument("--tracker", choices=("none", "aither", "ncore"), default="none",
                         help="follow a tracker's rules: chapter IDR frames, B-heavy comps, screenshots, nCore x265 level")
     args = parser.parse_args()
