@@ -101,3 +101,42 @@ def test_the_parser_splits_the_technical_tokens() -> None:
 )
 def test_source_codecs_map_to_name_families(codec: str, profile: str | None, family: str) -> None:
     assert audio_codec_family(codec, profile) == family
+
+
+def remux_facts(*audio: AudioOutput, codec: str = "AVC", resolution: str = "1080p", uhd: bool = False, dynamic=frozenset({"SDR"})) -> ReleaseFacts:
+    return ReleaseFacts(encoder="remux", audio=audio, dynamic_range=dynamic, video_codec=codec, resolution=resolution, uhd=uhd)
+
+
+DTSHD_EN = AudioOutput("DTSHDMA", 6, language="en")
+
+
+@pytest.mark.parametrize(
+    ("name", "plan"),
+    (
+        ("The.Quiet.2005.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-TAG", remux_facts(DTSHD_EN)),
+        ("Housemaid.2025.2160p.UHD.BluRay.REMUX.DV.HDR.HEVC.TrueHD.7.1.Atmos-TAG", remux_facts(TRUEHD_ATMOS_EN, AudioOutput("DD", 6, language="en"), codec="HEVC", resolution="2160p", uhd=True, dynamic=HDR_DV)),
+        ("Mother.and.Son.2022.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1", remux_facts(AudioOutput("DTSHDMA", 6, language="fr"))),
+        ("McCabe.and.Mrs.Miller.1971.2160p.UHD.BluRay.REMUX.HEVC.FLAC.1.0-TAG", remux_facts(AudioOutput("FLAC", 1, language="en"), codec="HEVC", resolution="2160p", uhd=True)),
+    ),
+)
+def test_truthful_remux_names_pass(name: str, plan: ReleaseFacts) -> None:
+    assert release_name_problems(name, plan) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "plan", "message"),
+    (
+        ("The.Quiet.2005.1080p.BluRay.DTS-HD.MA.5.1.x264-TAG", remux_facts(DTSHD_EN), "clean remux name"),
+        ("The.Quiet.2005.1080p.BluRay.REMUX.HEVC.DTS-HD.MA.5.1-TAG", remux_facts(DTSHD_EN), "untouched video is AVC"),
+        ("The.Quiet.2005.1080p.BluRay.REMUX.DTS-HD.MA.5.1.AVC-TAG", remux_facts(DTSHD_EN), "before the video codec"),
+        ("The.Quiet.2005.1080p.BluRay.REMUX.AVC-TAG", remux_facts(DTSHD_EN), "default audio track's codec"),
+        ("The.Quiet.2005.1080p.BluRay.REMUX.AVC.DTS-HD.MA-TAG", remux_facts(DTSHD_EN), "channels"),
+        ("The.Quiet.2005.1080p.BluRay.REMUX.AVC.DD.5.1-TAG", remux_facts(DTSHD_EN, AudioOutput("DD", 6, language="en")), "default audio track is DTS-HD MA"),
+        ("Housemaid.2025.2160p.UHD.BluRay.REMUX.HDR.HEVC.TrueHD.7.1.Atmos-TAG", remux_facts(TRUEHD_ATMOS_EN, codec="HEVC", resolution="2160p", uhd=True, dynamic=HDR_DV), "must say DV"),
+        ("Housemaid.2025.2160p.UHD.BluRay.REMUX.DV.HDR.HEVC.TrueHD.7.1-TAG", remux_facts(TRUEHD_ATMOS_EN, codec="HEVC", resolution="2160p", uhd=True, dynamic=HDR_DV), "must say Atmos"),
+        ("Housemaid.2025.2160p.BluRay.REMUX.DV.HDR.HEVC.TrueHD.7.1.Atmos-TAG", remux_facts(TRUEHD_ATMOS_EN, codec="HEVC", resolution="2160p", uhd=True, dynamic=HDR_DV), "UHD.BluRay"),
+    ),
+)
+def test_untruthful_remux_names_are_explained(name: str, plan: ReleaseFacts, message: str) -> None:
+    problems = release_name_problems(name, plan)
+    assert any(message in item for item in problems), problems

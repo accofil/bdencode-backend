@@ -64,12 +64,15 @@ import { imageHostOrderText, imageUploadProviderLabels, UPLOAD_IMAGE_SET_LABELS,
 import { basename, formatDuration, humanize, retiredScanWarning, stabilityWarning, suggestedOutputName } from "../utils";
 import {
   buildReleaseName,
+  buildRemuxName,
   channelLayout,
   namingStyle,
   plannedDynamicRange,
   releaseAudio,
   rememberedReleaseTag,
   rememberReleaseTag,
+  remuxDynamicRange,
+  remuxReleaseAudio,
   sanitizeReleaseTag,
   titleBaseOf,
   TRACKER_PROFILE_LABELS,
@@ -119,6 +122,32 @@ function audioActionDetails(action: TrackAction): { label: string; description: 
 }
 
 const AUDIO_TRANSCODE_ACTIONS = new Set<TrackAction>(["flac", "ac3", "eac3", "dts"]);
+
+export type WizardMode = "encode" | "remux";
+
+/** What a remux may do with a stream: keep it untouched (Blu-ray LPCM as FLAC) or leave it out. */
+export function remuxActions(stream: MediaStream): TrackAction[] {
+  if (stream.kind === "audio") return [stream.codec.toLowerCase().startsWith("pcm") ? "flac" : "copy", "omit"];
+  return ["copy", "omit"];
+}
+
+/** The embedded AC-3 of a TrueHD: the scan lists it as its own stream on the same PID. */
+function isEmbeddedCore(stream: MediaStream, playlist: Playlist | undefined): boolean {
+  return stream.kind === "audio"
+    && stream.codec.toLowerCase() === "ac3"
+    && Boolean(playlist?.streams.some((other) => other.id !== stream.id && other.pid === stream.pid && other.codec.toLowerCase() === "truehd"));
+}
+
+/** A track plan converted to what a remux allows: a TrueHD brings its AC-3 by itself. */
+export function remuxTracks(tracks: TrackSelection[], playlist: Playlist | undefined): TrackSelection[] {
+  return tracks.map((track) => {
+    const stream = playlist?.streams.find((item) => item.id === track.stream_id);
+    if (!stream) return track;
+    if (isEmbeddedCore(stream, playlist)) return { ...track, action: "omit" as TrackAction };
+    if (track.action === "omit") return track;
+    return { ...track, action: remuxActions(stream)[0] };
+  });
+}
 
 function imageUploadProvider(value: unknown): ImageUploadProvider {
   return value === "imgbb" || value === "catbox" || value === "freeimage"
@@ -327,6 +356,14 @@ export function SelectionWizard({
     ?? scan.playlists.find((item) => item.recommended)
     ?? scan.playlists[0];
   const [step, setStep] = useState(1);
+  const capabilities = useQuery({ queryKey: ["capabilities"], queryFn: api.capabilities, staleTime: 60_000 });
+  // A remux needs eac3to (Wine) on the host and the disc itself, not an existing MKV remux.
+  const remuxPossible = scan.source_kind !== "mkv";
+  const remuxAvailable = remuxPossible && Boolean(capabilities.data?.constraints.remux?.available);
+  const [mode, setMode] = useState<WizardMode>(initial?.mode === "remux" ? "remux" : "encode");
+  const remuxMode = mode === "remux";
+  const [imdb, setImdb] = useState(initial?.remux.imdb ?? "");
+  const [tmdb, setTmdb] = useState(initial?.remux.tmdb ?? "");
   const [playlistId, setPlaylistId] = useState(defaultPlaylist?.playlist_id ?? "");
   const [angle, setAngle] = useState(
     initialPlaylist ? Math.min(initial?.angle ?? 1, initialPlaylist.angle_count) : 1,
@@ -412,7 +449,21 @@ export function SelectionWizard({
     initializedRecommendation.current = key;
   }, [detailLevel, encoder, recommendation.data, schema.data]);
 
-  const payload = useMemo<SelectionPayload>(() => ({
+  const payload = useMemo<SelectionPayload>(() => remuxMode ? {
+    schema_version: 2,
+    mode: "remux",
+    playlist_id: playlistId,
+    angle: 1,
+    output_name: outputName.trim().replace(/\.mkv$/i, ""),
+    tracks: tracksForPayload(tracks, playlist),
+    upload_images: uploadImages,
+    image_upload_provider: selectedImageProvider,
+    upload_image_set: "all",
+    ...(trackerProfile !== "none" ? { tracker_profile: trackerProfile } : {}),
+    ...(imdb.trim() || tmdb.trim()
+      ? { remux: { ...(imdb.trim() ? { imdb: imdb.trim() } : {}), ...(tmdb.trim() ? { tmdb: tmdb.trim() } : {}) } }
+      : {}),
+  } : {
     schema_version: 2,
     playlist_id: playlistId,
     angle,
@@ -431,7 +482,7 @@ export function SelectionWizard({
     upload_image_set: selectedImageSet,
     dual_type_match: true,
     ...(trackerProfile !== "none" ? { tracker_profile: trackerProfile } : {}),
-  }), [angle, autoCrf, crop, detailLevel, dynamicHdr, outputName, playlist, playlistId, selectedImageProvider, selectedImageSet, settings, temporalFilter, trackerProfile, tracks, uploadImages]);
+  }, [angle, autoCrf, crop, detailLevel, dynamicHdr, imdb, outputName, playlist, playlistId, remuxMode, selectedImageProvider, selectedImageSet, settings, temporalFilter, tmdb, trackerProfile, tracks, uploadImages]);
 
   const validate = useMutation({
     mutationFn: () => api.validateSelection(job.id, payload, job.version),
@@ -473,12 +524,18 @@ export function SelectionWizard({
     clearPlanFeedback();
   }
 
+  function chooseMode(next: WizardMode) {
+    setMode(next);
+    if (next === "remux") setTracks((current) => remuxTracks(current, playlist));
+    clearPlanFeedback();
+  }
+
   function choosePlaylist(id: string) {
     const selected = scan.playlists.find((item) => item.playlist_id === id);
     if (!selected) return;
     setPlaylistId(id);
     setAngle(1);
-    setTracks(initialTrackSelections(selected));
+    setTracks(remuxMode ? remuxTracks(initialTrackSelections(selected), selected) : initialTrackSelections(selected));
     setTemporalFilter(suggestedTemporalFilter(selected));
     const selectedVideo = selected.streams.find((stream) => stream.kind === "video")?.video;
     setColorDraft(suggestedSourceColor(selectedVideo, scan.disc_kind));
@@ -518,7 +575,7 @@ export function SelectionWizard({
   function applyTrackerArrangement(profile: TrackerProfile) {
     if (!playlist) return;
     const result = arrangeForTracker(profile, tracks, playlist, encoder);
-    setTracks(result.tracks);
+    setTracks(remuxMode ? remuxTracks(result.tracks, playlist) : result.tracks);
     setArrangementNotes(result.notes.length ? result.notes : [t("A sávterv már megfelel a szabályoknak.", "The track plan already meets the rules.")]);
     setValidation(null);
   }
@@ -528,6 +585,19 @@ export function SelectionWizard({
     const tag = sanitizeReleaseTag(releaseTag);
     rememberReleaseTag(tag);
     setReleaseTag(tag);
+    if (remuxMode) {
+      setOutputName(buildRemuxName({
+        base: titleBaseOf(outputName || job.name || basename(scan.source)),
+        uhd: scan.disc_kind === "uhd",
+        video: videoStream?.video,
+        videoCodec: videoStream?.codec ?? "h264",
+        audio: remuxReleaseAudio(tracks, playlist),
+        dynamicRange: remuxDynamicRange(videoStream?.video),
+        tag,
+      }));
+      setValidation(null);
+      return;
+    }
     setOutputName(buildReleaseName({
       base: titleBaseOf(outputName || job.name || basename(scan.source)),
       encoder,
@@ -616,7 +686,7 @@ export function SelectionWizard({
     && track.subtitle_kind !== "forced",
   );
   const canNext = step === 1
-    ? Boolean(playlist)
+    ? Boolean(playlist) && (!remuxMode || remuxAvailable)
     : step === 2
       ? hasCompleteTrackPlan && unclassifiedRetainedSubtitles.length === 0
       : step === 3
@@ -628,27 +698,34 @@ export function SelectionWizard({
       <div className="selection-wizard__header">
         <div>
           <span className="eyebrow">{t("Scan elkészült", "Scan complete")}</span>
-          <h2>{t("Kódolási beállítások", "Encoding settings")}</h2>
-          <p>{t("Jóváhagyás után a szerveroldalon ellenőrzött terv kódolásra kész állapotban vár a sorára; külön indítógomb nincs.", "Once approved, the server-checked plan waits in the queue ready to encode; there is no separate start button.")}</p>
+          <h2>{remuxMode ? t("Remux beállításai", "Remux settings") : t("Kódolási beállítások", "Encoding settings")}</h2>
+          <p>{remuxMode
+            ? t("Remux: a lemez videója és hangja érintetlenül kerül MKV-ba (eac3to + mkvmerge, az Aither REMUX útmutatója szerint; a Dolby Vision két rétege egy sávba kerül). Csak a Blu-ray LPCM lesz FLAC.", "Remux: the disc's video and audio go into an MKV untouched (eac3to + mkvmerge, following Aither's REMUX guide; Dolby Vision's two layers become one track). Only Blu-ray LPCM becomes FLAC.")
+            : t("Jóváhagyás után a szerveroldalon ellenőrzött terv kódolásra kész állapotban vár a sorára; külön indítógomb nincs.", "Once approved, the server-checked plan waits in the queue ready to encode; there is no separate start button.")}</p>
         </div>
         <div className="codec-lockup">
           <span>{scan.disc_kind === "uhd" ? "UHD" : "BD"}</span>
-          <strong>{encoder}</strong>
-          <small>{scan.disc_kind === "uhd" ? t("HDR10 megtartással", "HDR10 retained") : "SDR Blu-ray"}</small>
+          <strong>{remuxMode ? "REMUX" : encoder}</strong>
+          <small>{remuxMode ? (videoStream?.video?.dolby_vision ? t("érintetlen · Dolby Vision", "untouched · Dolby Vision") : t("érintetlen · eac3to", "untouched · eac3to")) : scan.disc_kind === "uhd" ? t("HDR10 megtartással", "HDR10 retained") : "SDR Blu-ray"}</small>
         </div>
       </div>
 
-      <div className="wizard-steps wizard-steps--four">
-        {["Playlist", t("Sávok", "Tracks"), t("Videó", "Video"), t("Ellenőrzés", "Check")].map((label, index) => (
+      <div className={remuxMode ? "wizard-steps" : "wizard-steps wizard-steps--four"}>
+        {([
+          [1, "Playlist"],
+          [2, t("Sávok", "Tracks")],
+          ...(remuxMode ? [] : [[3, t("Videó", "Video")]]),
+          [4, t("Ellenőrzés", "Check")],
+        ] as Array<[number, string]>).map(([target, label], index) => (
           <button
             type="button"
-            key={index}
-            className={index + 1 === step ? "wizard-step wizard-step--active" : index + 1 < step ? "wizard-step wizard-step--complete" : "wizard-step"}
-            onClick={() => index + 1 < step && setStep(index + 1)}
-            disabled={index + 1 > step}
-            aria-current={index + 1 === step ? "step" : undefined}
+            key={target}
+            className={target === step ? "wizard-step wizard-step--active" : target < step ? "wizard-step wizard-step--complete" : "wizard-step"}
+            onClick={() => target < step && setStep(target)}
+            disabled={target > step}
+            aria-current={target === step ? "step" : undefined}
           >
-            <span>{index + 1 < step ? <Check size={15} /> : index + 1}</span>{label}
+            <span>{target < step ? <Check size={15} /> : index + 1}</span>{label}
           </button>
         ))}
       </div>
@@ -657,6 +734,25 @@ export function SelectionWizard({
         <Notice tone="warning" title={t("A scan figyelmeztetései", "Scan warnings")}>
           <ul>{shownScanWarnings.map((warning) => <li key={warning}>{stabilityWarning(warning) ?? warning}</li>)}</ul>
         </Notice>
+      )}
+
+      {step === 1 && remuxPossible && (
+        <Card className="mode-card">
+          <div className="section-heading">
+            <div><span className="section-heading__icon"><Clapperboard size={19} /></span><div><h3>{t("Mit készítsünk?", "What to make?")}</h3><p>{t(`Kódolás ${encoder}-tel, vagy érintetlen remux`, `An ${encoder} encode, or an untouched remux`)}</p></div></div>
+          </div>
+          <div className="mode-switch" role="group" aria-label={t("Kimenet fajtája", "Kind of output")}>
+            <button type="button" className={!remuxMode ? "active" : ""} aria-pressed={!remuxMode} onClick={() => chooseMode("encode")}>
+              <strong>{t("Kódolás", "Encode")}</strong><small>{encoder} · CRF · comparison</small>
+            </button>
+            <button type="button" className={remuxMode ? "active" : ""} aria-pressed={remuxMode} disabled={!remuxAvailable} onClick={() => chooseMode("remux")}>
+              <strong>Remux</strong><small>{t("érintetlen videó és hang · eac3to-napló", "untouched video and audio · eac3to log")}</small>
+            </button>
+          </div>
+          {!remuxAvailable && capabilities.data && (
+            <p className="muted">{t("A remuxhoz eac3to és Wine kell a szerveren; ezen a gépen hiányzik (lásd a Rendszer oldalt).", "A remux needs eac3to and Wine on the server; this host lacks them (see the System page).")}</p>
+          )}
+        </Card>
       )}
 
       {step === 1 && (
@@ -753,13 +849,22 @@ export function SelectionWizard({
             )}
           </Card>
           <TrackAnalysisSummary playlist={playlist} selections={tracks} onUpdate={updateTrack} />
+          {remuxMode && (
+            <Notice tone="info" title={t("Remux: érintetlen sávok", "Remux: untouched tracks")}>
+              {t(
+                "Minden megtartott sáv változatlanul kerül át; a Blu-ray LPCM FLAC lesz (bitpontosan), a TrueHD mellé pedig automatikusan bekerül a beágyazott AC-3 kompatibilitási sávként. A sávneveket a program BDInfo-formában adja; a név mezőbe írt szöveg elé kerül (pl. „Original Mix”), kommentárnál a név maga a sávnév.",
+                "Every kept track goes over unchanged; Blu-ray LPCM becomes FLAC (bit-exact), and each TrueHD automatically brings its embedded AC-3 as a compatibility track. Track names are generated BDInfo-style; text in the name field is put in front (e.g. “Original Mix”); for a commentary the name is the whole track name.",
+              )}
+            </Notice>
+          )}
           <TrackTable
             title={t("Hangsávok", "Audio tracks")}
             icon={<Music size={20} />}
-            streams={playlist.streams.filter((stream) => stream.kind === "audio")}
+            streams={playlist.streams.filter((stream) => stream.kind === "audio" && !(remuxMode && isEmbeddedCore(stream, playlist)))}
             selections={tracks}
             onUpdate={updateTrack}
             analysis={playlist.track_analysis}
+            actionsFor={remuxMode ? remuxActions : undefined}
           />
           <TrackTable
             title={t("Feliratok", "Subtitles")}
@@ -768,6 +873,7 @@ export function SelectionWizard({
             selections={tracks}
             onUpdate={updateTrack}
             analysis={playlist.track_analysis}
+            actionsFor={remuxMode ? remuxActions : undefined}
           />
           {unclassifiedRetainedSubtitles.length > 0 && (
             <Notice tone="warning" title={t("Felirattípus megadása szükséges", "Subtitle type required")}>
@@ -1004,8 +1110,17 @@ export function SelectionWizard({
             <div className="review-summary-grid">
               <div><ListVideo size={18} /><span><small>Playlist</small><strong>{playlistId} · {formatDuration(playlist?.duration_seconds)}</strong></span></div>
               <div><Music size={18} /><span><small>{t("Megtartott sávok", "Kept tracks")}</small><strong>{retainedTracks.length}</strong></span></div>
-              <div><Settings2 size={18} /><span><small>{t("Videóprofil", "Video profile")}</small><strong>{encoder} · {detailLevel}</strong></span></div>
-              <div><Sparkles size={18} /><span><small>Comparison</small><strong>I / P / B · PNG</strong></span></div>
+              {remuxMode ? (
+                <>
+                  <div><Settings2 size={18} /><span><small>{t("Videó", "Video")}</small><strong>{t("érintetlen", "untouched")} · {(videoStream?.codec ?? "").toUpperCase()}</strong></span></div>
+                  <div><Sparkles size={18} /><span><small>{t("Képek", "Pictures")}</small><strong>{t("képernyőképek · eac3to-napló", "screenshots · eac3to log")}</strong></span></div>
+                </>
+              ) : (
+                <>
+                  <div><Settings2 size={18} /><span><small>{t("Videóprofil", "Video profile")}</small><strong>{encoder} · {detailLevel}</strong></span></div>
+                  <div><Sparkles size={18} /><span><small>Comparison</small><strong>I / P / B · PNG</strong></span></div>
+                </>
+              )}
             </div>
 
             <label className="field">
@@ -1019,9 +1134,23 @@ export function SelectionWizard({
                 <small>{t("A böngésző megjegyzi. Aither-névben „-TAG”, magyar névben „HUN-TAG” alakban jelenik meg.", "The browser remembers it. It appears as “-TAG” in an Aither name and as “HUN-TAG” in a Hungarian name.")}</small>
               </label>
               <Button variant="secondary" icon={<Tag size={17} />} onClick={suggestReleaseName}>
-                {t("Név javaslata", "Suggest name")} ({namingStyle(trackerProfile) === "hungarian" ? t("magyar szabvány", "Hungarian standard") : "Aither"})
+                {t("Név javaslata", "Suggest name")} ({remuxMode ? "Aither remux" : namingStyle(trackerProfile) === "hungarian" ? t("magyar szabvány", "Hungarian standard") : "Aither"})
               </Button>
             </div>
+            {remuxMode && (
+              <div className="release-name-tools">
+                <label className="field">
+                  <span>IMDb ID</span>
+                  <input aria-label="IMDb ID" value={imdb} maxLength={12} placeholder="tt0123456" onChange={(event) => { setImdb(event.target.value); setValidation(null); }} />
+                  <small>{t("Nem kötelező; az MKV címkéibe kerül, ahogy az útmutató ajánlja.", "Optional; goes into the MKV tags, as the guide recommends.")}</small>
+                </label>
+                <label className="field">
+                  <span>TMDB ID</span>
+                  <input aria-label="TMDB ID" value={tmdb} maxLength={16} placeholder="movie/123456" onChange={(event) => { setTmdb(event.target.value); setValidation(null); }} />
+                  <small>{t("„movie/…” vagy „tv/…” alakban.", "As “movie/…” or “tv/…”.")}</small>
+                </label>
+              </div>
+            )}
 
             <div className="review-options">
               <label className="toggle-row">
@@ -1035,23 +1164,23 @@ export function SelectionWizard({
                 </select>
                 <small>{t("Automatikus módban csak az első sikeres kép előtt válthat szolgáltatót; kézi módban nincs failover.", "In automatic mode the host can only change before the first successful image; manual mode has no failover.")}</small>
               </label>
-              <label className="field">
+              {!remuxMode && <label className="field">
                 <span>{t("Feltöltött képek", "Uploaded images")}</span>
                 <select aria-label={t("Feltöltött képek köre", "Set of uploaded images")} value={selectedImageSet} disabled={!uploadImages} onChange={(event) => { setSelectedImageSet(event.target.value as UploadImageSet); setValidation(null); }}>
                   {Object.entries(UPLOAD_IMAGE_SET_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                 </select>
                 <small>{t("HDR-filmnél minden képpárnak natív és SDR-re leképezett nézete is van; az egyik elhagyása felezi a feltöltést. A helyi PNG-k mind megmaradnak.", "For an HDR film every image pair has a native and an SDR tone-mapped view; leaving one out halves the upload. All local PNGs are kept.")}</small>
-              </label>
-              <label className="toggle-row">
+              </label>}
+              {!remuxMode && <label className="toggle-row">
                 <span><strong>{t("Szigorú I/P/B típusazonosság · kötelező", "Strict I/P/B type match · required")}</strong><small>{t("Progresszív forrásnál a source és az encode képtípusa mindig azonos; ez nem kapcsolható ki.", "For a progressive source the source and encode frame types always match; this cannot be turned off.")}</small></span>
                 <input type="checkbox" checked disabled aria-label={t("Szigorú I/P/B típusazonosság kötelező", "Strict I/P/B type match required")} /><span className="toggle" aria-hidden="true" />
-              </label>
+              </label>}
             </div>
 
             {!validation && (
               <Notice tone="info" title={t("Még nincs jóváhagyva", "Not approved yet")}>{t("Az „Ellenőrzés” gomb a backend valódi plannerével validálja a sávokat, cropot, HDR-t és x264/x265 paramétereket, de még nem indít kódolást.", "The “Check plan” button validates the tracks, crop, HDR and x264/x265 parameters with the backend's real planner, but does not start encoding yet.")}</Notice>
             )}
-            {needsColorConfirmation && !colorConfirmed && (
+            {!remuxMode && needsColorConfirmation && !colorConfirmed && (
               <Notice tone="warning" title={t("A forrás színadatait még jóvá kell hagynod", "You still need to approve the source colour data")}>
                 <p>{t("A lemezből hiányzik:", "Missing from the disc:")} {reportedMissingColorFields.map((field) => SOURCE_COLOR_FIELD_LABELS[field]).join(", ")}.</p>
                 <p>{safeColorRecommendation
@@ -1108,13 +1237,21 @@ export function SelectionWizard({
               : t("A backend ugyanazzal a logikával ellenőriz, amelyet a worker kódoláskor használ.", "The backend checks with the same logic the worker uses when encoding.")}</p>
             {validation && (
               <>
-                <dl className="summary-list">
-                  <div><dt>{t("Kódoló", "Encoder")}</dt><dd>{validation.encoder}</dd></div>
-                  <div><dt>CRF</dt><dd>{String(validation.settings.crf)}</dd></div>
-                  <div><dt>Preset</dt><dd>{String(validation.settings.preset)}</dd></div>
-                  <div><dt>{t("Profil", "Profile")}</dt><dd>{String(validation.settings.profile)}</dd></div>
-                  <div><dt>Crop</dt><dd>{Object.values(validation.crop).join(" / ")}</dd></div>
-                </dl>
+                {validation.mode === "remux" ? (
+                  <dl className="summary-list">
+                    <div><dt>{t("Mód", "Mode")}</dt><dd>Remux</dd></div>
+                    <div><dt>{t("Bontás", "Demux")}</dt><dd>eac3to 3.36 (Wine)</dd></div>
+                    <div><dt>QC</dt><dd>{t("minden képkocka és minta a lemezével azonos", "every frame and sample equal to the disc's")}</dd></div>
+                  </dl>
+                ) : (
+                  <dl className="summary-list">
+                    <div><dt>{t("Kódoló", "Encoder")}</dt><dd>{validation.encoder}</dd></div>
+                    <div><dt>CRF</dt><dd>{String(validation.settings.crf)}</dd></div>
+                    <div><dt>Preset</dt><dd>{String(validation.settings.preset)}</dd></div>
+                    <div><dt>{t("Profil", "Profile")}</dt><dd>{String(validation.settings.profile)}</dd></div>
+                    <div><dt>Crop</dt><dd>{Object.values(validation.crop).join(" / ")}</dd></div>
+                  </dl>
+                )}
                 {validation.advisory_warnings.length > 0 && <Notice tone="warning"><ul>{validation.advisory_warnings.map((item) => <li key={item}>{item}</li>)}</ul></Notice>}
                 {(validation.tracker_findings?.length ?? 0) > 0 && (
                   <Notice tone="warning" title={t(`${TRACKER_PROFILE_LABELS[(validation.tracker_profile as TrackerProfile) ?? trackerProfile] ?? "Tracker"}-szabályok`, `${TRACKER_PROFILE_LABELS[(validation.tracker_profile as TrackerProfile) ?? trackerProfile] ?? "Tracker"} rules`)}>
@@ -1124,11 +1261,11 @@ export function SelectionWizard({
                 {validation.tracker_profile && validation.tracker_profile !== "none" && (validation.tracker_findings?.length ?? 0) === 0 && (
                   <Notice tone="success">{t(`A sávterv megfelel a(z) ${TRACKER_PROFILE_LABELS[validation.tracker_profile as TrackerProfile] ?? validation.tracker_profile} szabályainak.`, `The track plan meets the ${TRACKER_PROFILE_LABELS[validation.tracker_profile as TrackerProfile] ?? validation.tracker_profile} rules.`)}</Notice>
                 )}
-                <details className="command-preview"><summary><Copy size={15} /> {t("FFmpeg videóparaméterek", "FFmpeg video parameters")}</summary><code>{validation.ffmpeg_video_args.join(" ")}</code></details>
+                {validation.mode !== "remux" && <details className="command-preview"><summary><Copy size={15} /> {t("FFmpeg videóparaméterek", "FFmpeg video parameters")}</summary><code>{validation.ffmpeg_video_args.join(" ")}</code></details>}
               </>
             )}
             {!validation ? (
-              <Button icon={<Check size={17} />} onClick={() => validate.mutate()} loading={validate.isPending} disabled={needsColorConfirmation && !colorConfirmed}>{t("Terv ellenőrzése", "Check plan")}</Button>
+              <Button icon={<Check size={17} />} onClick={() => validate.mutate()} loading={validate.isPending} disabled={!remuxMode && needsColorConfirmation && !colorConfirmed}>{t("Terv ellenőrzése", "Check plan")}</Button>
             ) : (
               <Button icon={<Clapperboard size={18} />} onClick={() => save.mutate()} loading={save.isPending}>{t("Jóváhagyás és automatikus indítás", "Approve and start automatically")}</Button>
             )}
@@ -1137,8 +1274,8 @@ export function SelectionWizard({
       )}
 
       <div className="wizard-footer">
-        <Button variant="ghost" icon={<ArrowLeft size={17} />} onClick={() => setStep((value) => Math.max(1, value - 1))} disabled={step === 1}>{t("Vissza", "Back")}</Button>
-        {step < 4 && <Button icon={<ArrowRight size={17} />} onClick={() => { setStep((value) => Math.min(4, value + 1)); setValidation(null); }} disabled={!canNext}>{t("Tovább", "Next")}</Button>}
+        <Button variant="ghost" icon={<ArrowLeft size={17} />} onClick={() => setStep((value) => Math.max(1, remuxMode && value === 4 ? 2 : value - 1))} disabled={step === 1}>{t("Vissza", "Back")}</Button>
+        {step < 4 && <Button icon={<ArrowRight size={17} />} onClick={() => { setStep((value) => Math.min(4, remuxMode && value === 2 ? 4 : value + 1)); setValidation(null); }} disabled={!canNext}>{t("Tovább", "Next")}</Button>}
       </div>
     </div>
   );
@@ -1382,6 +1519,7 @@ function TrackTable({
   selections,
   onUpdate,
   analysis,
+  actionsFor,
 }: {
   title: string;
   icon: ReactNode;
@@ -1389,6 +1527,8 @@ function TrackTable({
   selections: TrackSelection[];
   onUpdate: (streamId: string, update: Partial<TrackSelection>) => void;
   analysis?: TrackAnalysis;
+  /** The actions offered per stream; a remux offers only untouched copies. */
+  actionsFor?: (stream: MediaStream) => TrackAction[];
 }) {
   return (
     <Card className="track-card">
@@ -1440,7 +1580,7 @@ function TrackTable({
                   />
                 </label>
                 <div className={stream.kind === "audio" ? "track-actions track-actions--audio" : "track-actions"} role="group" aria-label={t(`${stream.title || stream.id} kezelése`, `${stream.title || stream.id} handling`)}>
-                  {(stream.kind === "audio" ? AUDIO_TRACK_ACTIONS : ["copy", "omit"] as TrackAction[]).map((action) => (
+                  {(actionsFor ? actionsFor(stream) : stream.kind === "audio" ? AUDIO_TRACK_ACTIONS : ["copy", "omit"] as TrackAction[]).map((action) => (
                     <button type="button" key={action} className={selection.action === action ? "active" : ""} aria-pressed={selection.action === action} onClick={() => onUpdate(stream.id, { action: action as TrackAction })}>
                       {audioActionDetails(action).label}
                     </button>

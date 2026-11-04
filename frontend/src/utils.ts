@@ -160,6 +160,12 @@ function eventMessageLabel(message: string): string | undefined {
     "container and audio QC passed": ["A konténer- és hangellenőrzés sikeres", "Container and audio checks passed"],
     "I/P/B comparison complete": ["Az I/P/B összehasonlítás elkészült", "I/P/B comparison complete"],
     "encode, QC and comparison completed": ["A kódolás, az ellenőrzés és az összehasonlítás elkészült", "Encode, checks and comparison complete"],
+    "remux prepared: eac3to matched the playlist": ["Remux előkészítve: az eac3to és a scan sávjai egyeznek", "Remux prepared: eac3to matched the playlist"],
+    "eac3to demux completed": ["Az eac3to-bontás elkészült", "The eac3to demux is complete"],
+    "remux muxed": ["A remux MKV elkészült", "The remux MKV is ready"],
+    "remux verified untouched": ["Ellenőrizve: minden képkocka és minta a lemezével azonos", "Verified: every frame and sample equals the disc's"],
+    "remux screenshots taken": ["A képernyőképek elkészültek", "The screenshots are ready"],
+    "remux, QC and screenshots completed": ["A remux, az ellenőrzés és a képernyőképek elkészültek", "Remux, checks and screenshots complete"],
     "image upload failed; retry is safe": ["A képfeltöltés sikertelen; biztonságosan újrapróbálható", "Image upload failed; a retry is safe"],
     "track languages were chosen with warnings; check them in language-inference.json": ["A sávnyelveket a program figyelmeztetéssel választotta ki (például a lemez címkéje és a nyelvfelismerés eltér); a részletek a language-inference.json-ban", "Track languages were chosen with warnings (for example the disc label and the language detection differ); details in language-inference.json"],
     "some retained tracks have no known language and are tagged und": ["Néhány megtartott sáv nyelve ismeretlen, ezért „und” jelölést kap; a jelölés a kódolás után is javítható", "Some kept tracks have no known language and are tagged und; the tag can be fixed after the encode"],
@@ -199,6 +205,20 @@ export function isFastComparisonTimeoutReview(message: string | null): boolean {
   if (!message) return false;
   return message === "fast comparison exceeded its five-minute time budget"
     || message === "fast comparison exceeded its bounded command/time budget";
+}
+
+/** A remux job has no encode: its ENCODING state demuxes, its COMPARISON state takes screenshots. */
+export function isRemuxJob(job: { selection?: unknown }): boolean {
+  const selection = job.selection;
+  return typeof selection === "object" && selection !== null && (selection as { mode?: unknown }).mode === "remux";
+}
+
+export function jobStateLabel(job: { state: JobState; selection?: unknown }): string {
+  if (isRemuxJob(job)) {
+    if (job.state === "ENCODING") return t("Bontás eac3to-val", "Demuxing with eac3to");
+    if (job.state === "COMPARISON") return t("Képernyőképek", "Screenshots");
+  }
+  return stateLabel(job.state);
 }
 
 export function formatStatusMessage(message: string | null, fallback: string): string {

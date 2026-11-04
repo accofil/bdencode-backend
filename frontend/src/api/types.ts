@@ -78,6 +78,8 @@ export interface CapabilitiesResponse {
     dolby_vision_retention?: boolean;
     hdr_modes?: string[];
     comparison_images?: string;
+    /** Aither-style remuxes: eac3to under Wine on this host. */
+    remux?: { available: boolean; eac3to: boolean; wine: boolean; dolby_vision: boolean };
     [key: string]: unknown;
   };
 }
@@ -899,10 +901,13 @@ export interface TrackSelection {
 
 export interface SelectionPayload {
   schema_version: 2;
+  /** "remux": an untouched Aither-style remux; omitted means an encode. */
+  mode?: "encode" | "remux";
   playlist_id: string;
   angle: number;
   output_name: string;
-  video: {
+  /** Absent for a remux, which has no video settings. */
+  video?: {
     detail_level: DetailLevel;
     temporal_filter: string;
     crop: { left: number; top: number; right: number; bottom: number };
@@ -915,9 +920,11 @@ export interface SelectionPayload {
   image_upload_provider: ImageUploadProvider;
   /** Omitted by pre-2.10 pages: the worker then uploads every picture. */
   upload_image_set?: UploadImageSet;
-  dual_type_match: boolean;
+  dual_type_match?: boolean;
   /** Whose rules the job follows; omitted means none. */
   tracker_profile?: "aither" | "ncore";
+  /** A remux's MKV tags (the guide's IMDB/TMDB IDs). */
+  remux?: { imdb?: string; tmdb?: string };
 }
 
 export interface TrackerFinding {
@@ -929,7 +936,9 @@ export interface TrackerFinding {
 export interface SelectionValidation {
   valid: boolean;
   playlist_id: string;
-  encoder: "x264" | "x265";
+  encoder: "x264" | "x265" | "remux";
+  /** "remux" when the plan is a remux (no encoder settings). */
+  mode?: "encode" | "remux";
   settings: Record<string, unknown>;
   ffmpeg_video_args: string[];
   crop: { left: number; top: number; right: number; bottom: number };

@@ -63,6 +63,7 @@ vi.mock("../api/client", async (importOriginal) => {
       saveSelection: vi.fn(),
       noiseProfiles: vi.fn(),
       profileLibrary: vi.fn(),
+      capabilities: vi.fn(),
     },
   };
 });
@@ -194,7 +195,7 @@ describe("SelectionWizard", () => {
     await user.click(screen.getByRole("button", { name: "Tovább" }));
     await user.click(screen.getByRole("button", { name: "Terv ellenőrzése" }));
     await waitFor(() => expect(api.validateSelection).toHaveBeenCalled());
-    const sent = vi.mocked(api.validateSelection).mock.calls.at(-1)![1].video.settings;
+    const sent = vi.mocked(api.validateSelection).mock.calls.at(-1)![1].video!.settings;
     expect(sent).toMatchObject({ mbtree: false, ipratio: 1.3 });
   });
 
@@ -283,6 +284,136 @@ describe("SelectionWizard", () => {
     );
     await waitFor(() => expect(api.saveSelection).toHaveBeenCalledTimes(1));
     expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  function remuxCapabilities(available: boolean) {
+    vi.mocked(api.capabilities).mockResolvedValue({
+      constraints: { remux: { available, eac3to: available, wine: available, dolby_vision: available } },
+    } as never);
+  }
+
+  function makeRemuxScan(): DiscScanResult {
+    const scan = makeScanWithRetainedSubtitle();
+    const [video, audio, subtitle] = scan.playlists[0].streams;
+    scan.playlists[0].streams = [
+      video,
+      { ...audio, id: "audio:4352", codec: "truehd", codec_profile: null, channels: 6, channel_layout: "5.1", title: null },
+      { ...audio, id: "audio:4353", index: 2, pid: 4353, codec: "pcm_bluray", codec_profile: null, channels: 2, channel_layout: "stereo", default: false, title: null },
+      { ...subtitle, index: 3 },
+    ];
+    return scan;
+  }
+
+  it("makes a remux: no video step, only untouched actions, the Aither name and no encoder settings", async () => {
+    remuxCapabilities(true);
+    vi.mocked(api.validateSelection).mockResolvedValue({ ...validation, encoder: "remux", mode: "remux", settings: {}, ffmpeg_video_args: [] });
+    const user = userEvent.setup();
+    const job = makeJob({ state: "AWAITING_SELECTION", name: "Spiritual Love 1987", settings: {} });
+
+    renderApp(<SelectionWizard job={job} scan={makeRemuxScan()} onComplete={vi.fn()} />);
+
+    const remux = await screen.findByRole("button", { name: /Remux.*eac3to-napló/ });
+    await waitFor(() => expect(remux).toBeEnabled());
+    await user.click(remux);
+    expect(remux).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("heading", { name: "Remux beállításai" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Videó/ })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Tovább" }));
+    expect(screen.getByText("Remux: érintetlen sávok")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "AC-3" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "E-AC-3" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Copy" })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "FLAC" })).toHaveLength(1);
+    for (const button of screen.getAllByRole("button", { name: "Kihagyás" }).slice(0, 1)) expect(button).toBeInTheDocument();
+    // Keep the LPCM track too: it becomes FLAC, never a copy.
+    await user.click(screen.getByRole("button", { name: "FLAC" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "Magyar felirattípusa" }), "full");
+
+    await user.click(screen.getByRole("button", { name: "Tovább" }));
+    expect(screen.getByLabelText("IMDb ID")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Feltöltött képek köre" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "Szigorú I/P/B típusazonosság kötelező" })).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText("IMDb ID"), "tt0123456");
+    await user.clear(screen.getByRole("textbox", { name: "Release-tag" }));
+    await user.type(screen.getByRole("textbox", { name: "Release-tag" }), "TAG");
+    await user.click(screen.getByRole("button", { name: /Név javaslata/ }));
+    expect(screen.getByDisplayValue("Spiritual.Love.1987.1080p.BluRay.REMUX.AVC.TrueHD.5.1-TAG")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Terv ellenőrzése" }));
+    expect(await screen.findByText("A terv érvényes")).toBeInTheDocument();
+    const sent = vi.mocked(api.validateSelection).mock.calls[0][1];
+    expect(sent).toMatchObject({
+      mode: "remux",
+      angle: 1,
+      output_name: "Spiritual.Love.1987.1080p.BluRay.REMUX.AVC.TrueHD.5.1-TAG",
+      remux: { imdb: "tt0123456" },
+    });
+    expect(sent).not.toHaveProperty("video");
+    expect(sent.tracks.map((track) => [track.stream_id, track.action])).toEqual([
+      ["audio:4352", "copy"],
+      ["audio:4353", "flac"],
+      ["subtitle:4608", "copy"],
+    ]);
+    expect(screen.queryByText(/FFmpeg videóparaméterek/)).not.toBeInTheDocument();
+    expect(screen.getByText("eac3to 3.36 (Wine)")).toBeInTheDocument();
+  });
+
+  it("offers no remux for a host without eac3to or an MKV source, and names an UHD Dolby Vision remux", async () => {
+    remuxCapabilities(false);
+    const job = makeJob({ state: "AWAITING_SELECTION", settings: {} });
+    const { unmount } = renderApp(<SelectionWizard job={job} scan={makeScan()} onComplete={vi.fn()} />);
+
+    expect(await screen.findByText(/A remuxhoz eac3to és Wine kell/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Remux.*eac3to-napló/ })).toBeDisabled();
+    unmount();
+
+    remuxCapabilities(true);
+    const mkv = renderApp(<SelectionWizard job={job} scan={{ ...makeScan(), source_kind: "mkv" }} onComplete={vi.fn()} />);
+    expect(screen.queryByText("Mit készítsünk?")).not.toBeInTheDocument();
+    mkv.unmount();
+
+    const user = userEvent.setup();
+    const uhdScan = makeScan();
+    uhdScan.disc_kind = "uhd";
+    const [video, audio] = uhdScan.playlists[0].streams;
+    uhdScan.playlists[0].streams = [
+      { ...video, codec: "hevc", video: { ...video.video!, codec: "hevc", height: 2160, width: 3840, hdr10: true, dolby_vision: true } },
+      { ...audio, codec: "truehd", codec_profile: null, channels: 8, channel_layout: "7.1", object_audio: true },
+    ];
+    renderApp(<SelectionWizard job={makeJob({ state: "AWAITING_SELECTION", name: "Housemaid 2025", settings: {} })} scan={uhdScan} onComplete={vi.fn()} />);
+    const remux = await screen.findByRole("button", { name: /Remux.*eac3to-napló/ });
+    await waitFor(() => expect(remux).toBeEnabled());
+    await user.click(remux);
+    await user.click(screen.getByRole("button", { name: "Tovább" }));
+    await user.click(screen.getByRole("button", { name: "Tovább" }));
+    await user.clear(screen.getByRole("textbox", { name: "Release-tag" }));
+    await user.type(screen.getByRole("textbox", { name: "Release-tag" }), "TAG");
+    await user.click(screen.getByRole("button", { name: /Név javaslata/ }));
+    expect(screen.getByDisplayValue("Housemaid.2025.2160p.UHD.BluRay.REMUX.DV.HDR.HEVC.TrueHD.7.1.Atmos-TAG")).toBeInTheDocument();
+  });
+
+  it("reopens a saved remux selection as a remux", async () => {
+    remuxCapabilities(true);
+    const job = makeJob({
+      state: "NEEDS_REVIEW",
+      settings: {},
+      selection: {
+        schema_version: 2,
+        mode: "remux",
+        playlist_id: "00001",
+        angle: 1,
+        output_name: "Mintafilm.2020.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-TAG",
+        tracks: [],
+        upload_images: false,
+        remux: { tmdb: "movie/42" },
+      },
+    });
+
+    renderApp(<SelectionWizard job={job} scan={makeScan()} onComplete={vi.fn()} />);
+
+    expect(screen.getByRole("heading", { name: "Remux beállításai" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Remux.*eac3to-napló/ })).toHaveAttribute("aria-pressed", "true");
   });
 
   it("shows the steps, track actions and buttons in English", async () => {
@@ -730,7 +861,7 @@ describe("SelectionWizard", () => {
     await user.click(screen.getByRole("button", { name: "Terv ellenőrzése" }));
 
     await waitFor(() => expect(api.validateSelection).toHaveBeenCalledTimes(1));
-    const video = vi.mocked(api.validateSelection).mock.calls[0][1].video;
+    const video = vi.mocked(api.validateSelection).mock.calls[0][1].video!;
     expect(video.auto_crf).toEqual({ enabled: true, target_vmaf: 94.5 });
     expect(video.settings).toEqual(expect.objectContaining({ noise_reduction: 120, tune: "film" }));
     expect(video).not.toHaveProperty("dynamic_hdr");
@@ -754,7 +885,7 @@ describe("SelectionWizard", () => {
     await user.click(screen.getByRole("button", { name: "Terv ellenőrzése" }));
 
     await waitFor(() => expect(api.validateSelection).toHaveBeenCalledTimes(1));
-    const video = vi.mocked(api.validateSelection).mock.calls[0][1].video;
+    const video = vi.mocked(api.validateSelection).mock.calls[0][1].video!;
     expect(video.auto_crf).toEqual({ enabled: true, target_vmaf: 93 });
     expect(video.settings).toEqual(expect.objectContaining({ crf: 16.5 }));
   });

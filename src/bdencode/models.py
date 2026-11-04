@@ -322,6 +322,8 @@ class SelectionValidationResponse(StrictModel):
     tracker_profile: str = "none"
     # Deviations from the chosen tracker's rules, in the interface language: code, message, severity.
     tracker_findings: list[dict[str, str]] = Field(default_factory=list)
+    # "encode" or "remux"; a remux has no encoder settings (encoder "remux").
+    mode: str = "encode"
 
 
 class JobProgressRequest(StrictModel):

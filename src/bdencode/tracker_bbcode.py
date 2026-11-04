@@ -300,6 +300,53 @@ def ncore_bbcode(
     return lines
 
 
+def remux_bbcode(
+    output_name: str,
+    screenshots: Sequence[Mapping[str, Any]],
+    uploaded: Mapping[str, Mapping[str, Any]],
+    *,
+    provider: str | None,
+    profile: str,
+    eac3to_log: str,
+    notes: Sequence[str] = (),
+    width: int = GALLERY_WIDTH,
+) -> list[str]:
+    """A remux's description: screenshots and the eac3to log.
+
+    Aither: 3 or more screenshots via BBCode, and a personal remux "must
+    contain eac3to logs for all source discs".  nCore takes its pictures as
+    ``[imgw]``.  ``notes`` are eac3to's warnings, shown above the log.
+    """
+
+    lines = [f"[b]{output_name} — remux[/b]"]
+    if uploaded and provider:
+        lines.append(f"[i]Image host: {provider}[/i]")
+    pictures = [
+        uploaded[item["png"]]
+        for item in screenshots
+        if isinstance(item.get("png"), str) and item["png"] in uploaded
+    ]
+    if pictures:
+        if profile == "ncore":
+            lines.extend(("", "[b]nCore — képek[/b]"))
+            lines.extend(
+                f"[imgw]{item['image_url']}[/imgw]" for item in pictures if item.get("image_url")
+            )
+        else:
+            lines.extend(("", "[center][b]Screenshots[/b]"))
+            lines.extend(_thumbnail(item, width) for item in pictures)
+            lines.append("[/center]")
+    else:
+        lines.append("[i]Image upload was disabled; see the lossless PNG sidecars.[/i]")
+    if notes:
+        lines.extend(("", "[b]eac3to notes[/b]", *(f"• {note}" for note in notes)))
+    if eac3to_log.strip():
+        lines.extend(
+            ("", "[spoiler=eac3to log][code]", eac3to_log.rstrip("\n"), "[/code][/spoiler]")
+        )
+    return lines
+
+
 def tracker_bbcode(
     profile: str,
     pairs: Sequence[Mapping[str, Any]],
@@ -328,6 +375,7 @@ __all__ = [
     "encoder_summary",
     "ncore_bbcode",
     "published_pairs",
+    "remux_bbcode",
     "screenshot_pair_numbers",
     "tracker_bbcode",
 ]

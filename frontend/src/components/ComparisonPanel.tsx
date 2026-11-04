@@ -62,7 +62,103 @@ export function nearbyWeakWindow(pair: VideoComparisonPair, weak: MeasuredWindow
 /** The separate Aither [comparison=Source, Encode] block (3.13.0). */
 const AITHER_COMPARISON_NAME = "comparison-aither.bbcode";
 
+interface RemuxScreenshotManifest {
+  images: Array<{ png: string; frame: number; timestamp: string }>;
+}
+
+interface RemuxQcReport {
+  status: string;
+  checks: Array<{ check: string; status: string; message: string }>;
+}
+
+/** A remux has no comparison: its BBCode, screenshots, QC verdicts and eac3to log. */
+function RemuxEvidence({ artifacts, manifestArtifact }: { artifacts: Artifact[]; manifestArtifact: Artifact }) {
+  const bbcodeArtifact = artifacts.find((artifact) => artifact.kind === "BBCODE");
+  const qcArtifact = artifacts.find((artifact) => artifact.name === "remux-qc.json");
+  const logArtifact = artifacts.find((artifact) => artifact.name === "eac3to.log");
+  const imagesByName = new Map(
+    artifacts.filter((artifact) => artifact.mime_type === "image/png").map((artifact) => [artifact.name, artifact]),
+  );
+  const manifest = useQuery({
+    queryKey: ["artifact-json", manifestArtifact.id],
+    queryFn: () => fetchArtifactJson<RemuxScreenshotManifest>(manifestArtifact.id),
+  });
+  const qc = useQuery({
+    queryKey: ["artifact-json", qcArtifact?.id],
+    queryFn: () => fetchArtifactJson<RemuxQcReport>(qcArtifact!.id),
+    enabled: Boolean(qcArtifact),
+  });
+  const log = useQuery({
+    queryKey: ["artifact-text", logArtifact?.id],
+    queryFn: () => fetchArtifactText(logArtifact!.id),
+    enabled: Boolean(logArtifact),
+  });
+  const bbcode = useQuery({
+    queryKey: ["artifact-text", bbcodeArtifact?.id],
+    queryFn: () => fetchArtifactText(bbcodeArtifact!.id),
+    enabled: Boolean(bbcodeArtifact),
+  });
+  const [copied, setCopied] = useState(false);
+
+  async function copyBbcode() {
+    if (!bbcode.data) return;
+    await copyText(bbcode.data);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  }
+
+  return (
+    <div className="comparison-panel">
+      {bbcodeArtifact && (
+        <Card className="bbcode-card">
+          <div><span className="eyebrow">{t("Megosztás", "Sharing")}</span><h3>{t("BBCode csomag", "BBCode package")}</h3><p>{t(
+            "A leíráshoz: a képernyőképek 400 px szélesen, kattintásra teljes méretben, és az Aither által saját remuxhoz kért eac3to-napló.",
+            "For the description: the screenshots 400 px wide, full size on click, and the eac3to log Aither asks for with a personal remux.",
+          )}</p></div>
+          <div className="bbcode-card__actions">
+            <Button variant="secondary" icon={copied ? <Check size={17} /> : <Clipboard size={17} />} onClick={() => void copyBbcode()} disabled={!bbcode.data}>{copied ? t("Másolva", "Copied") : t("BBCode másolása", "Copy BBCode")}</Button>
+          </div>
+        </Card>
+      )}
+      {qc.data && (
+        <Notice tone={qc.data.status === "passed" ? "success" : "danger"} title={qc.data.status === "passed" ? t("A remux érintetlen", "The remux is untouched") : t("A remux ellenőrzése hibát talált", "The remux check found a problem")}>
+          <ul>{qc.data.checks.map((item) => <li key={item.check}>{item.status === "passed" ? "✓ " : "✗ "}{item.message}</li>)}</ul>
+        </Notice>
+      )}
+      <section className="comparison-section">
+        <div className="section-heading">
+          <div><span className="section-heading__icon"><Images size={19} /></span><div><h2>{t("Képernyőképek", "Screenshots")}</h2><p>{t("A kész remuxból, veszteségmentes PNG", "From the finished remux, lossless PNG")}</p></div></div>
+        </div>
+        {manifest.isLoading ? <LoadingPanel label={t("Képek betöltése…", "Loading pictures…")} /> : (
+          <div className="remux-screenshots">
+            {manifest.data?.images.map((item) => {
+              const image = imagesByName.get(item.png);
+              return image ? (
+                <a key={item.png} href={artifactContentUrl(image.id)} target="_blank" rel="noreferrer">
+                  <img src={artifactContentUrl(image.id)} alt={t(`Képernyőkép ${item.timestamp}`, `Screenshot ${item.timestamp}`)} loading="lazy" />
+                  <small>{item.timestamp}</small>
+                </a>
+              ) : null;
+            })}
+          </div>
+        )}
+      </section>
+      {log.data && (
+        <details className="command-preview"><summary><Clipboard size={15} /> {t("eac3to-napló", "eac3to log")}</summary><code>{log.data}</code></details>
+      )}
+    </div>
+  );
+}
+
 export function ComparisonPanel({ artifacts }: { artifacts: Artifact[] }) {
+  const remuxManifestArtifact = artifacts.find((artifact) => artifact.name === "remux-screenshots.json");
+  if (remuxManifestArtifact) {
+    return <RemuxEvidence artifacts={artifacts} manifestArtifact={remuxManifestArtifact} />;
+  }
+  return <EncodeComparison artifacts={artifacts} />;
+}
+
+function EncodeComparison({ artifacts }: { artifacts: Artifact[] }) {
   const videoManifestArtifact = artifacts.find((artifact) => artifact.kind === "VIDEO_COMPARISON" && artifact.mime_type === "application/json");
   const audioManifestArtifact = artifacts.find((artifact) => artifact.kind === "AUDIO_COMPARISON" && artifact.mime_type === "application/json");
   const bbcodeArtifact = artifacts.find((artifact) => artifact.kind === "BBCODE" && artifact.name !== AITHER_COMPARISON_NAME);

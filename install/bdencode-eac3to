@@ -1,0 +1,41 @@
+#!/bin/sh
+# Run eac3to (Aither's remux demuxer) under Wine for one BDEncode job.
+#
+#   BDENCODE_WINEPREFIX=<job>/work/wine bdencode-eac3to <disc root> [eac3to arguments...]
+#
+# The disc root (the folder holding BDMV) becomes drive S: and the current
+# directory drive W:, and eac3to runs as C:\eac3to\eac3to.exe, so its log
+# names no server path or user name.  Each job has its own Wine prefix: the
+# drive letters of two jobs can never cross.
+set -eu
+
+if [ "$#" -lt 1 ]; then
+    echo "usage: bdencode-eac3to <disc root> [eac3to arguments...]" >&2
+    exit 64
+fi
+if [ "$1" = "--version" ]; then
+    echo "bdencode-eac3to (eac3to 3.36 under Wine)"
+    exit 0
+fi
+source_root=$1
+shift
+prefix=${BDENCODE_WINEPREFIX:?BDENCODE_WINEPREFIX must name the Wine prefix of the job}
+here=$(dirname "$(readlink -f "$0")")
+program="$here/../lib/eac3to"
+
+command -v wine >/dev/null 2>&1 || { echo "wine is not installed" >&2; exit 69; }
+[ -f "$program/eac3to.exe" ] || { echo "eac3to is not installed: $program" >&2; exit 69; }
+[ -d "$source_root/BDMV" ] || { echo "not a disc root (no BDMV): $source_root" >&2; exit 66; }
+
+export WINEPREFIX="$prefix" WINEARCH=win32 WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml="
+if [ ! -f "$prefix/system.reg" ]; then
+    mkdir -p "$prefix"
+    wineboot --init >/dev/null 2>&1
+fi
+mkdir -p "$prefix/drive_c" "$prefix/dosdevices"
+ln -sfn "$program" "$prefix/drive_c/eac3to"
+ln -sfn "$(readlink -f "$source_root")" "$prefix/dosdevices/s:"
+ln -sfn "$(pwd -P)" "$prefix/dosdevices/w:"
+# Wine maps the whole file system to Z: by default; eac3to needs only S: and W:.
+rm -f "$prefix/dosdevices/z:"
+exec wine 'C:\eac3to\eac3to.exe' "$@"

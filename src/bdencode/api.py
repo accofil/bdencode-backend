@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import __version__
 from .audio import AUDIO_ACTIONS, audio_presets_payload
-from .capabilities import capability_snapshot, dynamic_hdr_support
+from .capabilities import capability_snapshot, dynamic_hdr_support, remux_support
 from .crf_search import AutoCrfConfig
 from .i18n import parse_accept_language, reset_language, set_language, t
 from .ai_recommendation import (
@@ -590,6 +590,8 @@ def create_app(
                 "ai_recommendation": True,
                 "ai_recommendation_requires_confirmation": True,
                 "audio_transcode_presets": audio_presets_payload(),
+                # Aither-style remuxes: eac3to under Wine on this host.
+                "remux": remux_support(),
             },
         )
 
@@ -1442,6 +1444,41 @@ def create_app(
         except (KeyError, TypeError, ValueError) as exc:
             raise ConfigurationError(f"stored scan result is invalid: {exc}") from exc
 
+        if selection.is_remux:
+            support = remux_support()
+            if not support["available"]:
+                raise ConfigurationError(
+                    t(
+                        "Ezen a gépen nem készíthető remux: hiányzik az eac3to vagy a Wine "
+                        "(lásd a Rendszer oldalt).",
+                        "This host cannot make remuxes: eac3to or Wine is missing "
+                        "(see the System page).",
+                    ),
+                    code="remux_unavailable",
+                    context=dict(support),
+                )
+            return SelectionValidationResponse(
+                valid=True,
+                mode="remux",
+                playlist_id=selection.playlist_id,
+                encoder="remux",
+                settings={},
+                ffmpeg_video_args=[],
+                crop=asdict(selection.crop),
+                temporal_filter=selection.temporal_filter.value,
+                tracker_profile=selection.tracker_profile.value,
+                tracker_findings=[
+                    item.to_dict()
+                    for item in tracker_findings(
+                        selection.tracker_profile,
+                        encoder="remux",
+                        playlist=scan.playlist(selection.playlist_id),
+                        tracks=selection.tracks,
+                        remux=True,
+                    )
+                ],
+                advisory_warnings=[],
+            )
         dynamic_plan = resolve_selection_dynamic_hdr(scan, selection)
         work_root = (
             settings.data_root if settings is not None else Path.cwd()

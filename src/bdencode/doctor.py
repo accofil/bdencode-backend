@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .ai_settings import DEFAULT_ANTHROPIC_MODEL
-from .capabilities import capability_snapshot, dynamic_hdr_support
+from .capabilities import capability_snapshot, dynamic_hdr_support, remux_support
 from .config import ConfigurationError, Settings
 from .db import Database
 from .qc.video import COMPARISON_FONT_FILE
@@ -536,6 +536,8 @@ def build_report(
         # Optional: retention of HDR10+ / Dolby Vision needs extra tools and an
         # x265 build that accepts their parameters.  Never affects ``status``.
         "dynamic_hdr": dynamic_hdr_support(),
+        # Optional: Aither-style remuxes need eac3to under Wine.
+        "remux": remux_support(),
         "vapoursynth": vs,
         "image_upload_credentials": image_upload_credentials,
         "release_credentials": release_credentials,
