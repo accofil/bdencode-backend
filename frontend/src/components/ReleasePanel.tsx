@@ -22,9 +22,10 @@ import type {
 } from "../api/types";
 import { t } from "../i18n";
 import { formatBytes, humanize } from "../utils";
+import { ReleaseUploadCard } from "./ReleaseUploadCard";
 import { Badge, Button, Card, EmptyState, LoadingPanel, Modal, Notice } from "./ui";
 
-// Since 3.0 BDEncode creates no torrent, seeds nothing and uploads nothing.
+// The torrent, the upload and the seed have their own card since 4.0.
 type ReleaseAction = "validate" | "build" | "dupe-check";
 type PreparationAction = Exclude<ReleaseAction, "validate">;
 
@@ -58,6 +59,7 @@ function releaseStateLabel(state: string): string | undefined {
   switch (state) {
     case "NOT_PREPARED": return t("Nincs előkészítve", "Not prepared");
     case "PREPARING": return t("Előkészítés folyamatban", "Preparing");
+    case "BUILDING_TORRENT": return t("Torrent készül", "Making the torrent");
     case "NEEDS_REVIEW": return t("Ellenőrzést kér", "Needs review");
     case "READY": return t("Csomag elkészült", "Kit ready");
     case "SEEDING_CHECK": return t("Dupe check folyamatban", "Dupe check running");
@@ -110,7 +112,7 @@ function releaseTone(state: string): "neutral" | "info" | "success" | "warning" 
   if (["READY", "READY_TO_PUBLISH", "PUBLISHED"].includes(state)) return "success";
   if (["NEEDS_REVIEW", "UNKNOWN"].includes(state)) return "warning";
   if (state === "FAILED") return "danger";
-  if (["PREPARING", "SEEDING_CHECK", "SEEDING", "PUBLISHING"].includes(state)) return "info";
+  if (["PREPARING", "BUILDING_TORRENT", "SEEDING_CHECK", "SEEDING", "PUBLISHING"].includes(state)) return "info";
   return "neutral";
 }
 
@@ -410,9 +412,11 @@ export function ReleasePanel({ job, outputArtifact }: { job: Job; outputArtifact
   const hasVersion = typeof current?.version === "number";
   const busy = create.isPending || validate.isPending || action.isPending || remove.isPending;
   const canBuild = ["NOT_PREPARED", "NEEDS_REVIEW", "FAILED"].includes(state) && current?.kit_ready !== true;
-  const activeState = ["PREPARING", "SEEDING_CHECK", "SEEDING", "PUBLISHING"].includes(state);
+  const activeState = ["PREPARING", "BUILDING_TORRENT", "SEEDING_CHECK", "SEEDING", "PUBLISHING"].includes(state);
   const preservedAuditState = ["UNKNOWN", "PUBLISHED"].includes(state);
   const supportsDupeCheck = profile?.supports_dupe_check === true;
+  // The Aither and nCore profiles run the dupe check as a step of their upload.
+  const supportsUpload = profile?.supports_upload === true;
   const actionRequiresReview = actionNeedsReview(action.data);
 
   return (
@@ -479,7 +483,7 @@ export function ReleasePanel({ job, outputArtifact }: { job: Job; outputArtifact
           </Card>
           <Card className="release-payload-card">
             <span className="eyebrow">Payload</span><h2>{t("Egy ellenőrzött MKV", "One verified MKV")}</h2>
-            <p>{t("A csomag ezt az egy MKV-t írja le; a comparison, az analysis és a tulajdonosi rekord nem része. Torrentet a BDEncode 3.0-tól nem készít.", "The kit describes this one MKV; the comparison, the analysis and the ownership record are not part of it. Since 3.0, BDEncode creates no torrent.")}</p>
+            <p>{t("A csomag ezt az egy MKV-t írja le; a comparison, az analysis és a tulajdonosi rekord nem része. A torrent a Feltöltés lépésnél készül.", "The kit describes this one MKV; the comparison, the analysis and the owner record are not part of it. The torrent is made at the upload step.")}</p>
             <div className="release-payload-path"><FileCheck2 size={18} /><code>{String(manifestFact(manifest, "payload_path") ?? `${releaseName}/${releaseName}.mkv`)}</code></div>
           </Card>
         </div>
@@ -493,15 +497,18 @@ export function ReleasePanel({ job, outputArtifact }: { job: Job; outputArtifact
           </div>
 
           <Card className="release-actions-card" aria-busy={busy}>
-            <div><span className="eyebrow">{t("Műveletek", "Actions")}</span><h2>{t("Validálás, csomag és dupe check", "Validation, kit and dupe check")}</h2><p>{t("Torrentet és trackerfeltöltést a BDEncode 3.0-tól nem végez: a kész csomag alapján kézzel töltesz fel.", "Since 3.0, BDEncode makes no torrent and no tracker upload: you upload by hand from the finished kit.")}</p></div>
+            <div><span className="eyebrow">{t("Műveletek", "Actions")}</span><h2>{supportsUpload ? t("Validálás és csomag", "Validation and kit") : t("Validálás, csomag és dupe check", "Validation, kit and dupe check")}</h2><p>{t("A kiadás nyilvános szövegei és képei. A torrent és a feltöltés a következő kártyán van.", "The release's public texts and pictures. The torrent and the upload are on the next card.")}</p></div>
             <div className="release-actions">
               <Button variant="secondary" icon={<ShieldCheck size={16} />} loading={validate.isPending} disabled={busy || !hasVersion} onClick={() => run("validate")}>{t("Validálás", "Validate")}</Button>
               <Button icon={<PackageCheck size={16} />} loading={action.isPending && action.variables?.name === "build"} disabled={busy || !hasVersion || !canBuild} onClick={() => run("build")}>{t("Csomag építése", "Build kit")}</Button>
+              {!supportsUpload && (
               <Button title={!supportsDupeCheck ? t("A trackerprofil nem támogat dupe checket.", "The tracker profile does not support a dupe check.") : undefined} variant="secondary" icon={<SearchCheck size={16} />} loading={action.isPending && action.variables?.name === "dupe-check"} disabled={busy || !hasVersion || state !== "READY" || !supportsDupeCheck} onClick={() => run("dupe-check")}>Dupe check</Button>
+              )}
               {typeof description === "string" && <Button variant="ghost" icon={<Clipboard size={16} />} disabled={busy} onClick={() => void copyValue(description)}>{t("Leírás másolása", "Copy description")}</Button>}
               <Button variant="danger" icon={<Trash2 size={16} />} disabled={busy || !hasVersion || activeState || preservedAuditState} onClick={() => setDeleteTarget(approvalSnapshot(current, preparations))}>{t("Terv törlése", "Delete plan")}</Button>
             </div>
           </Card>
+          {supportsUpload && current.kit_ready === true && <ReleaseUploadCard preparation={current} />}
           {validate.isError && <Notice tone="danger" title={t("A validáció sikertelen", "Validation failed")}>{errorText(validate.error)}</Notice>}
           {action.isError && <Notice tone="danger" title={t("A release-művelet sikertelen", "The release action failed")}>{errorText(action.error)}</Notice>}
           {current?.error && <Notice tone="danger" title={t("Tartós release-hiba", "Persistent release error")}>{current.error}</Notice>}

@@ -118,6 +118,18 @@ A `profile_library` fájlalapú (`<state>/profile-library/<id>.json`, atomi ír�
 
 A `previews` szolgáltatás `ffprobe`-bal olvassa az MKV-t, `ffmpeg`-gel készít H.264/AAC kivonatot (`-ss` a bemenet előtt a gyors keresésért, HDR-nél zscale/tonemap lánc), shell nélkül, kemény időkorláttal és globális zárral (egyszerre egy). A gyorsítótár-kulcs az MKV nevéből, méretéből, módosítási idejéből és a kérésből képződik; a jobonkénti (12 db) és összesített (2 GiB) korlát a legrégebbit törli. A kivonatok a `cache` gyökér alatt vannak, sosem a completed fában.
 
+## Külső források
+
+A `bdencode.external` csomag más forrás hangját és SRT-feliratát illeszti a cím képéhez. Felhasználói leírás: [EXTERNAL_SOURCES.md](EXTERNAL_SOURCES.md).
+
+- `frame_map`: 64×36-os szürke lenyomatokból képkockánkénti eltolást számol (vágásritmus, geometria, legjobb út, egyetlen vágásként megoldott törések). A hangot szándékosan nem használja időreferenciának.
+- `render`: racionális arányú nyújtás, majd a darabok lerakása minta szerint. Az AC-3 kódoló 256 mintás késését az elejéről levágja, így nem kell konténer-késleltetés.
+- `subtitles`, `source`, `spec`, `verify`: SRT-átidőzítés, a forrás megnyitása (fájl, DVD-mappa, képfájl), a selection szerződése, és a kész fájl ablakonkénti mérése.
+
+A nehéz lépések `python -m bdencode.external` alfolyamatként futnak. A térkép SHA-256-ja a jóváhagyás tárgya; a selection-kivonatok (`_selection_hash`, `_preparation_inputs`) kihagyják az `external_sources` mezőt, ezért a jóváhagyás nem futtatja újra a cím saját szakaszait.
+
+A cím saját mux és QC szakasza változatlan: a külső sávok a QC végén, egy második mkvmerge-lépésben kerülnek be (`_merge_external_tracks`). Az első mux `work/output.base.mkv` néven megmarad, és újrafuttatáskor a `_restore_base_mux` visszaállítja, így a korábbi ellenőrzések érvényesek maradnak. A `mode: "fit"` ugyanezt használja kódolás nélkül; a saját sávok kiválasztását a stream-hash bizonyítja.
+
 ## Tesztelés és CI
 
 A telepítő argumentumútjait a `tests/test_windows_install_powershell.py` a valódi `windows.ps1`-ből AST-tel kivágott kóddal futtatja (paraméterblokk, 8796-os port védelme, továbbító függvények, emelt jogú újraindítás, RunOnce-regisztráció), csak a rendszert érintő parancsokat cserélve felvevőre. Minden telepített shellben lefut (PowerShell 7 és Windowson a Windows PowerShell 5.1), és a második lépésben a shell saját parancssor-értelmezőjével köti vissza a továbbított sort. A CI ugyanezt Linuxon (Python 3.11–3.13) és Windowson futtatja.

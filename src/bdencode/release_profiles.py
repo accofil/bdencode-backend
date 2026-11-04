@@ -9,8 +9,8 @@ optional; when an older file still has them they are validated as before (so
 it keeps loading) but nothing acts on them any more.
 
 Since 3.0.1 the two trackers BDEncode encodes for, Aither and nCore, have
-built-in profiles (screenshot counts, no dupe check).  A file entry with the
-same ``profile_id`` replaces the built-in one, for example to add a dupe check.
+built-in profiles.  A file entry with the same ``profile_id`` replaces the
+built-in one.  Since 4.0 their duplicate check and upload live in ``trackers``.
 """
 
 from __future__ import annotations
@@ -37,6 +37,8 @@ _HOST = re.compile(
     r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$"
 )
 RELEASE_PROFILE_VALIDATION_ERROR = "release_profile_configuration_invalid"
+# Since 4.0 Accofil BDEncode uploads to these two trackers.
+UPLOAD_PROFILES = frozenset({"aither", "ncore"})
 
 
 def _normalized_host(value: str) -> str:
@@ -176,9 +178,9 @@ class ConfiguredReleaseProfile(_StrictModel):
             "display_name": tracker.display_name,
             "screenshot_minimum": tracker.screenshot_minimum,
             "screenshot_maximum": tracker.screenshot_maximum,
-            "supports_dupe_check": bool(
-                self.network and self.network.dupe_check_endpoint
-            ),
+            "supports_dupe_check": tracker.profile_id in UPLOAD_PROFILES
+            or bool(self.network and self.network.dupe_check_endpoint),
+            "supports_upload": tracker.profile_id in UPLOAD_PROFILES,
             "profile_digest": self.canonical_digest(),
         }
 

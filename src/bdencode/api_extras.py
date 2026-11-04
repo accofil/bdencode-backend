@@ -20,6 +20,8 @@ from .config import ConfigurationError, Settings
 from .cpu_policy import CpuPolicy, policy_view, save_policy
 from .db import Database, NotFoundError, PersistenceError, StateConflictError
 from .db_backup import BackupError, list_backups
+from .external import source as external_source
+from .external import spec as external_spec
 from .job_statistics import compute_job_statistics, completed_statistics
 from .models import ArtifactKind, JobState
 from .previews import PreviewError, PreviewRequest, PreviewService
@@ -57,6 +59,30 @@ class PreviewBody(BaseModel):
     start_seconds: int = Field(default=0, ge=0, le=86_400)
     duration_seconds: int = Field(default=20, ge=5, le=30)
     height: Literal[360, 480, 720] = 720
+
+
+class ExternalApprovalBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    map_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ExternalPitchBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    stream: str = Field(min_length=1, max_length=16)
+    pitch: Literal["restore", "keep"]
+
+
+class ExternalExcerptBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    track: int = Field(default=0, ge=0, le=64)
+    subtitle: int | None = Field(default=None, ge=0, le=64)
+    audio: Literal["fitted", "original", "both"] = "fitted"
+    start_seconds: int = Field(default=0, ge=0, le=86_400)
+    duration_seconds: int = Field(default=20, ge=5, le=30)
+    height: Literal[360, 480, 720] = 480
 
 
 def register_extra_routes(
@@ -293,6 +319,148 @@ def register_extra_routes(
         db.get_job(job_id)
         preview_service().delete(job_id, name)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    # -- external sources -------------------------------------------------------------------------------------
+    @application.get(f"{prefix}/external-sources/probe")
+    def probe_external_source(path: str) -> dict[str, Any]:
+        if settings is None:
+            raise ConfigurationError("source browsing is not configured")
+        resolved = settings.authorize_source(path)
+        try:
+            info = external_source.probe_source(resolved)
+        except (external_source.ExternalSourceError, OSError, ValueError) as exc:
+            raise ConfigurationError(f"external source cannot be read: {exc}") from exc
+        return {**info.to_dict(), "support": external_source.external_support()}
+
+    def external_directory(job_id: str, source_id: str) -> Path:
+        if settings is None:
+            raise ConfigurationError("job storage is not configured")
+        if not external_spec.valid_id(source_id):
+            raise NotFoundError("no such external source")
+        return settings.job_root(job_id) / "work" / "external" / source_id
+
+    def external_selection(job_id: str, source_id: str) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+        job = db.get_job(job_id)
+        if job.state is not JobState.NEEDS_REVIEW:
+            raise StateConflictError(
+                "an external source is reviewed only while the job awaits review",
+                current=job.state,
+            )
+        selection = json.loads(json.dumps(job.selection))
+        sources = selection.get("external_sources") if isinstance(selection, dict) else None
+        entry = next(
+            (item for item in sources or [] if isinstance(item, dict) and item.get("id") == source_id),
+            None,
+        )
+        if entry is None:
+            raise NotFoundError("no such external source")
+        return job, selection, entry
+
+    def read_review(job_id: str, source_id: str) -> dict[str, Any]:
+        path = external_directory(job_id, source_id) / "review.json"
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise NotFoundError("the external source has not been fitted yet") from exc
+
+    @application.get(f"{prefix}/jobs/{{job_id}}/external-review")
+    def external_review(job_id: str) -> dict[str, Any]:
+        job = db.get_job(job_id)
+        selection = job.selection if isinstance(job.selection, dict) else {}
+        items = []
+        for entry in selection.get("external_sources") or []:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                review = read_review(job_id, str(entry.get("id")))
+            except NotFoundError:
+                continue
+            items.append({"selection": entry, "review": review})
+        return {"items": items}
+
+    @application.post(f"{prefix}/jobs/{{job_id}}/external-review/{{source_id}}/approve")
+    def approve_external_source(job_id: str, source_id: str, body: ExternalApprovalBody) -> Any:
+        job, selection, entry = external_selection(job_id, source_id)
+        if read_review(job_id, source_id).get("map_sha256") != body.map_sha256:
+            raise StateConflictError(
+                "the fit changed since it was shown; check it again", current=job.state
+            )
+        entry["approved_map_sha256"] = body.map_sha256
+        return db.set_selection(
+            job_id, selection, message="external source fit approved by operator", expected_version=job.version
+        )
+
+    @application.post(f"{prefix}/jobs/{{job_id}}/external-review/{{source_id}}/pitch")
+    def set_external_pitch(job_id: str, source_id: str, body: ExternalPitchBody) -> Any:
+        job, selection, entry = external_selection(job_id, source_id)
+        track = next(
+            (item for item in entry.get("tracks") or [] if item.get("stream") == body.stream), None
+        )
+        if track is None:
+            raise NotFoundError("no such external track")
+        track["pitch"] = body.pitch
+        entry["approved_map_sha256"] = None
+        return db.set_selection(
+            job_id, selection, message="external track pitch changed by operator", expected_version=job.version
+        )
+
+    @application.post(f"{prefix}/jobs/{{job_id}}/external-review/{{source_id}}/discard")
+    def discard_external_source(job_id: str, source_id: str) -> Any:
+        job, selection, _entry = external_selection(job_id, source_id)
+        remaining = [
+            item for item in selection["external_sources"] if item.get("id") != source_id
+        ]
+        if remaining:
+            selection["external_sources"] = remaining
+        else:
+            del selection["external_sources"]
+        return db.set_selection(
+            job_id, selection, message="external source left out by operator", expected_version=job.version
+        )
+
+    @application.post(
+        f"{prefix}/jobs/{{job_id}}/external-review/{{source_id}}/excerpts",
+        status_code=status.HTTP_201_CREATED,
+    )
+    def create_external_excerpt(
+        job_id: str, source_id: str, body: ExternalExcerptBody, response: Response
+    ) -> dict[str, Any]:
+        db.get_job(job_id)
+        directory = external_directory(job_id, source_id)
+        review = read_review(job_id, source_id)
+        tracks = review.get("tracks") or []
+        subtitles = review.get("subtitles") or []
+        if not tracks:
+            raise NotFoundError("the external source holds no fitted track")
+        if body.track >= len(tracks) or (body.subtitle is not None and body.subtitle >= len(subtitles)):
+            raise NotFoundError("no such external track")
+        report = tracks[body.track]
+        record, created = preview_service().ensure_fit(
+            job_id,
+            settings.job_root(job_id) / "work" / "reference.mkv",
+            directory / report["file"],
+            PreviewRequest(body.start_seconds, body.duration_seconds, body.height),
+            audio=body.audio,
+            video_start_seconds=external_video_start(job_id),
+            fitted_shift_seconds=float(report.get("sync_ms") or 0) / 1000,
+            subtitle=(
+                directory / subtitles[body.subtitle]["file"] if body.subtitle is not None else None
+            ),
+        )
+        if not created:
+            response.status_code = status.HTTP_200_OK
+        return {**record, "created": created}
+
+    def external_video_start(job_id: str) -> float:
+        import subprocess
+
+        completed = subprocess.run(
+            external_source.first_time_command(
+                ["-i", str(settings.job_root(job_id) / "work" / "reference.mkv")], "v:0"
+            ),
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        return external_source.parse_first_time(completed.stdout) or 0.0
 
     # -- database status and backups ---------------------------------------------------------------------------
     @application.get(f"{prefix}/system/database")

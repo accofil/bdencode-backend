@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  FileAudio,
   ArrowLeft,
   ArrowRight,
   Check,
@@ -29,8 +30,10 @@ import { Badge, Button, Card, LoadingPanel, Notice, PageHeader } from "../compon
 import { t, useLanguage } from "../i18n";
 import { imageUploadProviderLabels, UPLOAD_IMAGE_SET_LABELS, uploadImageSet, useImageHostOrder } from "../uploads";
 import { basename, contentLabel } from "../utils";
+import type { JobPurpose } from "../utils";
 
 interface Draft {
+  purpose: JobPurpose | null;
   sourcePath: string;
   sourceName: string;
   name: string;
@@ -43,6 +46,7 @@ interface Draft {
 }
 
 const defaultDraft: Draft = {
+  purpose: null,
   sourcePath: "",
   sourceName: "",
   name: "",
@@ -53,6 +57,29 @@ const defaultDraft: Draft = {
   imageUploadProvider: "auto",
   uploadImageSet: "all",
 };
+
+function purposeOptions() {
+  return [
+    {
+      value: "encode" as const,
+      icon: Clapperboard,
+      title: t("Kódolás vagy remux", "Encode or remux"),
+      description: t("Lemezből vagy lemezről készült remuxból új encode vagy remux készül, a forrás saját sávjaival.", "A new encode or remux from a disc or a disc remux, with the source's own tracks."),
+    },
+    {
+      value: "fit" as const,
+      icon: FileAudio,
+      title: t("Hang vagy felirat illesztése", "Fit audio or subtitles"),
+      description: t("Más forrásból származó sávok kerülnek egy kész encode-ra vagy remuxra, kódolás nélkül. Lemeznél remux készül a sávokkal.", "Tracks from another source go onto a finished encode or remux, with no encoding. From a disc, a remux is made with them."),
+    },
+    {
+      value: "encode_fit" as const,
+      icon: Layers3,
+      title: t("Kódolás és illesztés", "Encode and fit"),
+      description: t("Új encode vagy remux készül, és más forrásból származó sávok is kerülnek bele.", "A new encode or remux is made, with tracks from another source added."),
+    },
+  ];
+}
 
 function contentOptions() {
   return [
@@ -96,6 +123,7 @@ function loadDraft(): Draft {
       ? value.imageUploadProvider
       : "auto";
     return {
+      purpose: value.purpose === "encode" || value.purpose === "fit" || value.purpose === "encode_fit" ? value.purpose : null,
       sourcePath: typeof value.sourcePath === "string" ? value.sourcePath : "",
       sourceName: typeof value.sourceName === "string" ? value.sourceName : "",
       name: typeof value.name === "string" ? value.name : "",
@@ -142,6 +170,7 @@ export function NewEncodePage() {
       content_type: draft.contentType,
       priority: 0,
       settings: {
+        purpose: draft.purpose,
         detail_level: draft.detailLevel,
         upload_images: draft.uploadImages,
         image_upload_provider: draft.imageUploadProvider,
@@ -197,15 +226,43 @@ export function NewEncodePage() {
     }));
   }
 
+  const fitOnly = draft.purpose === "fit";
   const stepTitle = step === 1
     ? t("Forrás kiválasztása", "Choose the source")
     : step === 2 ? t("Tartalom megadása", "Describe the content") : t("Munkamód és ellenőrzés", "Mode and review");
   const canContinue = step === 1 ? Boolean(draft.sourcePath) : step === 2 ? Boolean(draft.name.trim()) : true;
+  const lastStep = fitOnly ? 2 : 3;
+
+  if (draft.purpose === null) {
+    return (
+      <div className="page page--wizard">
+        <PageHeader
+          eyebrow={t("Új munka", "New job")}
+          title={t("Mit szeretnél csinálni?", "What would you like to do?")}
+          description={t("A választásod után csak az ehhez tartozó lépéseket látod.", "After choosing, you only see the steps that belong to it.")}
+        />
+        <Card className="wizard-panel wizard-panel--wide">
+          <div className="choice-grid" role="group" aria-label={t("A munka típusa", "Type of job")}>
+            {purposeOptions().map(({ value, icon: Icon, title, description }) => (
+              <button type="button" key={value} className="choice-card" onClick={() => { setDraft((current) => ({ ...current, purpose: value })); setStep(1); }}>
+                <span className="choice-card__icon"><Icon size={23} /></span>
+                <span><strong>{title}</strong><small>{description}</small></span>
+              </button>
+            ))}
+          </div>
+        </Card>
+        <div className="wizard-footer">
+          <Button variant="ghost" icon={<ArrowLeft size={17} />} onClick={() => navigate(-1)}>{t("Mégse", "Cancel")}</Button>
+        </div>
+      </div>
+    );
+  }
+  const chosenPurpose = purposeOptions().find((item) => item.value === draft.purpose);
 
   return (
     <div className="page page--wizard">
       <PageHeader
-        eyebrow={t("Új kódolás", "New encode")}
+        eyebrow={chosenPurpose?.title ?? t("Új munka", "New job")}
         title={stepTitle}
         description={t(
           "A forrás (Blu-ray mappa vagy lemezről készült remux MKV) először biztonságos, írásmentes scanen megy át, ez egy futó encode mellett is elkészülhet. Kódolás csak a későbbi beállítás-jóváhagyás és a sorra kerülés után indul.",
@@ -214,7 +271,7 @@ export function NewEncodePage() {
       />
 
       <div className="wizard-steps" aria-label={t("Lépések", "Steps")}>
-        {[t("Forrás", "Source"), t("Tartalom", "Content"), t("Munkamód", "Mode")].map((label, index) => (
+        {(fitOnly ? [t("Forrás", "Source"), t("Tartalom", "Content")] : [t("Forrás", "Source"), t("Tartalom", "Content"), t("Munkamód", "Mode")]).map((label, index) => (
           <button
             type="button"
             key={label}
@@ -234,8 +291,8 @@ export function NewEncodePage() {
           <div className="source-browser__header">
             <div>
               <span className="eyebrow">{t("Szerver tárhely", "Server storage")}</span>
-              <h2>{t("Válassz BDMV-forrást vagy remux MKV-t", "Choose a BDMV source or a remux MKV")}</h2>
-              <small className="muted">{t("MKV-ként csak lemezről készült, újrakódolás nélküli remux (pl. MakeMKV) fogadható el.", "Only an untouched disc remux (for example from MakeMKV) is accepted as an MKV.")}</small>
+              <h2>{fitOnly ? t("Melyik encode-ra, remuxra vagy lemezre illesszünk?", "Which encode, remux or disc should the tracks be fitted to?") : t("Válassz BDMV-forrást vagy remux MKV-t", "Choose a BDMV source or a remux MKV")}</h2>
+              <small className="muted">{fitOnly ? t("Kész encode vagy remux MKV, vagy Blu-ray mappa. Lemeznél remux készül a külső sávokkal.", "A finished encode or remux MKV, or a Blu-ray folder. A disc becomes a remux with the external tracks.") : t("MKV-ként csak lemezről készült, újrakódolás nélküli remux (pl. MakeMKV) fogadható el.", "Only an untouched disc remux (for example from MakeMKV) is accepted as an MKV.")}</small>
             </div>
             <Button variant="ghost" icon={<RefreshCw size={16} />} onClick={() => void sources.refetch()} loading={sources.isFetching}>{t("Frissítés", "Refresh")}</Button>
           </div>
@@ -404,10 +461,10 @@ export function NewEncodePage() {
       )}
 
       <div className="wizard-footer">
-        <Button variant="ghost" icon={<ArrowLeft size={17} />} onClick={() => step === 1 ? navigate(-1) : setStep((value) => value - 1)}>
-          {step === 1 ? t("Mégse", "Cancel") : t("Vissza", "Back")}
+        <Button variant="ghost" icon={<ArrowLeft size={17} />} onClick={() => step === 1 ? setDraft((value) => ({ ...value, purpose: null })) : setStep((value) => value - 1)}>
+          {t("Vissza", "Back")}
         </Button>
-        {step < 3 ? (
+        {step < lastStep ? (
           <Button icon={<ArrowRight size={17} />} onClick={() => setStep((value) => value + 1)} disabled={!canContinue}>{t("Tovább", "Next")}</Button>
         ) : (
           <Button icon={<Clapperboard size={18} />} onClick={() => create.mutate()} loading={create.isPending}>{t("Munka létrehozása és scan", "Create job and scan")}</Button>

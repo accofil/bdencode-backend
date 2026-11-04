@@ -1,4 +1,4 @@
-# BDEncode
+# Accofil BDEncode
 
 **Encode Blu-ray and UHD Blu-ray discs from your browser, step by step.**
 
@@ -44,12 +44,14 @@ BDEncode turns a disc folder (the disc's `BDMV` folder) into a finished MKV file
 - checks every frame and proves the quality with metrics (SSIM, PSNR, VMAF);
 - makes comparison screenshots of source and encode, and uploads them to an image host if you ask it to;
 - orders the tracks by the Aither or nCore rules, suggests a release name and builds a release kit;
+- makes an untouched remux of a disc, following Aither's REMUX guide;
+- fits audio and SRT subtitles from another source (for example a PAL DVD) to an encode, a remux or a finished file, even with another speed and another cut, measured from the picture (see [docs/EXTERNAL_SOURCES.en.md](docs/EXTERNAL_SOURCES.en.md));
 - runs one encode at a time, while you already prepare the next discs.
 
 **What it does not do:**
 
-- **it does not break disc copy protection**: it needs an already unpacked disc folder containing `BDMV` (not an ISO file);
-- **it does not create torrents or upload to a tracker**: you make the torrent from the finished MKV, following your tracker's rules;
+- **it does not break disc copy protection**: it needs an already unpacked disc folder containing `BDMV`, or a disc remux MKV (for example from MakeMKV) made without re-encoding;
+- it makes torrents, uploads and seeds in qBittorrent for Aither and nCore only, and only when you start each step (see [docs/RELEASE_4_0.en.md](docs/RELEASE_4_0.en.md));
 - no 3D;
 - no GPU encoding (video is always encoded on the CPU; an NVIDIA GPU, if present, only speeds up the crop search).
 
@@ -339,7 +341,7 @@ The menu on the left:
 | Menu item | What for? |
 |---|---|
 | **Overview** | summary of the running job and the queue |
-| **New encode** | add a new disc |
+| **New job** | add a new disc, or fit audio and subtitles to a finished file |
 | **Queue** | all jobs and their states |
 | **Finished jobs** | the finished films |
 | **Comparisons** | the comparison screenshots |
@@ -471,7 +473,7 @@ With an AI key set, the AI evaluates once on the first visit and the result is s
 
 ### 10.1. Create a job
 
-1. Click **New encode**.
+1. Click **New job** and choose **Encode or remux**. The other two paths are in [section 10.6](#106-audio-and-subtitles-from-another-source).
 2. **Source**: click the disc's folder. Folders containing `BDMV` are marked **Blu-ray source**. If you do not see your disc, click **Refresh**.
 3. Click **Next**.
 4. **Content**: enter a job name (for example the film's title), check the disc type (BD or UHD), and choose what is on the disc: **Film**, **Concert**, **Anime** or **Series disc**.
@@ -538,6 +540,21 @@ The folder holds the MKV and next to it the MediaInfo, the BBCode and the compar
 
 On the finished job's page, the **Prepare release** panel assembles what you need for uploading: NFO, BBCode description, MediaInfo, verified images, checksums. You make the torrent from the finished MKV according to your tracker's rules and upload it yourself.
 
+### 10.6. Audio and subtitles from another source
+
+If, for example, the Blu-ray needs a PAL DVD's Hungarian dub, choose on the **New job** page:
+
+- **Fit audio or subtitles:** onto a finished encode or remux, with no encoding. The file's picture and kept tracks stay byte for byte. Choosing a disc makes a remux with the external tracks.
+- **Encode and fit:** a new encode or remux, with external tracks too.
+
+At the end of the wizard's **Tracks** step, enter the external source (a video file, a DVD folder or a DVD image) and tick the tracks. The program compares the two pictures, fits the audio and subtitles to the frame, then **stops**: nothing is encoded yet. The card shows the result, and you can listen to the splice points in the browser without downloading anything. The job goes on after your approval.
+
+Mind the **silent parts**: where the external source lacks the picture, the track is silent. The full guide: [docs/EXTERNAL_SOURCES.en.md](docs/EXTERNAL_SOURCES.en.md).
+
+### 10.7. 1080p audio for Aither
+
+By Aither's rule a live action 1080p encode is trumpable because of lossless 5.1 audio. When you choose the Aither profile for an encode, the program switches these tracks by itself: above 2 channels to **E-AC-3 1024 kbps**, up to 2 channels to **FLAC 16**. It lists the change and you can undo it. Remuxes and 2160p are not affected; at 2160p the rule is the reverse.
+
 ---
 
 ## 11. Everyday use
@@ -590,7 +607,7 @@ Wait for a running encode to finish before updating.
 | **Windows:** `localhost:8787` does not open | Wait half a minute and reload. If it still fails, open PowerShell as administrator and run `Start-ScheduledTask -TaskName "BDEncode WSL"`, then `wsl -d Debian -- sudo systemctl restart bdencode-api bdencode-worker nginx` |
 | **Server:** `localhost:8787` does not open | Is the SSH tunnel window open ([5.8](#58-open-the-page-through-an-ssh-tunnel))? If yes, on the server: `sudo systemctl restart bdencode-api bdencode-worker nginx` |
 | **Swizzin:** `/encoder/` shows an error | On the server: `sudo systemctl restart bdencode-api bdencode-worker` and `sudo systemctl reload nginx` |
-| The disc does not show under **New encode** | Did you give the right folder at installation? `BDMV` must be directly inside the disc's folder. Click **Refresh**. |
+| The disc does not show under **New job** | Did you give the right folder at installation? `BDMV` must be directly inside the disc's folder. Click **Refresh**. |
 | The laptop went to sleep and encoding stopped | After waking up the job continues. Set the laptop not to sleep while plugged in. |
 | Out of space | Remove old finished jobs' temporary files (**Clean up**) or unneeded jobs (**Delete job**). One job needs the space given in [section 2](#2-what-you-need). |
 | **Needs review** | Open the job: the card says what to do ([section 11](#11-everyday-use)). |

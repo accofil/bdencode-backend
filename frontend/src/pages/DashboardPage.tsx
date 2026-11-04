@@ -57,7 +57,7 @@ export function DashboardPage() {
         actions={
           <Link className="button button--primary" to="/new">
             <CirclePlus size={18} />
-            <span>{t("Új kódolás", "New encode")}</span>
+            <span>{t("Új munka", "New job")}</span>
           </Link>
         }
       />

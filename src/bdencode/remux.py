@@ -29,8 +29,9 @@ from fractions import Fraction
 import json
 from pathlib import PurePosixPath
 import re
+import struct
 import sys
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from .media.bluray import MediaStream, PlaylistCandidate, StreamKind, VideoProperties
 from .release_naming import audio_codec_family, channel_layout
@@ -444,12 +445,70 @@ def _playlist_argument(playlist_id: str) -> str:
     return rf"S:\BDMV\PLAYLIST\{playlist_id}.mpls"
 
 
+def _clips_argument(clips: Sequence[str]) -> str:
+    if not clips or not all(re.fullmatch(r"\d{5}", clip) for clip in clips):
+        raise RemuxError("clip ids must have five digits", code="remux_playlist")
+    return "+".join(rf"S:\BDMV\STREAM\{clip}.m2ts" for clip in clips)
+
+
+# A CLPI file's clock.
+CLPI_TICKS_PER_SECOND = 45_000
+
+
+def clip_presentation(clpi: bytes) -> tuple[int, int] | None:
+    """Start and end of a clip in 45 kHz ticks; None unless it has one time base."""
+
+    try:
+        if clpi[:4] != b"HDMV":
+            return None
+        sequence_info = struct.unpack_from(">I", clpi, 8)[0]
+        if clpi[sequence_info + 5] != 1:
+            return None
+        if clpi[sequence_info + 10] != 1:
+            return None
+        return struct.unpack_from(">II", clpi, sequence_info + 12 + 6)
+    except (IndexError, struct.error):
+        return None
+
+
+def whole_clips(
+    playlist: PlaylistCandidate, presentation: Mapping[str, tuple[int, int] | None]
+) -> tuple[str, ...]:
+    """The clips to hand eac3to instead of the playlist, or nothing.
+
+    eac3to 3.36 skips its second pass for a Blu-ray playlist, and with it the
+    removal of the audio that overlaps at the clip joins: the concatenated
+    audio then runs later and later (God Forgives, I Don't: 33 ms by the last
+    clip).  Given the clips themselves it does run it, but it reads each clip
+    from end to end, so this is safe only when the playlist does the same.
+    """
+
+    segments = playlist.segments
+    if len(segments) < 2 or playlist.angle_count != 1:
+        return ()
+    clips = tuple(segment.clip_id for segment in segments)
+    if len(set(clips)) != len(clips):
+        return ()
+    tolerance = 1.5 / CLPI_TICKS_PER_SECOND
+    for segment in segments:
+        bounds = presentation.get(segment.clip_id)
+        if bounds is None:
+            return ()
+        start, end = (value / CLPI_TICKS_PER_SECOND for value in bounds)
+        if abs(segment.in_time_seconds - start) > tolerance:
+            return ()
+        if abs(segment.out_time_seconds - end) > tolerance:
+            return ()
+    return clips
+
+
 def eac3to_demux_command(
     disc_root: object,
     playlist_id: str,
     outputs: Sequence[DemuxOutput],
     *,
     chapters: bool = True,
+    clips: Sequence[str] = (),
     wrapper: str = EAC3TO_WRAPPER,
 ) -> list[str]:
     """The guide's demux: ``eac3to playlist.mpls 1:chapters.txt 2:video.* ...``.
@@ -457,10 +516,11 @@ def eac3to_demux_command(
     The wrapper maps the disc to ``S:`` and the working directory to ``W:``
     and runs eac3to as ``C:\\eac3to\\eac3to.exe``, so the log names no server
     path.  Outputs and the log are relative: they land in the working
-    directory.
+    directory.  ``clips`` (see ``whole_clips``) replaces the playlist.
     """
 
-    command = [wrapper, str(disc_root), _playlist_argument(playlist_id)]
+    source = _clips_argument(clips) if clips else _playlist_argument(playlist_id)
+    command = [wrapper, str(disc_root), source]
     if chapters:
         command.append(f"1:{CHAPTERS_NAME}")
     for item in outputs:
@@ -476,6 +536,13 @@ def eac3to_listing_command(
 ) -> list[str]:
     # Given only the playlist, eac3to prints a summary; "1)" lists its tracks.
     return [wrapper, str(disc_root), _playlist_argument(playlist_id), "1)"]
+
+
+def eac3to_clips_listing_command(
+    disc_root: object, clips: Sequence[str], *, wrapper: str = EAC3TO_WRAPPER
+) -> list[str]:
+    # "1)" picks a title of a disc structure; joined clips are not one.
+    return [wrapper, str(disc_root), _clips_argument(clips)]
 
 
 _PROGRESS = re.compile(r"(?:process|analyze): (\d{1,3})%")
@@ -995,7 +1062,9 @@ def decoded_md5_command(
     kind = stream.split(":", 1)[0]
     if kind not in {"v", "a"}:
         raise RemuxError("only video and audio decode to content", code="remux_decode")
-    codec = ["-c:a", "pcm_s32le"] if kind == "a" else []
+    # A multi-clip title's audio timestamps step back at the joins, and -xerror
+    # stops on that; only the samples count here, so they are numbered afresh.
+    codec = ["-af", "asetpts=N/SR/TB", "-c:a", "pcm_s32le"] if kind == "a" else []
     return [
         ffmpeg,
         "-hide_banner",
@@ -1047,6 +1116,7 @@ __all__ = [
     "TMDB_ID",
     "VIDEO_NAME_CODECS",
     "audio_track_name",
+    "clip_presentation",
     "container_title",
     "default_duration",
     "dovi_mux_command",
@@ -1056,6 +1126,7 @@ __all__ = [
     "decoded_md5_command",
     "eac3to_demux_command",
     "embedded_core_parent",
+    "eac3to_clips_listing_command",
     "eac3to_listing_command",
     "eac3to_progress",
     "fps_text",
@@ -1078,6 +1149,7 @@ __all__ = [
     "track_family",
     "video_extract_command",
     "video_track_name",
+    "whole_clips",
 ]
 
 

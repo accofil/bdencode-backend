@@ -23,7 +23,7 @@ INSTALL_SAFE_OPERATOR_PAUSES = frozenset(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="bdencode", description="BDEncode backend")
+    parser = argparse.ArgumentParser(prog="bdencode", description="Accofil BDEncode")
     parser.add_argument(
         "--config",
         type=Path,

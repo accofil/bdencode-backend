@@ -238,7 +238,7 @@ describe("ReleasePanel 2.1 release workflow", () => {
     expect(screen.getByRole("button", { name: "Validálás" })).toBeEnabled();
   });
 
-  it("offers no torrent export, seeding or tracker upload since 3.0", async () => {
+  it("keeps the kit card free of torrent export, seeding and upload", async () => {
     const dupeClear = {
       ...readyPreparation,
       state: "READY_TO_PUBLISH",

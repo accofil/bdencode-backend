@@ -31,4 +31,4 @@ jobs:
           fi
           python tools/release.py notes "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
           gh release create "$GITHUB_REF_NAME" --verify-tag \
-            --title "BDEncode ${GITHUB_REF_NAME#v}" --notes-file "$RUNNER_TEMP/notes.md" --latest
+            --title "Accofil BDEncode ${GITHUB_REF_NAME#v}" --notes-file "$RUNNER_TEMP/notes.md" --latest

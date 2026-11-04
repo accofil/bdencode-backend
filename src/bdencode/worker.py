@@ -20,6 +20,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 from collections import Counter
@@ -40,7 +41,7 @@ from .audio import (
     normalize_audio_codec_name,
 )
 from .chapters import render_matroska_chapters
-from .config import Settings
+from .config import ConfigurationError, Settings
 from .capabilities import capability_snapshot, dynamic_hdr_support, remux_support
 from .crf_search import (
     STATUS_BEST_EFFORT,
@@ -209,7 +210,12 @@ from .process import (
 )
 from .progress import EncodeProgressReporter, FFmpegProgressParser
 from . import dovi_layers, remux
-from .qc import av_sync
+from .external import render as external_render
+from .external import source as external_source
+from .external import spec as external_spec
+from .external import subtitles as external_subtitles
+from .external.frame_map import FrameMapError
+from .qc import av_sync, multi_clip
 from .qc.artifacts import inspect_png
 from .qc.audio import (
     AUDIO_FRAME_CONTINUITY_SCHEMA_VERSION,
@@ -541,9 +547,13 @@ _SELECTION_KEYS = {
     # "encode" (the default) or "remux": an untouched Aither-style remux.
     "mode",
     "remux",
+    # Tracks and subtitles fitted from another source (bdencode.external).
+    "external_sources",
 }
 # A remux selection carries no video settings, crop or filter.
 _REMUX_SELECTION_KEYS = _SELECTION_KEYS - {"video", "crop", "temporal_filter", "dual_type_match"}
+# A fit keeps a finished MKV as it is and only adds tracks to it.
+_FIT_SELECTION_KEYS = _REMUX_SELECTION_KEYS - {"remux"}
 _REMUX_OPTION_KEYS = {"imdb", "tmdb"}
 # Which comparison images are published: all of them, only the tone-mapped
 # SDR views of an HDR title (half the upload), or only the native pictures.
@@ -790,6 +800,132 @@ class Runner(Protocol):
     ) -> Any: ...
 
 
+FIT_LOG_NAME = "external-fit.txt"
+
+
+def fit_base_mux_command(
+    output: Path,
+    reference: Path,
+    file_tracks: Sequence[Mapping[str, Any]],
+    playlist: PlaylistCandidate,
+    tracks: Sequence[TrackSelection],
+    *,
+    title: str,
+) -> tuple[list[str], list[str], list[str]]:
+    """Copy the finished file, leaving out the omitted tracks.
+
+    The scan and mkvmerge list a kind's tracks in the same file order, so the
+    ordinal joins them.  Also returns the FFmpeg maps of the kept streams in the
+    original and in the new file, to prove them unchanged.
+    """
+
+    selections = {item.stream_id: item for item in tracks}
+    command = ["mkvmerge", "--output", str(output), "--title", title]
+    reference_maps = ["0:v:0"]
+    kept_maps = ["0:v:0"]
+    for kind, flag, none, letter, streams in (
+        ("audio", "--audio-tracks", "--no-audio", "a", playlist.audio_streams),
+        ("subtitles", "--subtitle-tracks", "--no-subtitles", "s", playlist.subtitle_streams),
+    ):
+        identified = [item for item in file_tracks if item.get("type") == kind]
+        if len(identified) != len(streams):
+            raise ReviewRequired(
+                "the MKV's tracks changed since it was read", details={"code": "fit_tracks_changed"}
+            )
+        kept = []
+        for ordinal, (item, stream) in enumerate(zip(identified, streams)):
+            chosen = selections.get(stream.id)
+            if chosen is not None and chosen.action is TrackAction.OMIT:
+                continue
+            reference_maps.append(f"0:{letter}:{ordinal}")
+            kept_maps.append(f"0:{letter}:{len(kept)}")
+            kept.append(str(item["id"]))
+            if chosen is not None and chosen.default is not None:
+                command.extend(("--default-track-flag", f"{item['id']}:{'yes' if chosen.default else 'no'}"))
+            if chosen is not None and chosen.language:
+                command.extend(("--language", f"{item['id']}:{chosen.language}"))
+        command.extend((flag, ",".join(kept)) if kept else (none,))
+    command.append(str(reference))
+    return command, reference_maps, kept_maps
+
+
+def external_final_audio_order(
+    base_tracks: Sequence[Mapping[str, Any]], audio: Sequence[Mapping[str, Any]]
+) -> list[int | tuple[str, int]]:
+    """Final audio order: base ordinals, and ``("external", index)`` at their positions."""
+
+    order: list[int | tuple[str, int]] = list(
+        range(sum(1 for item in base_tracks if item.get("type") == "audio"))
+    )
+    indexed = sorted(enumerate(audio), key=lambda pair: (pair[1]["track"].position, pair[0]))
+    for index, item in indexed:
+        order.insert(min(item["track"].position, len(order)), ("external", index))
+    return order
+
+
+def external_merge_command(
+    output: Path,
+    base: Path,
+    base_tracks: Sequence[Mapping[str, Any]],
+    audio: Sequence[Mapping[str, Any]],
+    subtitles: Sequence[Mapping[str, Any]],
+    *,
+    title: str,
+    video_start_seconds: float,
+) -> list[str]:
+    """Base file first (input 0), then one input per fitted track, in the release's order."""
+
+    sync_ms = int(round(video_start_seconds * 1000))
+    command = ["mkvmerge", "--output", str(output), "--title", title]
+    takes_default = any(item["track"].default for item in audio)
+    base_audio = [item for item in base_tracks if item.get("type") == "audio"]
+    if takes_default:
+        for item in base_audio:
+            command.extend(("--default-track-flag", f"{item['id']}:no"))
+    command.append(str(base))
+    for item in audio:
+        track = item["track"]
+        report = item["report"]
+        command.extend(("--language", f"0:{track.language}"))
+        command.extend(("--default-track-flag", f"0:{'yes' if track.default else 'no'}"))
+        command.extend(("--track-name", f"0:{track.name or external_track_name(track, report)}"))
+        command.extend(("--sync", f"0:{sync_ms + int(report.get('sync_ms') or 0)}"))
+        command.extend(("--no-video", "--no-subtitles", "--no-chapters", str(item["path"])))
+    for item in subtitles:
+        subtitle = item["subtitle"]
+        command.extend(("--language", f"0:{subtitle.language}"))
+        command.extend(("--default-track-flag", f"0:{'yes' if subtitle.default else 'no'}"))
+        command.extend(("--forced-display-flag", f"0:{'yes' if subtitle.forced else 'no'}"))
+        command.extend(("--sub-charset", "0:UTF-8"))
+        if subtitle.name:
+            command.extend(("--track-name", f"0:{subtitle.name}"))
+        command.extend(("--sync", f"0:{sync_ms}"))
+        command.append(str(item["path"]))
+    entries: list[str] = []
+    video = [item for item in base_tracks if item.get("type") == "video"]
+    entries.extend(f"0:{item['id']}" for item in video)
+    for entry in external_final_audio_order(base_tracks, audio):
+        if isinstance(entry, int):
+            entries.append(f"0:{base_audio[entry]['id']}")
+        else:
+            entries.append(f"{entry[1] + 1}:0")
+    entries.extend(f"0:{item['id']}" for item in base_tracks if item.get("type") == "subtitles")
+    entries.extend(f"{len(audio) + 1 + index}:0" for index in range(len(subtitles)))
+    command.extend(("--track-order", ",".join(entries)))
+    return command
+
+
+def external_track_name(track: external_spec.ExternalTrack, report: Mapping[str, Any]) -> str:
+    encoding = report.get("encoding") or {}
+    codec = str(encoding.get("codec") or report.get("codec") or "").upper().replace("AC3", "DD")
+    channels = {1: "1.0", 2: "2.0", 6: "5.1"}.get(int(report.get("channels") or 0), "")
+    language = {
+        "hu": "Hungarian", "hun": "Hungarian", "en": "English", "eng": "English",
+        "de": "German", "deu": "German", "ger": "German",
+    }.get(track.language, track.language)
+    return " ".join(part for part in (language, codec, channels) if part)
+
+
 class ReviewRequired(RuntimeError):
     """The worker cannot safely infer a material operator decision."""
 
@@ -822,6 +958,7 @@ class ParsedSelection:
     # placeholders and ``remux`` holds the remux options.
     mode: str = "encode"
     remux: RemuxOptions | None = None
+    external_sources: tuple[external_spec.ExternalSource, ...] = ()
 
     @property
     def dub_may_be_default(self) -> bool:
@@ -830,6 +967,12 @@ class ParsedSelection:
     @property
     def is_remux(self) -> bool:
         return self.mode == "remux"
+
+    @property
+    def is_fit(self) -> bool:
+        """Tracks fitted to a finished MKV: nothing is encoded or demuxed."""
+
+        return self.mode == "fit"
 
 
 @dataclass(frozen=True, slots=True)
@@ -842,6 +985,10 @@ class RemuxOptions:
 
 def _is_remux_job(job: Job) -> bool:
     return isinstance(job.selection, Mapping) and job.selection.get("mode") == "remux"
+
+
+def _is_fit_job(job: Job) -> bool:
+    return isinstance(job.selection, Mapping) and job.selection.get("mode") == "fit"
 
 
 # The states a remux runs through its own stages; UPLOADING is shared.
@@ -1221,6 +1368,22 @@ def _json_hash(value: Any) -> str:
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _selection_hash(selection: Any) -> str:
+    """What the title's own stages depend on.  External sources are left out, so
+    approving a fit or changing its pitch does not repeat the language check."""
+
+    if isinstance(selection, Mapping):
+        return _json_hash({k: v for k, v in selection.items() if k != "external_sources"})
+    return _json_hash(selection)
+
+
+def _parse_external_sources(raw: Mapping[str, Any]) -> tuple[external_spec.ExternalSource, ...]:
+    try:
+        return external_spec.parse_external_sources(raw.get("external_sources"))
+    except external_spec.ExternalSpecError as exc:
+        raise ReviewRequired(str(exc), details={"code": "external_source_invalid"}) from exc
 
 
 def _remove_owned_completed_child(completed: Path, child: Path) -> None:
@@ -2210,8 +2373,10 @@ def parse_selection(
     mode = raw.get("mode", "encode")
     if mode == "remux":
         return parse_remux_selection(job, scan)
+    if mode == "fit":
+        return parse_fit_selection(job, scan)
     if mode != "encode":
-        raise ReviewRequired("selection mode must be encode or remux")
+        raise ReviewRequired("selection mode must be encode, remux or fit")
     unknown = set(raw) - _SELECTION_KEYS - {"mode"}
     if "remux" in raw:
         raise ReviewRequired("remux options belong to a remux selection")
@@ -2517,6 +2682,7 @@ def parse_selection(
     if not isinstance(dual_type, bool):
         raise ReviewRequired("dual_type_match must be boolean")
     parsed = ParsedSelection(
+        external_sources=_parse_external_sources(raw),
         playlist_id=playlist_id,
         angle=angle,
         settings=settings,
@@ -2551,6 +2717,100 @@ def parse_selection(
         ),
     )
     return parsed
+
+
+def parse_fit_selection(job: Job, scan: DiscScan) -> ParsedSelection:
+    """Tracks from other sources added to a finished encode or remux.
+
+    The file's own streams stay byte for byte; a track can only be kept or left
+    out.  A disc cannot take new tracks: fitting to one is a remux with external
+    sources.
+    """
+
+    raw = job.selection
+    assert isinstance(raw, Mapping)
+    unknown = set(raw) - _FIT_SELECTION_KEYS
+    if unknown:
+        raise ReviewRequired("unknown selection field(s): " + ", ".join(sorted(unknown)))
+    missing = {"playlist_id", "tracks", "output_name", "upload_images"} - set(raw)
+    if missing:
+        raise ReviewRequired("missing selection field(s): " + ", ".join(sorted(missing)))
+    if not scan.is_mkv:
+        raise ReviewRequired(
+            "tracks are fitted to a finished MKV; for a disc choose a remux with external sources",
+            details={"code": "fit_needs_mkv"},
+        )
+    external = _parse_external_sources(raw)
+    if not external:
+        raise ReviewRequired(
+            "choose at least one external track or subtitle to fit",
+            details={"code": "fit_needs_external"},
+        )
+    try:
+        tracker_profile = TrackerProfile(raw.get("tracker_profile", "none"))
+        playlist = scan.playlist(str(raw["playlist_id"]))
+    except (KeyError, ValueError) as exc:
+        raise ReviewRequired(str(exc)) from exc
+    videos = playlist.video_streams
+    if not videos or videos[0].video is None or videos[0].video.frame_rate is None:
+        raise ReviewRequired(
+            "the MKV's video has no known frame rate", details={"code": "fit_video"}
+        )
+    if not isinstance(raw["tracks"], list):
+        raise ReviewRequired("tracks must be an array")
+    allowed_track = {"stream_id", "action", "language", "name", "default", "forced", "subtitle_kind", "order"}
+    streams = {stream.id: stream for stream in playlist.streams}
+    tracks: list[TrackSelection] = []
+    for number, item in enumerate(raw["tracks"]):
+        if not isinstance(item, Mapping) or set(item) - allowed_track or "stream_id" not in item:
+            raise ReviewRequired(f"tracks[{number}] is not valid")
+        try:
+            selected = TrackSelection(
+                stream_id=str(item["stream_id"]),
+                action=TrackAction(str(item.get("action", "copy")).lower()),
+                language=item.get("language"),
+                name=item.get("name"),
+                default=item.get("default"),
+                forced=item.get("forced"),
+                subtitle_kind=item.get("subtitle_kind"),
+                order=item.get("order", number),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ReviewRequired(f"invalid tracks[{number}]: {exc}") from exc
+        stream = streams.get(selected.stream_id)
+        if stream is None or stream.kind is StreamKind.VIDEO:
+            raise ReviewRequired(f"tracks[{number}] does not name an audio or subtitle track")
+        if selected.action not in {TrackAction.COPY, TrackAction.OMIT}:
+            raise ReviewRequired(
+                f"tracks[{number}]: a finished file's tracks are kept or left out, not converted",
+                details={"code": "fit_track_action"},
+            )
+        tracks.append(selected)
+    output_name = str(raw["output_name"]).removesuffix(".mkv")
+    if not _SAFE_OUTPUT_RE.fullmatch(output_name) or output_name in {".", ".."}:
+        raise ReviewRequired("output_name contains unsafe characters")
+    if not isinstance(raw["upload_images"], bool):
+        raise ReviewRequired("upload_images must be boolean")
+    image_upload_provider = str(raw.get("image_upload_provider", "auto")).lower()
+    if image_upload_provider not in {"auto", "imgbb", "catbox", "freeimage"}:
+        raise ReviewRequired("image_upload_provider must be auto, imgbb, catbox or freeimage")
+    return ParsedSelection(
+        external_sources=external,
+        playlist_id=playlist.playlist_id,
+        angle=1,
+        settings=recommended_profile(VideoEncoder.X264, content_type=job.content_type.value.lower()),
+        crop=VapourSynthCrop(left=0, top=0, right=0, bottom=0),
+        temporal_filter=TemporalFilter.PROGRESSIVE,
+        tracks=tuple(tracks),
+        output_name=output_name,
+        upload_images=raw["upload_images"],
+        image_upload_provider=image_upload_provider,
+        upload_image_set="all",
+        dual_type_match=False,
+        schema_version=2,
+        tracker_profile=tracker_profile,
+        mode="fit",
+    )
 
 
 def parse_remux_selection(job: Job, scan: DiscScan) -> ParsedSelection:
@@ -2743,6 +3003,7 @@ def parse_remux_selection(job: Job, scan: DiscScan) -> ParsedSelection:
         facts=remux_release_facts(scan=scan, playlist=playlist, tracks=tracks),
     )
     return ParsedSelection(
+        external_sources=_parse_external_sources(raw),
         playlist_id=playlist_id,
         angle=1,
         settings=recommended_profile(
@@ -2875,6 +3136,7 @@ def release_facts(
         else:
             codec = {
                 TrackAction.FLAC: "FLAC",
+                TrackAction.FLAC16: "FLAC",
                 TrackAction.AC3: "DD",
                 TrackAction.EAC3: "DDP",
                 TrackAction.DTS: "DTS",
@@ -3433,6 +3695,8 @@ class PipelineWorker:
         if job.state is JobState.SCANNING:
             with self._step(paths, "scan", ("Lemez beolvasása", "Reading the disc")):
                 self._scan(job, paths)
+        elif _is_fit_job(job) and job.state in _REMUX_STAGES:
+            self._process_fit_stage(job, paths)
         elif _is_remux_job(job) and job.state in _REMUX_STAGES:
             self._process_remux_stage(job, paths)
         elif job.state is JobState.READY:
@@ -3976,7 +4240,7 @@ class PipelineWorker:
             try:
                 report = json.loads(paths.language_json.read_text(encoding="utf-8"))
                 if (
-                    report.get("selection_sha256") == _json_hash(job.selection)
+                    report.get("selection_sha256") == _selection_hash(job.selection)
                     and report.get("scan_fingerprint") == scan.fingerprint
                     and report.get("status") == "completed"
                 ):
@@ -4006,7 +4270,7 @@ class PipelineWorker:
         instead of silently falling back to the original zero margins.
         """
 
-        if _is_remux_job(job):
+        if _is_remux_job(job) or _is_fit_job(job):
             # A remux has no crop, CRF or dynamic-HDR decision to replay.
             return self._load_scan_and_selection(job, paths)
         scan, selection = self._load_prepared_crop_selection(job, paths)
@@ -4031,7 +4295,7 @@ class PipelineWorker:
             chosen = document["chosen_crf"]
             if (
                 document.get("schema_version") != 1
-                or document.get("selection_sha256") != _json_hash(job.selection)
+                or document.get("selection_sha256") != _selection_hash(job.selection)
                 or type(chosen) not in {int, float}
             ):
                 raise ValueError("report does not describe this selection")
@@ -4188,7 +4452,7 @@ class PipelineWorker:
                     paths.language_json.read_text(encoding="utf-8")
                 )
                 if (
-                    prior_report.get("selection_sha256") == _json_hash(job.selection)
+                    prior_report.get("selection_sha256") == _selection_hash(job.selection)
                     and prior_report.get("scan_fingerprint") == scan.fingerprint
                     and prior_report.get("status") == "completed"
                 ):
@@ -4325,7 +4589,7 @@ class PipelineWorker:
 
         report = {
             "schema_version": 1,
-            "selection_sha256": _json_hash(job.selection),
+            "selection_sha256": _selection_hash(job.selection),
             "scan_fingerprint": scan.fingerprint,
             "playlist_id": selection.playlist_id,
             "status": "needs_review" if unresolved else "completed",
@@ -4375,13 +4639,49 @@ class PipelineWorker:
         return {
             "schema_version": 1,
             "scan_fingerprint": scan.fingerprint,
-            "selection": job.selection,
+            "selection": (
+                {k: v for k, v in job.selection.items() if k != "external_sources"}
+                if isinstance(job.selection, Mapping)
+                else job.selection
+            ),
         }
+
+    def _external_fit_is_current(self, paths: JobPaths, selection: ParsedSelection) -> bool:
+        """Whether every external source is fitted as selected and approved."""
+
+        for source in selection.external_sources:
+            try:
+                review = json.loads(
+                    (paths.work / "external" / source.id / "review.json").read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError):
+                return False
+            if review.get("map_sha256") != source.approved_map_sha256:
+                return False
+            done = [(item.get("stream"), item.get("pitch")) for item in review.get("tracks") or []]
+            if done != [(track.stream, track.pitch) for track in source.tracks]:
+                return False
+            if len(review.get("subtitles") or []) != len(source.subtitles):
+                return False
+        return True
+
+    def _remux_preparation_is_current(self, job: Job, paths: JobPaths) -> bool:
+        try:
+            scan, selection = self._load_scan_and_selection(job, paths)
+        except (OSError, TypeError, ValueError, KeyError):
+            return False
+        return self._external_fit_is_current(paths, selection) and _valid_stage(
+            paths.stages / "pipeline-prepare.json",
+            self._preparation_inputs(job, scan),
+            [paths.reference, self._remux_plan_path(paths), paths.analysis / "eac3to-listing.txt"],
+        )
 
     def _preparation_is_current(self, job: Job, paths: JobPaths) -> bool:
         try:
             scan, _selection = self._load_scan_and_selection(job, paths)
         except (OSError, TypeError, ValueError, KeyError):
+            return False
+        if not self._external_fit_is_current(paths, _selection):
             return False
         outputs = [paths.reference, paths.script, paths.plan_json]
         if _selection.dynamic_hdr is not DynamicHdrMode.DISCARD:
@@ -5385,6 +5685,7 @@ class PipelineWorker:
         scan, selection = self._load_scan_and_selection(job, paths)
         playlist = scan.playlist(selection.playlist_id)
         reference_sha256 = self._prepare_reference(job, paths, scan, selection, playlist)
+        self._prepare_external_sources(paths, selection, playlist, reference_sha256)
         source_video = playlist.video_streams[0].video
         assert source_video is not None
         crop_report = paths.analysis / "crop-policy.json"
@@ -5680,7 +5981,7 @@ class PipelineWorker:
         """
 
         report = paths.analysis / "dynamic-hdr.json"
-        selection_sha256 = _json_hash(job.selection)
+        selection_sha256 = _selection_hash(job.selection)
         work = paths.work / "dynamic-hdr"
         work.mkdir(mode=0o750, parents=True, exist_ok=True)
         runner = self._runner(paths)
@@ -5847,7 +6148,7 @@ class PipelineWorker:
             document = json.loads(report.read_text(encoding="utf-8"))
             if (
                 document.get("schema_version") != 1
-                or document.get("selection_sha256") != _json_hash(job.selection)
+                or document.get("selection_sha256") != _selection_hash(job.selection)
             ):
                 raise ValueError("report does not describe this selection")
             plan = DynamicHdrPlan.from_dict(document["plan"])
@@ -5890,7 +6191,7 @@ class PipelineWorker:
         work.mkdir(mode=0o750, parents=True, exist_ok=True)
         report = paths.analysis / "crf-search.json"
         runner = self._runner(paths)
-        selection_sha256 = _json_hash(job.selection)
+        selection_sha256 = _selection_hash(job.selection)
 
         reference_sha256 = sha256_file(paths.reference)
         try:
@@ -6614,6 +6915,7 @@ class PipelineWorker:
             raise ReviewRequired(f"{label} first packet time is missing or invalid") from exc
 
     def _mux(self, job: Job, paths: JobPaths) -> None:
+        self._restore_base_mux(paths)
         scan, selection = self._load_prepared_scan_and_selection(job, paths)
         if not paths.encoded_video.is_file() or not paths.reference.is_file():
             raise RuntimeError("encoded video or reference remux is missing")
@@ -7088,6 +7390,7 @@ class PipelineWorker:
         return report
 
     def _qc(self, job: Job, paths: JobPaths) -> None:
+        self._restore_base_mux(paths)
         scan, selection = self._load_prepared_scan_and_selection(job, paths)
         output = paths.muxed_output
         if not output.is_file():
@@ -8690,6 +8993,7 @@ class PipelineWorker:
                 spectrum.name,
                 mime_type="image/png",
             )
+        self._merge_external_tracks(job, paths, selection)
         self.queue.advance(
             job.id, JobState.COMPARISON, message="container and audio QC passed"
         )
@@ -10279,7 +10583,7 @@ class PipelineWorker:
                 details={"action": "rerun_mux_and_qc"},
             )
         mux_digest = current_mux_digest
-        if selection.is_remux:
+        if selection.is_remux or selection.is_fit:
             self._remux_upload_and_finalize(job, paths, scan, selection, mux_digest)
             return
         video_manifest_path = paths.comparison / "video-comparison.json"
@@ -10501,6 +10805,9 @@ class PipelineWorker:
         if job.state is JobState.READY:
             self._remux_prepare(job, paths)
         elif job.state is JobState.ENCODING:
+            # The serial claim moves a job from READY straight here.
+            if not self._remux_preparation_is_current(job, paths):
+                self._remux_prepare(job, paths, advance=False)
             with self._step(paths, "eac3to", ("Bontás eac3to-val", "Demuxing with eac3to")):
                 self._remux_demux(job, paths)
         elif job.state is JobState.MUXING:
@@ -10512,6 +10819,932 @@ class PipelineWorker:
         elif job.state is JobState.COMPARISON:
             with self._step(paths, "screenshots", ("Képernyőképek", "Screenshots")):
                 self._remux_screenshots(job, paths)
+
+    # -- external sources ------------------------------------------------------------------
+
+    def _external_root(self, paths: JobPaths) -> Path:
+        return _ensure_contained_directory(
+            paths.work / "external", root=paths.work, description="external source directory"
+        )
+
+    def _prepare_external_sources(
+        self,
+        paths: JobPaths,
+        selection: ParsedSelection,
+        playlist: PlaylistCandidate,
+        reference_sha256: str,
+    ) -> None:
+        """Fit each external source to the title; stop until the operator approves the fit.
+
+        Nothing here touches the title's own tracks: they are muxed and checked
+        as if no external source existed, and these join them afterwards.
+        """
+
+        if not selection.external_sources:
+            return
+        support = external_source.external_support()
+        if not support["available"]:
+            raise ReviewRequired(
+                "this host cannot fit external sources: " + ", ".join(support["missing"]),
+                details={"code": "external_source_unavailable", **support},
+            )
+        video = playlist.video_streams[0].video
+        target_fps = external_source.exact_fps(getattr(video, "frame_rate", None))
+        if target_fps is None:
+            raise ReviewRequired(
+                "the title's frame rate is unknown, so nothing can be fitted to it",
+                details={"code": "external_source_invalid"},
+            )
+        root = self._external_root(paths)
+        title_signature = root / "title.gray"
+        marker = paths.stages / "external-title-signature.json"
+        inputs = {"schema_version": 1, "reference_sha256": reference_sha256}
+        if not _valid_stage(marker, inputs, [title_signature]):
+            with self._step(paths, "external-title", ("A cím képének lenyomata", "Fingerprinting the title's picture")):
+                self._runner(paths).run(
+                    external_source.signature_command(["-i", str(paths.reference)], title_signature),
+                    cwd=root,
+                    stderr_path=paths.logs / "external-title-signature.log",
+                )
+            _write_stage(marker, inputs, [title_signature])
+        reviews = [
+            self._fit_external_source(
+                paths, source, target_fps, title_signature, reference_sha256
+            )
+            for source in selection.external_sources
+        ]
+        pending = [
+            review
+            for review, source in zip(reviews, selection.external_sources)
+            if review["map_sha256"] != source.approved_map_sha256
+        ]
+        if pending:
+            raise ReviewRequired(
+                "the external source fit waits for the operator's approval",
+                details={
+                    "code": "external_source_review",
+                    "sources": [item["id"] for item in pending],
+                },
+            )
+
+    def _external_input(
+        self, paths: JobPaths, source: external_spec.ExternalSource, directory: Path
+    ) -> tuple[external_source.SourceInfo, list[str], dict[str, Any]]:
+        """The source's FFmpeg input; a DVD image is unpacked, a DVD folder linked."""
+
+        try:
+            resolved = self.settings.authorize_source(source.path)
+            info = external_source.probe_source(resolved)
+        except (ConfigurationError, external_source.ExternalSourceError, OSError) as exc:
+            raise ReviewRequired(
+                f"external source cannot be read: {exc}",
+                details={"code": "external_source_invalid", "source": source.id},
+            ) from exc
+        location = Path(info.path)
+        identity: dict[str, Any] = {
+            "path": str(location),
+            "size": location.stat().st_size if location.is_file() else None,
+            "mtime_ns": location.stat().st_mtime_ns,
+            "kind": info.kind,
+            "title_set": info.title_set,
+        }
+        if info.kind == external_source.KIND_FILE:
+            return info, external_source.input_arguments(info.kind, location), identity
+        dvd = _ensure_contained_directory(
+            directory / "dvd", root=directory, description="external DVD directory"
+        )
+        assert info.title_set is not None
+        if info.kind == external_source.KIND_DVD_FOLDER:
+            originals = external_source.folder_vobs(location, info.title_set)
+            identity["vobs"] = [[item.name, item.stat().st_size] for item in originals]
+            links = []
+            for original in originals:
+                link = dvd / original.name.upper()
+                link.unlink(missing_ok=True)
+                link.symlink_to(original)
+                links.append(link)
+            return info, external_source.input_arguments(info.kind, location, links), identity
+        marker = paths.stages / f"external-{source.id}-unpack.json"
+        listing = directory / "image-listing.txt"
+        self._runner(paths).run(
+            external_source.image_list_command(location),
+            cwd=directory,
+            stdout_path=listing,
+            stderr_path=paths.logs / f"external-{source.id}-image.log",
+            timeout=600,
+        )
+        names = external_source.image_vob_names(
+            listing.read_text(encoding="utf-8", errors="replace"), info.title_set
+        )
+        if not names:
+            raise ReviewRequired(
+                "the DVD image holds no video of the main title",
+                details={"code": "external_source_invalid", "source": source.id},
+            )
+        unpacked = [dvd / name.rsplit("/", 1)[-1].upper() for name in names]
+        inputs = {"schema_version": 1, **identity, "names": names}
+        if not _valid_stage(marker, inputs, unpacked):
+            with self._step(paths, "external-unpack", ("A DVD-képfájl kibontása", "Unpacking the DVD image")):
+                self._runner(paths).run(
+                    external_source.image_extract_command(location, names, dvd),
+                    cwd=directory,
+                    stdout_path=paths.logs / f"external-{source.id}-unpack.log",
+                    stderr_path=paths.logs / f"external-{source.id}-unpack.stderr.log",
+                )
+                for name in dvd.iterdir():
+                    if name.name != name.name.upper():
+                        name.rename(name.with_name(name.name.upper()))
+            _write_stage(marker, inputs, unpacked)
+        return info, external_source.input_arguments(info.kind, location, unpacked), identity
+
+    def _external_first_time(
+        self, paths: JobPaths, input_args: Sequence[str], specifier: str, output: Path
+    ) -> float:
+        self._runner(paths).run(
+            external_source.first_time_command(input_args, specifier),
+            cwd=output.parent,
+            stdout_path=output,
+            stderr_path=output.with_suffix(".log"),
+            timeout=600,
+        )
+        value = external_source.parse_first_time(output.read_text(encoding="utf-8"))
+        if value is None:
+            raise ReviewRequired(
+                f"the start time of external stream {specifier} is unknown",
+                details={"code": "external_source_invalid"},
+            )
+        return value
+
+    def _fit_external_source(
+        self,
+        paths: JobPaths,
+        source: external_spec.ExternalSource,
+        target_fps: Fraction,
+        title_signature: Path,
+        reference_sha256: str,
+    ) -> dict[str, Any]:
+        directory = _ensure_contained_directory(
+            self._external_root(paths) / source.id,
+            root=self._external_root(paths),
+            description="external source directory",
+        )
+        info, input_args, identity = self._external_input(paths, source, directory)
+        donor_fps = Fraction(info.fps)
+        signature = directory / "source.gray"
+        marker = paths.stages / f"external-{source.id}-signature.json"
+        inputs = {"schema_version": 1, **identity}
+        if not _valid_stage(marker, inputs, [signature]):
+            with self._step(paths, "external-source", ("A külső forrás képének lenyomata", "Fingerprinting the external picture")):
+                self._runner(paths).run(
+                    external_source.signature_command(input_args, signature),
+                    cwd=directory,
+                    stderr_path=paths.logs / f"external-{source.id}-signature.log",
+                )
+            _write_stage(marker, inputs, [signature])
+        map_path = directory / "map.json"
+        marker = paths.stages / f"external-{source.id}-map.json"
+        inputs = {
+            "schema_version": 1,
+            "reference_sha256": reference_sha256,
+            "source": identity,
+            "signature_sha256": _recorded_output_sha256(
+                paths.stages / f"external-{source.id}-signature.json", signature
+            ),
+            "target_fps": str(target_fps),
+            "donor_fps": str(donor_fps),
+        }
+        if not _valid_stage(marker, inputs, [map_path]):
+            with self._step(paths, "external-map", ("Képkockák megfeleltetése", "Matching the frames")):
+                try:
+                    self._runner(paths).run(
+                        [
+                            sys.executable, "-m", "bdencode.external", "map",
+                            str(title_signature), str(signature),
+                            str(target_fps), str(donor_fps), str(map_path),
+                        ],
+                        cwd=directory,
+                        stderr_path=paths.logs / f"external-{source.id}-map.log",
+                    )
+                except ProcessFailure as exc:
+                    raise ReviewRequired(
+                        "the two pictures could not be matched",
+                        details={"code": "external_source_no_match", "source": source.id},
+                    ) from exc
+            _write_stage(marker, inputs, [map_path])
+        document = json.loads(map_path.read_text(encoding="utf-8"))
+        total = int(document["target_frames"])
+        if not total or int(document["matched_frames"]) < total / 2 or float(document["similarity_median"]) < 0.5:
+            raise ReviewRequired(
+                "the external picture does not match this title",
+                details={
+                    "code": "external_source_no_match",
+                    "source": source.id,
+                    "matched_frames": document["matched_frames"],
+                    "target_frames": total,
+                    "similarity_median": document["similarity_median"],
+                },
+            )
+        map_sha256 = sha256_file(map_path)
+        video_start = self._external_first_time(
+            paths, input_args, "v:0", directory / "video-start.json"
+        )
+        rendered = [
+            self._render_external_track(
+                paths, source, index, track, info, input_args, directory,
+                document, map_sha256, target_fps, donor_fps, video_start,
+            )
+            for index, track in enumerate(source.tracks)
+        ]
+        subtitles = [
+            self._retime_external_subtitle(
+                paths, source, index, subtitle, directory, document, map_sha256, target_fps, donor_fps
+            )
+            for index, subtitle in enumerate(source.subtitles)
+        ]
+        review = {
+            "schema_version": 1,
+            "id": source.id,
+            "path": info.path,
+            "kind": info.kind,
+            "fps": info.fps,
+            "target_fps": str(target_fps),
+            "map_sha256": map_sha256,
+            "map": document,
+            "tracks": rendered,
+            "subtitles": subtitles,
+        }
+        atomic_write_json(directory / "review.json", review)
+        return review
+
+    def _render_external_track(
+        self,
+        paths: JobPaths,
+        source: external_spec.ExternalSource,
+        index: int,
+        track: external_spec.ExternalTrack,
+        info: external_source.SourceInfo,
+        input_args: Sequence[str],
+        directory: Path,
+        document: Mapping[str, Any],
+        map_sha256: str,
+        target_fps: Fraction,
+        donor_fps: Fraction,
+        video_start: float,
+    ) -> dict[str, Any]:
+        details = next((item for item in info.tracks if item.stream == track.stream), None)
+        if details is None:
+            raise ReviewRequired(
+                f"external track {track.stream} does not exist in {source.id}",
+                details={"code": "external_source_invalid", "source": source.id},
+            )
+        stem = f"track-{index:02d}"
+        start_path = directory / f"{stem}-start.json"
+        audio_start = self._external_first_time(paths, input_args, track.stream, start_path)
+        ratio = external_render.speed_ratio(document["mode"], donor_fps, target_fps)
+        segments = document["segments"]
+        per_frame = external_render.samples_per_frame(target_fps)
+        total_samples = external_render.sample_at(int(document["target_frames"]), per_frame)
+        audio_offset_samples = int(
+            round((audio_start - video_start) * float(ratio) * external_render.SAMPLE_RATE)
+        )
+        sample_rate = details.sample_rate or external_render.SAMPLE_RATE
+        stretched = directory / f"{stem}.stretched.f32"
+        stretch_argv = external_render.stretch_command(
+            input_args, track.stream, details.codec, details.channels, ratio, track.pitch, sample_rate, stretched
+        )
+        copy = external_render.copy_is_possible(segments, ratio)
+        sync_ms = 0
+        if copy:
+            first = segments[0]
+            sync_ms = int(
+                round(((audio_start - video_start) - int(first["offset"]) / float(target_fps)) * 1000)
+            )
+            copy = sync_ms <= 200
+        dialnorm = None
+        if not copy and details.codec in {"ac3", "eac3"}:
+            sample = directory / f"{stem}.first.ac3"
+            self._runner(paths).run(
+                [
+                    "ffmpeg", "-hide_banner", "-nostdin", "-v", "error", *input_args,
+                    "-map", f"0:{track.stream}", "-c:a", "copy", "-t", "2",
+                    "-f", "ac3" if details.codec == "ac3" else "eac3", "-y", str(sample),
+                ],
+                cwd=directory,
+                stderr_path=paths.logs / f"external-{source.id}-{stem}-probe.log",
+            )
+            completed = subprocess.run(
+                external_render.dialnorm_command(sample),
+                capture_output=True, text=True, timeout=60, check=False,
+            )
+            dialnorm = external_render.parse_dialnorm(completed.stdout)
+        bit_rate = details.bit_rate
+        if bit_rate is None and details.codec in {"ac3", "eac3"}:
+            bit_rate = self._external_bit_rate(input_args, track.stream)
+        if copy:
+            output = directory / (stem + external_render.sidecar_suffix(details.codec))
+            encoding = None
+        else:
+            try:
+                encoding = external_render.choose_encoding(details.codec, details.channels, bit_rate, dialnorm)
+            except external_render.RenderError as exc:
+                raise ReviewRequired(
+                    str(exc), details={"code": "external_source_invalid", "source": source.id}
+                ) from exc
+            output = directory / f"{stem}.ac3"
+        spec = {
+            "segments": segments,
+            "target_fps": str(target_fps),
+            "audio_offset_samples": audio_offset_samples,
+            "stretched": str(stretched),
+            "channels": details.channels,
+            "expected_stretched_samples": None,
+            "total_samples": total_samples,
+            "output": str(directory / f"{stem}.final.f32"),
+            "priming_samples": encoding.priming_samples if encoding else 0,
+            "correct_length": track.pitch == external_render.PITCH_KEEP and ratio != 1,
+        }
+        inputs = {
+            "schema_version": 1,
+            "map_sha256": map_sha256,
+            "stream": track.stream,
+            "pitch": track.pitch,
+            "copy": copy,
+            "encoding": asdict(encoding) if encoding else None,
+            "stretch": [str(item) for item in stretch_argv],
+        }
+        marker = paths.stages / f"external-{source.id}-{stem}.json"
+        report_path = directory / f"{stem}.json"
+        if not _valid_stage(marker, inputs, [output, report_path]):
+            label = (f"Hangsáv illesztése: {track.language}", f"Fitting the track: {track.language}")
+            with self._step(paths, f"external-{stem}", label):
+                self._runner(paths).run(
+                    stretch_argv,
+                    cwd=directory,
+                    stderr_path=paths.logs / f"external-{source.id}-{stem}-stretch.log",
+                )
+                actual = stretched.stat().st_size // (4 * details.channels)
+                silence: dict[str, Any] = {}
+                scale = 1.0
+                if copy:
+                    self._runner(paths).run(
+                        external_render.stream_copy_command(input_args, track.stream, output),
+                        cwd=directory,
+                        stderr_path=paths.logs / f"external-{source.id}-{stem}-copy.log",
+                    )
+                else:
+                    assert encoding is not None
+                    spec["expected_stretched_samples"] = actual
+                    if spec["correct_length"]:
+                        # Tempo-only stretching misses the length by a tiny
+                        # factor; the exact resampling shows the right one.
+                        exact = directory / f"{stem}.exact.f32"
+                        self._runner(paths).run(
+                            external_render.stretch_command(
+                                input_args, track.stream, details.codec, details.channels,
+                                ratio, external_render.PITCH_RESTORE, sample_rate, exact,
+                            ),
+                            cwd=directory,
+                            stderr_path=paths.logs / f"external-{source.id}-{stem}-exact.log",
+                        )
+                        spec["expected_stretched_samples"] = exact.stat().st_size // (4 * details.channels)
+                        exact.unlink(missing_ok=True)
+                    spec_path = directory / f"{stem}.spec.json"
+                    atomic_write_json(spec_path, spec)
+                    assembled = directory / f"{stem}.assemble.json"
+                    self._runner(paths).run(
+                        [sys.executable, "-m", "bdencode.external", "assemble", str(spec_path)],
+                        cwd=directory,
+                        stdout_path=assembled,
+                        stderr_path=paths.logs / f"external-{source.id}-{stem}-assemble.log",
+                    )
+                    silence = json.loads(assembled.read_text(encoding="utf-8"))
+                    scale = float(silence.get("scale", 1.0))
+                    self._runner(paths).run(
+                        external_render.encode_command(
+                            Path(spec["output"]), details.channels, encoding, output
+                        ),
+                        cwd=directory,
+                        stderr_path=paths.logs / f"external-{source.id}-{stem}-encode.log",
+                    )
+                    Path(spec["output"]).unlink(missing_ok=True)
+                atomic_write_json(
+                    report_path,
+                    {
+                        "schema_version": 1,
+                        "stream": track.stream,
+                        "language": track.language,
+                        "pitch": track.pitch,
+                        "codec": details.codec,
+                        "channels": details.channels,
+                        "copy": copy,
+                        "sync_ms": sync_ms,
+                        "encoding": asdict(encoding) if encoding else None,
+                        "audio_offset_samples": audio_offset_samples,
+                        "scale": scale,
+                        "stretched_samples": actual,
+                        "silent_samples": silence.get("silent_samples", 0),
+                        "file": output.name,
+                    },
+                )
+            _write_stage(marker, inputs, [output, report_path])
+        return json.loads(report_path.read_text(encoding="utf-8"))
+
+    def _external_bit_rate(self, input_args: Sequence[str], specifier: str) -> int | None:
+        completed = subprocess.run(
+            [
+                "ffprobe", "-hide_banner", "-v", "error", *input_args,
+                "-select_streams", specifier,
+                "-show_entries", "stream=bit_rate", "-of", "csv=p=0",
+            ],
+            capture_output=True, text=True, timeout=600, check=False,
+        )
+        value = (completed.stdout or "").strip().splitlines()
+        return int(value[0]) if value and value[0].strip().isdigit() else None
+
+    def _retime_external_subtitle(
+        self,
+        paths: JobPaths,
+        source: external_spec.ExternalSource,
+        index: int,
+        subtitle: external_spec.ExternalSubtitle,
+        directory: Path,
+        document: Mapping[str, Any],
+        map_sha256: str,
+        target_fps: Fraction,
+        donor_fps: Fraction,
+    ) -> dict[str, Any]:
+        try:
+            original = self.settings.authorize_source(subtitle.path)
+            raw = original.read_bytes()
+            cues = external_subtitles.parse_srt(external_subtitles.decode_text(raw))
+        except (ConfigurationError, external_subtitles.SubtitleError, OSError) as exc:
+            raise ReviewRequired(
+                f"external subtitle cannot be read: {exc}",
+                details={"code": "external_source_invalid", "source": source.id},
+            ) from exc
+        grid_fps = donor_fps if document["mode"] == "frame-locked" else target_fps
+        moved, counts = external_subtitles.retime(
+            cues, document["segments"], target_fps=target_fps, donor_grid_fps=grid_fps
+        )
+        output = directory / f"subtitle-{index:02d}.srt"
+        atomic_write_text(output, external_subtitles.render_srt(moved))
+        return {
+            "file": output.name,
+            "language": subtitle.language,
+            "source_sha256": hashlib.sha256(raw).hexdigest(),
+            "map_sha256": map_sha256,
+            **counts,
+        }
+
+    def _restore_base_mux(self, paths: JobPaths) -> None:
+        """Back to the title's own mux, so that its stages see what they checked."""
+
+        base = paths.work / "output.base.mkv"
+        saved = paths.stages / "mux.base.json"
+        if base.is_file() and saved.is_file():
+            paths.muxed_output.unlink(missing_ok=True)
+            os.link(base, paths.muxed_output)
+            shutil.copyfile(saved, paths.stages / "mux.json")
+
+    def _merge_external_tracks(
+        self, job: Job, paths: JobPaths, selection: ParsedSelection
+    ) -> None:
+        """Join the fitted tracks to the checked mux and prove the result.
+
+        The title's streams must come through byte for byte; each fitted track
+        must lie where the map puts it.
+        """
+
+        if not selection.external_sources:
+            return
+        with self._step(paths, "external-merge", ("Külső sávok muxolása", "Muxing the external tracks")):
+            base = paths.work / "output.base.mkv"
+            saved = paths.stages / "mux.base.json"
+            if not base.is_file():
+                os.link(paths.muxed_output, base)
+                shutil.copyfile(paths.stages / "mux.json", saved)
+            root = self._external_root(paths)
+            audio: list[dict[str, Any]] = []
+            subtitles: list[dict[str, Any]] = []
+            for source in selection.external_sources:
+                directory = root / source.id
+                review = json.loads((directory / "review.json").read_text(encoding="utf-8"))
+                for track, report in zip(source.tracks, review["tracks"], strict=True):
+                    audio.append(
+                        {
+                            "source": source.id,
+                            "external_source": source,
+                            "directory": directory,
+                            "review": review,
+                            "track": track,
+                            "report": report,
+                            "path": directory / report["file"],
+                        }
+                    )
+                for subtitle, report in zip(source.subtitles, review["subtitles"], strict=True):
+                    subtitles.append(
+                        {"subtitle": subtitle, "path": directory / report["file"]}
+                    )
+            identified = subprocess.run(
+                ["mkvmerge", "--identify", "--identification-format", "json", str(base)],
+                capture_output=True, text=True, timeout=600, check=False,
+            )
+            base_tracks = (json.loads(identified.stdout or "{}")).get("tracks") or []
+            video_start = self._external_video_start(base)
+            command = external_merge_command(
+                paths.work / "output.merged.mkv",
+                base,
+                base_tracks,
+                audio,
+                subtitles,
+                title=selection.output_name,
+                video_start_seconds=video_start,
+            )
+            merged = paths.work / "output.merged.mkv"
+            merged.unlink(missing_ok=True)
+            self._runner(paths).run(
+                command,
+                cwd=paths.work,
+                stdout_path=paths.logs / "external-merge.log",
+                stderr_path=paths.logs / "external-merge.stderr.log",
+                ok_returncodes=(0, 1),
+            )
+            if not merged.is_file():
+                raise RuntimeError("mkvmerge did not write the merged file")
+            self._verify_external_merge(job, paths, base, merged, base_tracks, audio, video_start)
+            paths.muxed_output.unlink(missing_ok=True)
+            os.replace(merged, paths.muxed_output)
+            _write_stage(
+                paths.stages / "mux.json",
+                {"schema_version": 1, "mode": "external-merge", "base_sha256": sha256_file(base)},
+                [paths.muxed_output],
+            )
+            self._refresh_final_reports(job, paths, selection)
+            for item in audio:
+                (item["directory"] / item["path"].name).with_suffix(".stretched.f32").unlink(missing_ok=True)
+
+    def _external_video_start(self, path: Path) -> float:
+        completed = subprocess.run(
+            external_source.first_time_command(["-i", str(path)], "v:0"),
+            capture_output=True, text=True, timeout=600, check=False,
+        )
+        value = external_source.parse_first_time(completed.stdout)
+        return value if value is not None else 0.0
+
+    def _verify_external_merge(
+        self,
+        job: Job,
+        paths: JobPaths,
+        base: Path,
+        merged: Path,
+        base_tracks: Sequence[Mapping[str, Any]],
+        audio: Sequence[Mapping[str, Any]],
+        video_start: float,
+    ) -> None:
+        final_tracks = (
+            json.loads(
+                subprocess.run(
+                    ["mkvmerge", "--identify", "--identification-format", "json", str(merged)],
+                    capture_output=True, text=True, timeout=600, check=False,
+                ).stdout
+                or "{}"
+            ).get("tracks")
+            or []
+        )
+        order = external_final_audio_order(base_tracks, audio)
+        hashes: dict[str, list[str]] = {}
+        # Base streams in the merged file, by their place in each file.
+        final_audio = [item for item in final_tracks if item.get("type") == "audio"]
+        if len(final_audio) != len(order):
+            raise ReviewRequired(
+                "the merged file does not hold the expected audio tracks",
+                details={"code": "external_merge_failed"},
+            )
+        base_audio_count = sum(1 for item in base_tracks if item.get("type") == "audio")
+        base_subtitle_count = sum(1 for item in base_tracks if item.get("type") == "subtitles")
+        final_positions = {
+            entry: position for position, entry in enumerate(order) if isinstance(entry, int)
+        }
+        report_path = paths.analysis / "external-merge-streams.json"
+        maps = {
+            "base": [
+                "0:v:0",
+                *(f"0:a:{index}" for index in range(base_audio_count)),
+                *(f"0:s:{index}" for index in range(base_subtitle_count)),
+            ],
+            "final": [
+                "0:v:0",
+                *(f"0:a:{final_positions[index]}" for index in range(base_audio_count)),
+                *(f"0:s:{index}" for index in range(base_subtitle_count)),
+            ],
+        }
+        for label, path in (("base", base), ("final", merged)):
+            output = paths.analysis / f"external-merge-{label}.streamhash"
+            self._runner(paths).run(
+                [
+                    "ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-i", str(path),
+                    *[value for item in maps[label] for value in ("-map", item)],
+                    "-c", "copy", "-f", "streamhash", "-hash", "sha256", "-y", str(output),
+                ],
+                cwd=paths.work,
+                stderr_path=paths.logs / f"external-merge-{label}-hash.log",
+            )
+            hashes[label] = output.read_text(encoding="utf-8").split()
+        verdicts: list[dict[str, Any]] = []
+        if hashes["base"] != hashes["final"]:
+            raise ReviewRequired(
+                "the merge changed one of the title's own streams",
+                details={"code": "external_merge_failed"},
+            )
+        for position, entry in enumerate(order):
+            if isinstance(entry, int):
+                continue
+            verdicts.append(
+                self._verify_external_track(paths, merged, position, audio[entry[1]], video_start)
+            )
+        atomic_write_json(
+            report_path, {"schema_version": 1, "streams_unchanged": True, "tracks": verdicts}
+        )
+        self._register_artifact(
+            job.id,
+            report_path,
+            DatabaseArtifactKind.REPORT,
+            report_path.name,
+            mime_type="application/json",
+        )
+        failed = [item for item in verdicts if item["status"] != "passed"]
+        if failed:
+            raise ReviewRequired(
+                "an external track is not where the map puts it",
+                details={
+                    "code": "external_merge_failed",
+                    "tracks": [
+                        {"source": item["source"], "stream": item["stream"], "status": item["status"]}
+                        for item in failed
+                    ],
+                },
+            )
+
+    def _verify_external_track(
+        self,
+        paths: JobPaths,
+        merged: Path,
+        ordinal: int,
+        item: Mapping[str, Any],
+        video_start: float,
+    ) -> dict[str, Any]:
+        directory: Path = item["directory"]
+        review = item["review"]
+        report = item["report"]
+        track = item["track"]
+        stem = Path(report["file"]).stem
+        stretched = directory / f"{stem}.stretched.f32"
+        if not stretched.is_file():
+            self._stretch_external_again(paths, item, stretched)
+        result = directory / f"{stem}.verify.json"
+        spec_path = directory / f"{stem}.verify-spec.json"
+        atomic_write_json(
+            spec_path,
+            {
+                "segments": review["map"]["segments"],
+                "target_fps": review["target_fps"],
+                "channels": report["channels"],
+                "stretched": str(stretched),
+                "final": str(merged),
+                "work": str(directory),
+                "ordinal": ordinal,
+                "video_start_seconds": video_start,
+                "audio_offset_samples": report["audio_offset_samples"],
+                "scale": report["scale"],
+                "report": str(result),
+            },
+        )
+        self._runner(paths).run(
+            [sys.executable, "-m", "bdencode.external", "verify", str(spec_path)],
+            cwd=directory,
+            stderr_path=paths.logs / f"external-{item['source']}-{stem}-verify.log",
+        )
+        verdict = json.loads(result.read_text(encoding="utf-8"))
+        return {"source": item["source"], "stream": track.stream, **verdict}
+
+    def _stretch_external_again(
+        self, paths: JobPaths, item: Mapping[str, Any], stretched: Path
+    ) -> None:
+        """A finished merge deleted these samples; a repeated one needs them for its proof."""
+
+        directory: Path = item["directory"]
+        review = item["review"]
+        track = item["track"]
+        source = item["external_source"]
+        info, input_args, _identity = self._external_input(paths, source, directory)
+        details = next((entry for entry in info.tracks if entry.stream == track.stream), None)
+        if details is None:
+            raise ReviewRequired(
+                f"external track {track.stream} does not exist in {source.id}",
+                details={"code": "external_merge_failed", "source": source.id},
+            )
+        ratio = external_render.speed_ratio(
+            review["map"]["mode"], Fraction(review["fps"]), Fraction(review["target_fps"])
+        )
+        self._runner(paths).run(
+            external_render.stretch_command(
+                input_args,
+                track.stream,
+                details.codec,
+                details.channels,
+                ratio,
+                track.pitch,
+                details.sample_rate or external_render.SAMPLE_RATE,
+                stretched,
+            ),
+            cwd=directory,
+            stderr_path=paths.logs / f"external-{source.id}-{stretched.stem}-again.log",
+        )
+
+    def _refresh_final_reports(
+        self, job: Job, paths: JobPaths, selection: ParsedSelection
+    ) -> None:
+        """The reports a release uses must describe the file with the fitted tracks."""
+
+        output = paths.muxed_output
+        if selection.is_remux or selection.is_fit:
+            raw = self._remux_root(paths) / "external-mediainfo.txt"
+            self._runner(paths).run(
+                ["mediainfo", output.name],
+                cwd=output.parent,
+                stdout_path=raw,
+                stderr_path=paths.logs / "external-mediainfo.log",
+                timeout=600,
+            )
+            mediainfo = paths.analysis / "mediainfo.txt"
+            atomic_write_text(
+                mediainfo,
+                raw.read_text(encoding="utf-8", errors="replace").replace(
+                    output.name, f"{selection.output_name}.mkv"
+                ),
+            )
+            identify = paths.analysis / "mkvmerge-identify.json"
+            self._runner(paths).run(
+                ["mkvmerge", "--identify", "--identification-format", "json", str(output)],
+                cwd=paths.work,
+                stdout_path=identify,
+                stderr_path=paths.logs / "external-identify.log",
+                ok_returncodes=(0, 1),
+            )
+            self._register_artifact(
+                job.id, mediainfo, DatabaseArtifactKind.MEDIAINFO, mediainfo.name, mime_type="text/plain"
+            )
+            self._register_artifact(
+                job.id, identify, DatabaseArtifactKind.MKVINFO, identify.name, mime_type="application/json"
+            )
+            return
+        report_root = paths.analysis / "container"
+        for command, report in inspection_commands(output, report_root):
+            if report.name not in {"mediainfo.txt", "mkvmerge-identify.json", "mkvinfo.txt", "ffprobe-streams.json"}:
+                continue
+            self._runner(paths).run(
+                command,
+                cwd=paths.work,
+                stdout_path=report,
+                stderr_path=report.with_suffix(report.suffix + ".stderr"),
+                ok_returncodes=(0, 1) if command[0] == "mkvmerge" else (0,),
+            )
+            kind = (
+                DatabaseArtifactKind.MEDIAINFO
+                if report.name == "mediainfo.txt"
+                else DatabaseArtifactKind.MKVINFO
+                if report.name in {"mkvinfo.txt", "mkvmerge-identify.json"}
+                else DatabaseArtifactKind.REPORT
+            )
+            self._register_artifact(
+                job.id,
+                report,
+                kind,
+                report.name,
+                mime_type="application/json" if report.suffix == ".json" else "text/plain",
+            )
+
+    # -- fitting to a finished MKV --------------------------------------------------------
+
+    def _process_fit_stage(self, job: Job, paths: JobPaths) -> None:
+        """READY fits the tracks, MUXING selects the file's own tracks, QC joins and
+        proves them, COMPARISON takes the screenshots.  UPLOADING is shared."""
+
+        if job.state is JobState.READY:
+            self._fit_prepare(job, paths)
+        elif job.state is JobState.ENCODING:
+            # The serial claim moves a job from READY straight here.
+            if not self._fit_preparation_is_current(job, paths):
+                self._fit_prepare(job, paths, advance=False)
+            self.queue.advance(job.id, JobState.MUXING, message="nothing to encode: the tracks are fitted")
+        elif job.state is JobState.MUXING:
+            with self._step(paths, "mux", ("A saját sávok kiválasztása", "Selecting the file's own tracks")):
+                self._fit_mux(job, paths)
+        elif job.state is JobState.QC:
+            self._fit_qc(job, paths)
+        elif job.state is JobState.COMPARISON:
+            with self._step(paths, "screenshots", ("Képernyőképek", "Screenshots")):
+                self._remux_screenshots(job, paths)
+
+    def _fit_preparation_is_current(self, job: Job, paths: JobPaths) -> bool:
+        try:
+            scan, selection = self._load_scan_and_selection(job, paths)
+        except (OSError, TypeError, ValueError, KeyError):
+            return False
+        return self._external_fit_is_current(paths, selection) and _valid_stage(
+            paths.stages / "pipeline-prepare.json",
+            self._preparation_inputs(job, scan),
+            [paths.reference],
+        )
+
+    def _fit_prepare(self, job: Job, paths: JobPaths, *, advance: bool = True) -> None:
+        scan, selection = self._load_scan_and_selection(job, paths)
+        playlist = scan.playlist(selection.playlist_id)
+        reference_sha256 = self._prepare_reference(job, paths, scan, selection, playlist)
+        self._prepare_external_sources(paths, selection, playlist, reference_sha256)
+        _write_stage(
+            paths.stages / "pipeline-prepare.json",
+            self._preparation_inputs(job, scan),
+            [paths.reference],
+        )
+        if advance:
+            self.queue.advance(job.id, JobState.ENCODING, message="external sources fitted")
+
+    def _stream_hashes(
+        self, paths: JobPaths, path: Path, maps: Sequence[str], label: str
+    ) -> list[str]:
+        """The hash of each mapped stream's packets, in order; timing does not count."""
+
+        output = paths.analysis / f"{label}.streamhash"
+        self._runner(paths).run(
+            [
+                "ffmpeg", "-hide_banner", "-nostdin", "-v", "error", "-i", str(path),
+                *[value for item in maps for value in ("-map", item)],
+                "-c", "copy", "-f", "streamhash", "-hash", "sha256", "-y", str(output),
+            ],
+            cwd=paths.work,
+            stderr_path=paths.logs / f"{label}-hash.log",
+        )
+        return output.read_text(encoding="utf-8").split()
+
+    def _fit_mux(self, job: Job, paths: JobPaths) -> None:
+        self._restore_base_mux(paths)
+        scan, selection = self._load_scan_and_selection(job, paths)
+        playlist = scan.playlist(selection.playlist_id)
+        identified = subprocess.run(
+            ["mkvmerge", "--identify", "--identification-format", "json", str(paths.reference)],
+            capture_output=True, text=True, timeout=600, check=False,
+        )
+        file_tracks = json.loads(identified.stdout or "{}").get("tracks") or []
+        command, reference_maps, kept_maps = fit_base_mux_command(
+            paths.muxed_output,
+            paths.reference,
+            file_tracks,
+            playlist,
+            selection.tracks,
+            title=selection.output_name,
+        )
+        marker = paths.stages / "mux.json"
+        inputs = {
+            "schema_version": 1,
+            "mode": "fit",
+            "reference_sha256": sha256_file(paths.reference),
+            "command": [str(item) for item in command],
+        }
+        if not _valid_stage(marker, inputs, [paths.muxed_output]):
+            paths.muxed_output.unlink(missing_ok=True)
+            (paths.work / "output.base.mkv").unlink(missing_ok=True)
+            (paths.stages / "mux.base.json").unlink(missing_ok=True)
+            self._runner(paths).run(
+                command,
+                cwd=paths.work,
+                stdout_path=paths.logs / "mkvmerge.log",
+                stderr_path=paths.logs / "mkvmerge.stderr.log",
+                ok_returncodes=(0, 1),
+            )
+            if not paths.muxed_output.is_file():
+                raise RuntimeError("mkvmerge did not write the file")
+            before = self._stream_hashes(paths, paths.reference, reference_maps, "fit-reference")
+            after = self._stream_hashes(paths, paths.muxed_output, kept_maps, "fit-base")
+            if before != after:
+                raise ReviewRequired(
+                    "selecting the tracks changed one of the file's own streams",
+                    details={"code": "external_merge_failed"},
+                )
+            _write_stage(marker, inputs, [paths.muxed_output])
+        self.queue.advance(job.id, JobState.QC, message="the file's own tracks selected")
+
+    def _fit_qc(self, job: Job, paths: JobPaths) -> None:
+        self._restore_base_mux(paths)
+        _scan, selection = self._load_scan_and_selection(job, paths)
+        self._merge_external_tracks(job, paths, selection)
+        report = paths.analysis / "external-merge-streams.json"
+        _write_stage(
+            paths.stages / "remux-qc.json",
+            {"schema_version": 1, "mode": "fit", "mux_sha256": sha256_file(paths.muxed_output)},
+            [report],
+        )
+        self.queue.advance(job.id, JobState.COMPARISON, message="the fitted tracks are verified")
 
     def _remux_root(self, paths: JobPaths) -> Path:
         """``work/remux``: eac3to's working directory (drive W:)."""
@@ -10527,7 +11760,7 @@ class PipelineWorker:
     def _remux_plan_path(self, paths: JobPaths) -> Path:
         return paths.analysis / "remux-plan.json"
 
-    def _remux_prepare(self, job: Job, paths: JobPaths) -> None:
+    def _remux_prepare(self, job: Job, paths: JobPaths, *, advance: bool = True) -> None:
         scan, selection = self._load_scan_and_selection(job, paths)
         support = remux_support()
         if not support["available"]:
@@ -10537,6 +11770,7 @@ class PipelineWorker:
             )
         playlist = scan.playlist(selection.playlist_id)
         reference_sha256 = self._prepare_reference(job, paths, scan, selection, playlist)
+        self._prepare_external_sources(paths, selection, playlist, reference_sha256)
         with self._step(paths, "language", ("Hangsávok nyelvének ellenőrzése", "Checking audio track languages")):
             selection = self._resolve_selected_languages(job, scan, selection, paths)
 
@@ -10606,6 +11840,7 @@ class PipelineWorker:
             "schema_version": 1,
             "playlist_id": selection.playlist_id,
             "reference_sha256": reference_sha256,
+            "joined_clips": list(self._remux_joined_clips(paths, scan, playlist, listing)),
             "listing_header": listing.header,
             "chapters": bool(chapters and chapters.chapter_count),
             "chapter_count": chapters.chapter_count if chapters else 0,
@@ -10654,9 +11889,51 @@ class PipelineWorker:
             self._preparation_inputs(job, scan),
             [paths.reference, plan_path, listing_path],
         )
-        self.queue.advance(
-            job.id, JobState.ENCODING, message="remux prepared: eac3to matched the playlist"
-        )
+        if advance:
+            self.queue.advance(
+                job.id, JobState.ENCODING, message="remux prepared: eac3to matched the playlist"
+            )
+
+    def _remux_joined_clips(
+        self,
+        paths: JobPaths,
+        scan: DiscScan,
+        playlist: PlaylistCandidate,
+        listing: remux.Eac3toListing,
+    ) -> tuple[str, ...]:
+        """The clips eac3to gets instead of the playlist, or nothing (``remux.whole_clips``).
+
+        The plan numbers the tracks by the playlist's listing, so the clips must
+        list the same tracks in the same order.
+        """
+
+        presentation: dict[str, tuple[int, int] | None] = {}
+        for segment in playlist.segments:
+            try:
+                presentation[segment.clip_id] = remux.clip_presentation(
+                    (scan.source / "BDMV" / "CLIPINF" / f"{segment.clip_id}.clpi").read_bytes()
+                )
+            except OSError:
+                presentation[segment.clip_id] = None
+        clips = remux.whole_clips(playlist, presentation)
+        if not clips:
+            return ()
+        joined_path = paths.analysis / "eac3to-clips-listing.txt"
+        with self._step(paths, "eac3to-clips-listing", ("A klipek listája eac3to-val", "Reading the clips with eac3to")):
+            self._runner(paths).run(
+                remux.eac3to_clips_listing_command(scan.source, clips),
+                cwd=self._remux_root(paths),
+                env=self._eac3to_env(paths),
+                stdout_path=joined_path,
+                stderr_path=paths.logs / "eac3to-clips-listing.log",
+                check=False,
+                timeout=1800,
+            )
+        try:
+            joined = remux.parse_listing(joined_path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, remux.RemuxError):
+            return ()
+        return clips if joined.tracks == listing.tracks else ()
 
     def _load_remux_plan(self, job: Job, paths: JobPaths, scan: DiscScan) -> dict[str, Any]:
         plan_path = self._remux_plan_path(paths)
@@ -10690,7 +11967,11 @@ class PipelineWorker:
         root = self._remux_root(paths)
         outputs = [remux.DemuxOutput(**item) for item in plan["outputs"]]
         command = remux.eac3to_demux_command(
-            scan.source, selection.playlist_id, outputs, chapters=bool(plan["chapters"])
+            scan.source,
+            selection.playlist_id,
+            outputs,
+            chapters=bool(plan["chapters"]),
+            clips=plan.get("joined_clips") or (),
         )
         log_path = root / remux.LOG_NAME
         findings_path = paths.analysis / "eac3to-findings.json"
@@ -11092,6 +12373,7 @@ class PipelineWorker:
         }
 
     def _remux_mux(self, job: Job, paths: JobPaths) -> None:
+        self._restore_base_mux(paths)
         scan, selection = self._load_scan_and_selection(job, paths)
         playlist = scan.playlist(selection.playlist_id)
         plan = self._load_remux_plan(job, paths, scan)
@@ -11211,9 +12493,11 @@ class PipelineWorker:
         eac3to (under Wine) and mkvmerge are checked by a different reader.
         Video and every audio track decode to the same MD5 as their reference
         stream; the compatibility AC-3 (absent from the reference) is checked
-        for sync against its TrueHD; subtitle payloads must hash the same.
+        for sync against its TrueHD; subtitle payloads must hash the same.  A
+        multi-clip title is held to its clips instead (``qc.multi_clip``).
         """
 
+        self._restore_base_mux(paths)
         scan, selection = self._load_scan_and_selection(job, paths)
         playlist = scan.playlist(selection.playlist_id)
         output = paths.muxed_output
@@ -11246,7 +12530,7 @@ class PipelineWorker:
         marker = paths.stages / "remux-qc.json"
         outputs = [report_path, mediainfo_path, identify_path]
         if not _valid_stage(marker, inputs, outputs):
-            report = self._run_remux_qc(paths, playlist, plan, layout, qc_root)
+            report = self._run_remux_qc(paths, scan.source, playlist, plan, layout, qc_root)
             atomic_write_json(report_path, report)
             shutil.copyfile(qc_root / "final.mkvmerge.json", identify_path)
             # Plain MediaInfo for the tracker's parser box: run on the relative
@@ -11295,11 +12579,98 @@ class PipelineWorker:
             identify_path.name,
             mime_type="application/json",
         )
+        self._merge_external_tracks(job, paths, selection)
         self.queue.advance(job.id, JobState.COMPARISON, message="remux verified untouched")
+
+    def _remux_clip_streams(
+        self, paths: JobPaths, disc_root: Path, clip_id: str, qc_root: Path
+    ) -> tuple[Path, dict[str, Any]]:
+        """A playlist clip's file and its streams as FFprobe numbers them."""
+
+        clip = disc_root / "BDMV" / "STREAM" / f"{clip_id}.m2ts"
+        if not clip.is_file():
+            clip = clip.with_suffix(".M2TS")
+        if not clip.is_file():
+            raise ReviewRequired(f"selected playlist clip is missing: {clip_id}")
+        report = qc_root / f"clip-{clip_id}.streams.json"
+        self._runner(paths).run(
+            multi_clip.clip_streams_command(clip),
+            cwd=qc_root,
+            stdout_path=report,
+            stderr_path=report.with_suffix(".log"),
+            timeout=600,
+        )
+        try:
+            return clip, json.loads(report.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ReviewRequired(f"the streams of clip {clip_id} cannot be read: {exc}") from exc
+
+    def _remux_first_subtitle_in_clips(
+        self,
+        paths: JobPaths,
+        playlist: PlaylistCandidate,
+        stream: MediaStream,
+        clip_streams: Callable[[str], tuple[Path, dict[str, Any]]],
+        qc_root: Path,
+    ) -> Decimal | None:
+        """Title time of a subtitle's first event, read from the clips."""
+
+        title = Decimal(0)
+        for segment in playlist.segments:
+            in_time = Decimal(str(segment.in_time_seconds))
+            out_time = Decimal(str(segment.out_time_seconds))
+            clip, document = clip_streams(segment.clip_id)
+            ordinal = multi_clip.clip_ordinal(document, "subtitle", stream.pid, stream.codec)
+            if ordinal is not None:
+                report = qc_root / f"clip-{segment.clip_id}.s{ordinal}.first.json"
+                self._runner(paths).run(
+                    first_packet_probe_command(clip, f"s:{ordinal}"),
+                    cwd=qc_root,
+                    stdout_path=report,
+                    stderr_path=report.with_suffix(".log"),
+                )
+                try:
+                    first = parse_first_packet_time(json.loads(report.read_text(encoding="utf-8")))
+                except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                    raise ReviewRequired(
+                        f"clip {segment.clip_id}: the first subtitle packet is unreadable: {exc}"
+                    ) from exc
+                if first is not None and first < out_time:
+                    return title + first - in_time
+            title += out_time - in_time
+        return None
+
+    def _remux_packets_at_joins(
+        self,
+        paths: JobPaths,
+        playlist: PlaylistCandidate,
+        label: str,
+        reference_stream: str,
+        final_stream: str,
+        qc_root: Path,
+    ) -> multi_clip.PacketComparison:
+        packets: dict[str, multi_clip.Packets] = {}
+        for side, path, stream in (
+            ("reference", paths.reference, reference_stream),
+            ("final", paths.muxed_output, final_stream),
+        ):
+            target = qc_root / f"{label}.{side}.packets"
+            self._runner(paths).run(
+                multi_clip.packet_hash_command(path, stream),
+                cwd=qc_root,
+                stdout_path=target,
+                stderr_path=target.with_suffix(".log"),
+            )
+            packets[side] = multi_clip.parse_packets(target.read_text(encoding="utf-8"))
+            target.unlink(missing_ok=True)
+        return multi_clip.compare_packets(
+            packets["reference"], packets["final"], multi_clip.join_seconds(playlist.segments)
+        )
 
     def _run_remux_qc(
         self,
         paths: JobPaths,
+        disc_root: Path,
         playlist: PlaylistCandidate,
         plan: Mapping[str, Any],
         layout: Sequence[Mapping[str, Any]],
@@ -11307,6 +12678,7 @@ class PipelineWorker:
     ) -> dict[str, Any]:
         output = paths.muxed_output
         checks: list[dict[str, Any]] = []
+        multiple_clips = len(playlist.segments) > 1
 
         def check(name: str, passed: bool, message: str, **details: Any) -> None:
             checks.append(
@@ -11417,7 +12789,8 @@ class PipelineWorker:
         final_audio = 0
         final_subtitle = 0
         subtitle_pairs: list[tuple[str, int, int]] = []
-        sync_pairs: list[tuple[str, int, int, MediaStream]] = []
+        subtitle_streams: dict[str, MediaStream] = {}
+        sync_pairs: list[tuple[str, int, int, MediaStream, str]] = []
         streams_by_id = {stream.id: stream for stream in playlist.audio_streams}
         for planned in layout:
             if planned["kind"] == "audio":
@@ -11452,12 +12825,16 @@ class PipelineWorker:
                         reference_audio[reference_stream.id],
                         final_audio,
                         reference_stream,
+                        "DD" if planned["compatibility"] else remux.stream_family(reference_stream),
                     )
                 )
                 final_audio += 1
             elif planned["kind"] == "subtitle":
                 subtitle_pairs.append(
                     (planned["file"], reference_subtitles[planned["stream_id"]], final_subtitle)
+                )
+                subtitle_streams[planned["file"]] = next(
+                    stream for stream in playlist.subtitle_streams if stream.id == planned["stream_id"]
                 )
                 final_subtitle += 1
         tasks: list[Callable[[], object]] = []
@@ -11489,6 +12866,22 @@ class PipelineWorker:
                 )
             except (OSError, remux.RemuxError) as exc:
                 check(f"{kind}:{label}", False, f"{label} could not be decoded: {exc}")
+                continue
+            if reference_md5 != final_md5 and kind == "audio" and multiple_clips:
+                comparison = self._remux_packets_at_joins(
+                    paths, playlist, label, reference_stream, final_stream, qc_root
+                )
+                check(
+                    f"{kind}:{label}",
+                    comparison.passed,
+                    f"{label}: {comparison.problem}"
+                    if comparison.problem
+                    else f"{label}: {comparison.packets} packets equal the disc's, "
+                    f"{sum(int(item['packets']) for item in comparison.removed)} removed at the clip joins",
+                    reference_md5=reference_md5,
+                    final_md5=final_md5,
+                    removed_at_joins=list(comparison.removed),
+                )
                 continue
             check(
                 f"{kind}:{label}",
@@ -11581,39 +12974,80 @@ class PipelineWorker:
         if reference_origin is None or final_origin is None:
             raise ReviewRequired("the remux or its reference has no video packets")
         duration = self._remux_duration(paths, playlist)
-        for label, reference_ordinal, final_ordinal, reference_stream in sync_pairs:
+        probed_clips: dict[str, tuple[Path, dict[str, Any]]] = {}
+
+        def clip_streams(clip_id: str) -> tuple[Path, dict[str, Any]]:
+            if clip_id not in probed_clips:
+                probed_clips[clip_id] = self._remux_clip_streams(paths, disc_root, clip_id, qc_root)
+            return probed_clips[clip_id]
+
+        for label, reference_ordinal, final_ordinal, reference_stream, family in sync_pairs:
             windows: list[av_sync.SyncWindow] = []
             source_args = audio_decode_input_args(normalize_audio_codec_name(reference_stream.codec))
-            for index, start in enumerate(av_sync.window_starts(duration)):
+            # What each window is compared with: the source, its ordinal, its start and
+            # the window's start in the remux and its length.
+            targets: list[tuple[Path, int, Decimal, Decimal, Decimal]] = []
+            if multiple_clips:
+                for window in multi_clip.clip_windows(playlist.segments):
+                    clip, document = clip_streams(window.clip_id)
+                    ordinal = multi_clip.clip_ordinal(
+                        document, "audio", reference_stream.pid, reference_stream.codec
+                    )
+                    if ordinal is not None:
+                        targets.append(
+                            (
+                                clip,
+                                ordinal,
+                                window.clip_start_seconds,
+                                window.title_start_seconds + final_origin,
+                                window.seconds,
+                            )
+                        )
+            else:
+                targets = [
+                    (
+                        paths.reference,
+                        reference_ordinal,
+                        start + reference_origin,
+                        start + final_origin,
+                        av_sync.WINDOW_SECONDS,
+                    )
+                    for start in av_sync.window_starts(duration)
+                ]
+            for index, (source, ordinal, source_start, final_start, seconds) in enumerate(targets):
                 reference_raw = qc_root / f"{label}.{index}.reference.f32"
                 final_raw = qc_root / f"{label}.{index}.final.f32"
                 self._runner(paths).run(
                     av_sync.sync_window_command(
-                        paths.reference,
-                        reference_ordinal,
-                        start + reference_origin,
+                        source,
+                        ordinal,
+                        source_start,
                         reference_raw,
                         input_args=source_args,
+                        seconds=seconds,
                     ),
                     cwd=qc_root,
                     stderr_path=reference_raw.with_suffix(".log"),
                 )
                 self._runner(paths).run(
-                    av_sync.sync_window_command(output, final_ordinal, start + final_origin, final_raw),
+                    av_sync.sync_window_command(output, final_ordinal, final_start, final_raw, seconds=seconds),
                     cwd=qc_root,
                     stderr_path=final_raw.with_suffix(".log"),
                 )
                 windows.append(
                     av_sync.window_result(
-                        start + final_origin,
-                        start + reference_origin,
+                        final_start,
+                        source_start,
                         av_sync.read_samples(reference_raw),
                         av_sync.read_samples(final_raw),
                     )
                 )
                 reference_raw.unlink(missing_ok=True)
                 final_raw.unlink(missing_ok=True)
-            verdict = av_sync.judge(windows)
+            verdict = av_sync.judge(
+                windows,
+                tolerance_ms=multi_clip.tolerance_ms(family) if multiple_clips else av_sync.TOLERANCE_MS,
+            )
             check(
                 f"sync:{label}",
                 verdict.status != "out_of_sync",
@@ -11621,9 +13055,15 @@ class PipelineWorker:
                 sync=verdict.to_dict(),
             )
         for label, reference_ordinal, final_ordinal in subtitle_pairs:
-            reference_first = self._probe_first_packet(
-                paths, paths.reference, f"s:{reference_ordinal}", label=f"remux-reference-s{reference_ordinal}"
-            )
+            if multiple_clips:
+                reference_origin = Decimal(0)
+                reference_first = self._remux_first_subtitle_in_clips(
+                    paths, playlist, subtitle_streams[label], clip_streams, qc_root
+                )
+            else:
+                reference_first = self._probe_first_packet(
+                    paths, paths.reference, f"s:{reference_ordinal}", label=f"remux-reference-s{reference_ordinal}"
+                )
             final_first = self._probe_first_packet(
                 paths, output, f"s:{final_ordinal}", label=f"remux-final-s{final_ordinal}"
             )
@@ -11674,11 +13114,15 @@ class PipelineWorker:
                 (frame, Decimal(frame) * Decimal(rate.denominator) / Decimal(rate.numerator))
             )
         manifest_path = paths.comparison / "remux-screenshots.json"
-        public_log = paths.comparison / remux.LOG_NAME
+        public_log = paths.comparison / (FIT_LOG_NAME if selection.is_fit else remux.LOG_NAME)
         pngs = [paths.comparison / f"{number + 1:02d}-screenshot.png" for number in range(count)]
         demux_log = self._remux_root(paths) / remux.LOG_NAME
-        log_pins = _assert_stage_outputs_current(
-            paths.stages / "remux-demux.json", [demux_log], stage_name="eac3to demux"
+        log_pins = (
+            {}
+            if selection.is_fit
+            else _assert_stage_outputs_current(
+                paths.stages / "remux-demux.json", [demux_log], stage_name="eac3to demux"
+            )
         )
         inputs = {
             "schema_version": 1,
@@ -11691,7 +13135,9 @@ class PipelineWorker:
         if not _valid_stage(marker, inputs, outputs):
             atomic_write_text(
                 public_log,
-                remux.public_log(demux_log.read_text(encoding="utf-8", errors="replace")),
+                self._fit_public_log(paths, selection)
+                if selection.is_fit
+                else remux.public_log(demux_log.read_text(encoding="utf-8", errors="replace")),
             )
             _assert_public_sidecar_safe(public_log, wine_drives=True)
             for stale in paths.comparison.glob("*.png"):
@@ -11751,7 +13197,38 @@ class PipelineWorker:
                 png.name,
                 mime_type="image/png",
             )
-        self.queue.advance(job.id, JobState.UPLOADING, message="remux screenshots taken")
+        self.queue.advance(
+            job.id,
+            JobState.UPLOADING,
+            message="screenshots taken" if selection.is_fit else "remux screenshots taken",
+        )
+
+    def _fit_public_log(self, paths: JobPaths, selection: ParsedSelection) -> str:
+        """What was fitted and how, without any server path."""
+
+        lines = []
+        for source in selection.external_sources:
+            review = json.loads(
+                (self._external_root(paths) / source.id / "review.json").read_text(encoding="utf-8")
+            )
+            mapped = review["map"]
+            rate = Fraction(review["target_fps"])
+            lines.append(f"External source: {review['kind']}, {review['fps']} fps")
+            lines.append(
+                f"Title: {review['target_fps']} fps, {mapped['target_frames']} frames; "
+                f"{len(mapped['segments'])} fitted parts, picture match {mapped['similarity_median']}, "
+                f"{float(mapped['unmatched_frames'] / rate):.1f} s not in the source"
+            )
+            for report in review["tracks"]:
+                encoding = report.get("encoding")
+                how = "not re-encoded" if report.get("copy") else f"{encoding['codec']} {encoding['bit_rate'] // 1000} kbps"
+                lines.append(f"Track: {report['language']}, {report['codec']} {report['channels']} ch, {how}, pitch {report['pitch']}")
+            for report in review["subtitles"]:
+                lines.append(
+                    f"Subtitle: {report['language']}, {report['kept']} cues, "
+                    f"{report['dropped']} dropped, {report['clipped']} clipped"
+                )
+        return "\n".join(lines) + "\n"
 
     def _remux_upload_and_finalize(
         self,
@@ -11765,8 +13242,10 @@ class PipelineWorker:
         publish the remux with its public evidence."""
 
         manifest_path = paths.comparison / "remux-screenshots.json"
-        public_log = paths.comparison / remux.LOG_NAME
-        qc_report = paths.analysis / "remux-qc.json"
+        public_log = paths.comparison / (FIT_LOG_NAME if selection.is_fit else remux.LOG_NAME)
+        qc_report = paths.analysis / (
+            "external-merge-streams.json" if selection.is_fit else "remux-qc.json"
+        )
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             images = [item for item in manifest["images"] if isinstance(item, Mapping)]
@@ -11807,7 +13286,8 @@ class PipelineWorker:
             uploaded,
             provider=provider_lock,
             profile=selection.tracker_profile.value,
-            eac3to_log=public_log.read_text(encoding="utf-8"),
+            eac3to_log="" if selection.is_fit else public_log.read_text(encoding="utf-8"),
+            kind="tracks added" if selection.is_fit else "remux",
             notes=[
                 str(item.get("text"))
                 for item in findings
@@ -11864,7 +13344,11 @@ class PipelineWorker:
             public_analysis_files=(qc_report,),
             pinned_public_files={**validated, **upload_pins},
             bbcode_outputs=bbcode_outputs,
-            completion_message="remux, QC and screenshots completed",
+            completion_message=(
+                "the fitted tracks are in the file; QC and screenshots completed"
+                if selection.is_fit
+                else "remux, QC and screenshots completed"
+            ),
         )
 
     def _upload_evidence_images(
@@ -12580,7 +14064,9 @@ class PipelineWorker:
                 "source_path": job.source_path,
                 "selection": job.selection,
                 # A remux has no encoder; its settings are an unused placeholder.
-                "encoder_settings": None if selection.is_remux else selection.settings.to_dict(),
+                "encoder_settings": (
+                    None if selection.is_remux or selection.is_fit else selection.settings.to_dict()
+                ),
                 **optional_reports,
                 "output": {
                     "path": str(output),

@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 
 
-AUDIO_ACTIONS = ("copy", "flac", "ac3", "eac3", "dts", "omit")
+AUDIO_ACTIONS = ("copy", "flac", "flac16", "ac3", "eac3", "dts", "omit")
 LOSSLESS_AUDIO_ACTIONS = frozenset({"copy", "flac"})
 LOSSY_AUDIO_ACTIONS = frozenset({"ac3", "eac3", "dts"})
 AUDIO_DECODE_POLICY_SCHEMA_VERSION = 1
@@ -90,7 +90,7 @@ class EffectiveAudioPolicy:
 def normalize_audio_action(action: str) -> str:
     normalized = action.casefold()
     if normalized not in AUDIO_ACTIONS:
-        raise ValueError("audio action must be copy, flac, ac3, eac3, dts or omit")
+        raise ValueError("audio action must be copy, flac, flac16, ac3, eac3, dts or omit")
     return normalized
 
 
@@ -209,6 +209,21 @@ def effective_audio_policy(
             source_channels,
             source_bit_depth,
         )
+    if normalized == "flac16":
+        # What Aither allows on a 1080p encode.  A 16-bit source stays bit
+        # identical; a deeper one is dithered, so it can no longer match.
+        exact = source_bit_depth == 16
+        return EffectiveAudioPolicy(
+            normalized,
+            "lossless_transcode" if exact else "dithered_transcode",
+            "lossless_pcm" if exact else "dithered_pcm",
+            "flac",
+            "flac",
+            None,
+            source_sample_rate,
+            source_channels,
+            16,
+        )
     if normalized == "dts" and _is_dts_source(source_codec, source_profile):
         core_extract = _is_dts_hd_source(source_codec, source_profile)
         return EffectiveAudioPolicy(
@@ -296,6 +311,12 @@ def audio_encode_args(
             args.extend(("-sample_fmt", sample_format))
         return args
 
+    if policy.action == "flac16":
+        args = ["-c:a", "flac", "-compression_level", "8", "-sample_fmt", "s16"]
+        if policy.strategy == "dithered_transcode":
+            args.extend(("-af", "aresample=osf=s16:dither_method=triangular"))
+        return args
+
     preset = AUDIO_TRANSCODE_PRESETS[policy.action]
     assert policy.channels is not None
     args = [
@@ -317,7 +338,7 @@ def expected_audio_codec(action: str, source_codec: str) -> str:
     normalized = normalize_audio_action(action)
     if normalized == "copy":
         return source_codec
-    if normalized == "flac":
+    if normalized in {"flac", "flac16"}:
         return "flac"
     if normalized in AUDIO_TRANSCODE_PRESETS:
         return AUDIO_TRANSCODE_PRESETS[normalized].codec_name
@@ -333,6 +354,9 @@ def audio_timing_tolerance(action: str, sample_rate: int) -> Decimal:
     frame_samples = {
         "copy": 1,
         "flac": 1,
+        # Dithered, so not proven sample by sample: Matroska's millisecond
+        # rounding has to fit the timing check.
+        "flac16": 48,
         "ac3": 1536,
         "eac3": 1536,
         # DTS core frame sizes vary with mode; 2048 samples is a conservative

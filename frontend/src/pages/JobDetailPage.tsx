@@ -41,13 +41,14 @@ import { JobStatisticsCard } from "../components/JobStatisticsCard";
 import { LiveStepPanel, StepTimelineCard, useJobLive } from "../components/LiveStep";
 import { PlayerPanel } from "../components/PlayerPanel";
 import { LanguageReviewCard, UploadReviewCard, VideoMetricsReviewCard } from "../components/ReviewPanels";
+import { ExternalReviewCard } from "../components/ExternalSources";
 import { ReleasePanel } from "../components/ReleasePanel";
 import { SelectionWizard } from "../components/SelectionWizard";
 import { Badge, Button, Card, EmptyState, LoadingPanel, Modal, Notice, PageHeader, ProgressBar } from "../components/ui";
 import { t } from "../i18n";
 import { normalizeStoredSelection } from "../selection";
 import { UPLOAD_IMAGE_SET_LABELS } from "../uploads";
-import { contentLabel, formatBytes, formatDate, formatEventMessage, formatStatusMessage, formatWorkerError, humanize, isFastComparisonTimeoutReview, isRemuxJob, isRunningState, jobStateLabel, stageProgress, stateLabel, stateTone } from "../utils";
+import { contentLabel, formatBytes, formatDate, formatEventMessage, formatStatusMessage, formatWorkerError, humanize, isFastComparisonTimeoutReview, isFitJob, isRemuxJob, isRunningState, jobStateLabel, stageProgress, stateLabel, stateTone } from "../utils";
 
 type Tab = "overview" | "settings" | "comparison" | "player" | "release" | "events" | "files";
 type JobDetailLocationState = {
@@ -163,6 +164,11 @@ function completedReleaseDeleteSnapshot(
     state: job.state,
     preparationVersions: releasePreparationVersions(preparations),
   };
+}
+
+function isExternalReview(job: Job): boolean {
+  const stored = (job.selection as { external_sources?: unknown } | null | undefined)?.external_sources;
+  return Array.isArray(stored) && stored.length > 0;
 }
 
 export function JobDetailPage() {
@@ -462,6 +468,7 @@ export function JobDetailPage() {
         </Notice>
       )}
       {retryUpload.isError && <Notice tone="danger" title={t("A feltöltés nem indítható újra", "The upload cannot be restarted")}>{retryUpload.error instanceof ApiError ? retryUpload.error.detail : retryUpload.error.message}</Notice>}
+      {job.state === "NEEDS_REVIEW" && isExternalReview(job) && <ExternalReviewCard key={`external-${job.version}`} job={job} />}
       {reviewKind === "language" && reviewQuery.data?.language && <LanguageReviewCard key={`language-${job.version}`} job={job} review={reviewQuery.data} />}
       {reviewKind === "video_metrics" && reviewQuery.data?.video_metrics && <VideoMetricsReviewCard key={`metrics-${job.version}`} job={job} review={reviewQuery.data} />}
       {uploadReview && reviewQuery.data && <UploadReviewCard key={`upload-${job.version}`} job={job} review={reviewQuery.data} credentials={runtimeQuery.data?.image_upload_credentials} />}
@@ -530,7 +537,7 @@ export function JobDetailPage() {
             <EmptyState icon={job.state === "SCANNING" ? <LoaderCircle className="spin" size={28} /> : <Settings2 size={28} />} title={job.state === "SCANNING" ? t("A scan folyamatban van", "The scan is in progress") : t("Még nincs jóváhagyott beállítás", "No approved settings yet")} description={t("A playlist- és sávválasztó a scan befejezése után jelenik meg.", "The playlist and track picker appears once the scan is finished.")} />
           )
         )}
-        {tab === "comparison" && <>{!isRemuxJob(job) && <EvaluationCard job={job} />}<ComparisonPanel artifacts={artifacts} /></>}
+        {tab === "comparison" && <>{!isRemuxJob(job) && !isFitJob(job) && <EvaluationCard job={job} />}<ComparisonPanel artifacts={artifacts} /></>}
         {tab === "player" && job.state === "COMPLETED" && <PlayerPanel jobId={job.id} />}
         {tab === "release" && <ReleasePanel job={job} outputArtifact={completedOutput} />}
         {tab === "events" && <EventTimeline events={events} loading={eventsQuery.isLoading} />}

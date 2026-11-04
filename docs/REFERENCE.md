@@ -37,7 +37,8 @@ A főbb funkciók:
 - film, koncert, anime és sorozatlemez kezelése;
 - több filmváltozat vagy playlist esetén grafikus választás;
 - hangsávok és feliratok kiválasztása, nyelvének felülbírálása;
-- sávonként `copy`, `flac`, `ac3`, `eac3`, `dts` vagy `omit` hangművelet;
+- sávonként `copy`, `flac`, `flac16`, `ac3`, `eac3`, `dts` vagy `omit` hangművelet;
+- hang és SRT-felirat illesztése más forrásból encode-ba, remuxba vagy kész MKV-ra, eltérő sebesség és vágás mellett is, a kép alapján mérve ([EXTERNAL_SOURCES.md](EXTERNAL_SOURCES.md));
 - rögzített minőségi hangprofilok: AC-3 640 kb/s, E-AC-3 1024 kb/s és DTS core 1536 kb/s, 48 kHz-en, legfeljebb 5.1 csatornával;
 - DTS-HD forrásnál lehetőség szerint újrakódolás nélküli DTS core kinyerés, TrueHD vagy más forrásnál ellenőrzött DTS-kódolás;
 - Blu-ray LPCM esetén a Matroska által nem támogatott bitstream-copy helyett FLAC/AC-3/E-AC-3/DTS átalakítás vagy elhagyás;
@@ -59,7 +60,7 @@ A főbb funkciók:
 - BBCode készítése;
 - MPLS/CLPI/PMT nyelvi adatok összesítése, ismeretlen hangnál választható CPU-s beszédfelismerési segítség és bizonytalanságnál kézi ellenőrzés;
 - privát nyers és tisztított napló; a publikus MKV nem kap naplót vagy más csatolmányt, a comparison külön sidecar marad;
-- release-csomag (NFO, BBCode-leírás, MediaInfo, ellenőrzött képek, checksumok) és dupe check; torrentet 3.0-tól nem készít, és a trackerre sem tölt fel;
+- release-csomag (NFO, BBCode-leírás, MediaInfo, ellenőrzött képek, checksumok) és dupe check; Aitherre és nCore-ra torrent, feltöltés és seed is;
 - napi kiadáskeresés, és új kiadásnál felügyelet nélküli, visszagörgethető frissítés;
 - opcionális **automatikus CRF-keresés**: rövid, VMAF-pontozott mintakódolásokból választja ki a célminőséghez tartozó CRF-et;
 - **zaj- és szemcseprofilok** (szemcse megtartása, enyhe/közepes/erős kódolóoldali zajszűrés);
@@ -481,7 +482,7 @@ Kiindulási mintának a repository [release-profiles.example.json](../config/rel
 - a release-csomag képszám-korlátai (`screenshot_minimum`, `screenshot_maximum`);
 - opcionálisan fix, credential nélküli HTTPS dupe-check endpoint, külön host-allowlisttel.
 
-3.0-tól a BDEncode nem készít torrentet, nem ad hozzá semmit qBittorrenthez, és nem tölt fel a trackerre. A torrent `source` token, az announce URL-ek, a darabméret-korlátok, a `publish_endpoint` és a `qbittorrent` szakasz ezért elhagyható. Egy régebbi profilfájl ezekkel együtt is betöltődik, de a rendszer nem használja őket. Ha a régi fájlban passkeyes announce URL maradt, nyugodtan töröld belőle.
+4.0-tól az Accofil BDEncode a beépített `aither` és `ncore` profilhoz torrentet készít, feltölt és qBittorrentben seedel, minden lépést a kezelő indít; lásd [RELEASE_4_0.md](RELEASE_4_0.md). Más trackerprofil továbbra is csak csomagot és dupe checket kap. A torrent `source` token, az announce URL-ek, a darabméret-korlátok, a `publish_endpoint` és a `qbittorrent` szakasz ezért elhagyható. Egy régebbi profilfájl ezekkel együtt is betöltődik, de a rendszer nem használja őket. Ha a régi fájlban passkeyes announce URL maradt, nyugodtan töröld belőle.
 
 API-token soha ne kerüljön a JSON-ba. A dupe-check API hitelesítési titka a 5.2. pontban bemutatott `systemd-creds` eljárással készüljön.
 
@@ -588,7 +589,7 @@ A telepítés végén a szolgáltatásoknak néhány másodperc kellhet. Várj 1
 ### 7.1. Új munka létrehozása
 
 1. Nyisd meg a BDEncode weboldalát.
-2. Válaszd az **Új kódolás** gombot.
+2. Válaszd az **Új munka** gombot, és mondd meg, mit szeretnél: **Kódolás vagy remux**, **Hang vagy felirat illesztése** vagy **Kódolás és illesztés**. Az illesztésről az [EXTERNAL_SOURCES.md](EXTERNAL_SOURCES.md) szól.
 3. Válaszd ki a forrásmappát.
 4. Add meg a tartalomtípust: film, koncert, anime vagy sorozat.
 5. Első alkalommal válaszd a **Kezdő** munkamódot.
@@ -924,7 +925,7 @@ A publikus release törlése külön, erős megerősítést kérő művelet: a r
 2. **Build** – elkészíti a hash-manifesttel rögzített release-csomagot: NFO, BBCode-leírás, MediaInfo, ellenőrzött képek és checksumok. Trackerprofilos munkánál a csomag a tiszta, jelölés nélküli képernyőképeket használja, ha a profil képszámához elég van belőlük; különben a comparison encode-oldali képeit.
 3. **Dupe check** – a konfigurált tracker fix endpointján ellenőriz; `CLEAR` eredménynél az állapot „Dupe check: tiszta”.
 
-3.0-tól a BDEncode nem készít torrentet, nem ad hozzá semmit qBittorrenthez, és nem tölt fel a trackerre: a torrentet a kész MKV-ból a tracker szabályai szerint te készíted el, és te töltöd fel.
+4.0-tól az Accofil BDEncode a beépített `aither` és `ncore` profilhoz torrentet készít, feltölt és qBittorrentben seedel, minden lépést a kezelő indít; lásd [RELEASE_4_0.md](RELEASE_4_0.md). Más trackerprofil továbbra is csak csomagot és dupe checket kap.
 
 A release-előkészítés saját tartós állapotgépet és verziót használ; böngészőfrissítés nem veszíti el a receipt-eket. Szolgáltatásindításkor a félbemaradt `PREPARING` művelet `FAILED` lesz és az árva build-staging kitakarítható, míg a félbemaradt dupe check (`SEEDING_CHECK`), illetve egy 3.0 előtti `SEEDING` vagy `PUBLISHING` művelet `UNKNOWN` állapotba kerül. A dupe checket a rendszer nem ismétli meg automatikusan. `NEEDS_REVIEW`, `FAILED` vagy különösen `UNKNOWN` esetén ne ismételd vakon: előbb ellenőrizd a tracker valós állapotát.
 
@@ -1435,6 +1436,10 @@ A kulcsképkockák között megbújó, egy másodpercnél rövidebb, szélesebb 
 A forrás teljes, szigorú dekódolása (integritás-ellenőrzés, UHD-n kb. egy óra) nem az előkészítésben fut, hanem a videókódolással párhuzamosan, alacsonyabb CPU-prioritással (`nice -n 10`). Sérült forrásnál leállítja a kódolást, és a job felülvizsgálatra kerül („source video integrity diagnostics require review”). Ugyanez a dekódolás ellenőrzi a cropot is (lásd fent).
 
 **Többklipes playlistek (3.1.1-től).** Ha a film több klipből áll (például egy rövid záróklip vagy seamless branching), a remux a klipváltásoknál időbélyeg-ugrást jelez, és jelezheti az előző klip levágott utolsó csomagját is („Packet corrupt”, TrueHD „Parity check failed”). Az előkészítés ilyenkor minden klipváltás körül (−20 s … +10 s) szigorúan dekódolja a referencia videóját és minden hangsávját. Ha ez hibátlan, a váltásnál keletkezett üzenetek nem számítanak forrássérülésnek (`analysis/clip-joins.json`); minden más jelzés, és a klipváltástól távoli sérülés is, továbbra is megállítja a munkát. A muxolás csak sikeres ellenőrzés után indul. Az előkészítés csak a remux naplóját nézi át, mert az pillanatok alatt megvan.
+
+**Többklipes címek remuxa (4.0-tól).** A klipváltásoknál a lemez hangja átfed, és ha az átfedés a fájlban marad, a hang klipről klipre később szól. Az eac3to 3.36 Blu-ray-playlistnél kihagyja a második menetet, amely ezt eltávolítaná, ezért az ilyen címnél a playlist helyett magukat a klipeket kapja (`00001.m2ts+00006.m2ts+…`), és a naplójában ez a parancs látszik. Ez csak akkor történik így, ha egy szög van, minden klip egyszer és egészben szerepel (a `.clpi` szerint), és a klipek ugyanazokat a sávokat sorolják fel ugyanabban a sorrendben; különben marad a playlist.
+
+Az ellenőrzés ilyen címnél nem a referenciához méri az időzítést, mert az FFmpeg a klipváltásoknál átbélyegzi a referencia csomagjait, így az idővonala eltér a lemezétől. Minden hang- és feliratsávot a klipek saját időbélyegeihez mér. A tűrés a kodek egy kerete (DTS: 10,667 ms, AC-3 és E-AC-3: 32 ms), mert az eac3to csak egész kereteket tud kivenni; TrueHD-nél és PCM-nél marad az 1,5 ms. Ha a hangminták MD5-je eltér, a sáv csak akkor megy át, ha a remux bitfolyam-csomagjai a referenciáéival azonosak, és csak klipváltásnál hiányzik belőlük egész csomag. Az egyklipes címekre a szigorú MD5 érvényes. A TrueHD bitfolyamból az eac3to nem veszi ki az átfedést, így a TrueHD-s többklipes cím megállhat ellenőrzésre a mért eltéréssel; PCM-es és AC-3-as többklipes címen ez még nincs lemérve.
 
 ### 14.4. Opcionális eszközök a dinamikus HDR-hez
 

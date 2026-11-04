@@ -14,7 +14,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Sequence
 
+from .external.spec import ExternalSource
 from .media.bluray import MediaStream, PlaylistCandidate, StreamKind, TrackRole
+from .media.language import iso639_2_to_bcp47
 from .media.planner import TrackAction, TrackSelection
 from .i18n import t
 from .release_naming import AUDIO_CODEC_LABELS, audio_codec_family, channel_layout
@@ -49,6 +51,7 @@ class _Planned:
     sdh: bool
     pgs: bool
     source_lossless_stereo: bool
+    bit_depth: int | None = None
 
 
 # Audio an nCore 1080p encode may carry; FLAC/AAC only up to 2.0.
@@ -94,6 +97,59 @@ def _language_name(code: str) -> str:
     return t(_LANGUAGE_NAMES.get(code, code), _LANGUAGE_NAMES_EN.get(code, code))
 
 
+def _with_external(
+    planned: list[_Planned], external: Sequence[ExternalSource]
+) -> list[_Planned]:
+    """The plan with the fitted tracks in their places: they count like any other.
+
+    A fitted track is always AC-3 unless it needed no change, and it is treated
+    as a dub, so that it never passes for the film's original language.
+    """
+
+    result = list(planned)
+    for source in external:
+        for track in sorted(source.tracks, key=lambda item: item.position):
+            audio_places = [i for i, item in enumerate(result) if item.kind is StreamKind.AUDIO]
+            place = (
+                audio_places[track.position]
+                if track.position < len(audio_places)
+                else (audio_places[-1] + 1 if audio_places else 0)
+            )
+            result.insert(
+                place,
+                _Planned(
+                    kind=StreamKind.AUDIO,
+                    language=(iso639_2_to_bcp47(track.language) or track.language).split("-")[0].casefold(),
+                    codec="DD",
+                    channels=None,
+                    source_channels=None,
+                    commentary=False,
+                    dub=True,
+                    forced=False,
+                    sdh=False,
+                    pgs=False,
+                    source_lossless_stereo=False,
+                ),
+            )
+        for subtitle in source.subtitles:
+            result.append(
+                _Planned(
+                    kind=StreamKind.SUBTITLE,
+                    language=(iso639_2_to_bcp47(subtitle.language) or subtitle.language).split("-")[0].casefold(),
+                    codec="subrip",
+                    channels=None,
+                    source_channels=None,
+                    commentary=False,
+                    dub=False,
+                    forced=subtitle.forced,
+                    sdh=False,
+                    pgs=False,
+                    source_lossless_stereo=False,
+                )
+            )
+    return result
+
+
 def _planned(
     playlist: PlaylistCandidate, tracks: Sequence[TrackSelection]
 ) -> list[_Planned]:
@@ -114,13 +170,14 @@ def _planned(
             else:
                 codec = {
                     TrackAction.FLAC: "FLAC",
+                    TrackAction.FLAC16: "FLAC",
                     TrackAction.AC3: "DD",
                     TrackAction.EAC3: "DDP",
                     TrackAction.DTS: "DTS",
                 }[item.action]
                 channels = (
                     min(stream.channels, 6)
-                    if item.action is not TrackAction.FLAC and stream.channels
+                    if item.action not in {TrackAction.FLAC, TrackAction.FLAC16} and stream.channels
                     else stream.channels
                 )
         else:
@@ -141,6 +198,7 @@ def _planned(
                 pgs="pgs" in stream.codec.casefold(),
                 source_lossless_stereo=source_family in _LOSSLESS
                 and (stream.channels or 0) <= 2,
+                bit_depth=16 if item.action is TrackAction.FLAC16 else stream.bit_depth,
             )
         )
     return result
@@ -363,7 +421,50 @@ def _ncore(encoder: str, planned: Sequence[_Planned]) -> list[TrackerFinding]:
     return findings
 
 
-def _aither(planned: Sequence[_Planned], *, remux: bool = False) -> list[TrackerFinding]:
+def _aither_encode_audio(audio: Sequence[_Planned]) -> list[TrackerFinding]:
+    """Aither's trumping rule for live action encodes up to 1080p."""
+
+    findings: list[TrackerFinding] = []
+    for item in audio:
+        if item.codec not in _LOSSLESS:
+            continue
+        name = _language_name(item.language)
+        if (item.channels or 0) > 2:
+            findings.append(
+                TrackerFinding(
+                    "aither_1080p_lossless_surround",
+                    t(
+                        f"{_label(item.codec)} {item.channels} csatornás hang ({name}): az Aitheren "
+                        "a veszteségmentes 5.1 miatt az 1080p encode trumpolható. Javasolt: "
+                        "E-AC-3 (DD+), 1024 kbps.",
+                        f"{_label(item.codec)} {item.channels}-channel audio ({name}): on Aither "
+                        "lossless 5.1 makes a 1080p encode trumpable. Suggested: E-AC-3 (DD+), "
+                        "1024 kbps.",
+                    ),
+                )
+            )
+        elif item.codec != "FLAC" or item.bit_depth != 16:
+            findings.append(
+                TrackerFinding(
+                    "aither_1080p_stereo_flac16",
+                    t(
+                        f"{_label(item.codec)} hang ({name}): az Aither 1080p encode-on legfeljebb "
+                        "2 csatornás veszteségmentes hangnál csak a 16 bites FLAC-et engedi. "
+                        "Javasolt: FLAC 16.",
+                        f"{_label(item.codec)} audio ({name}): at 1080p Aither only allows 16-bit "
+                        "FLAC for lossless audio of at most 2 channels. Suggested: FLAC 16.",
+                    ),
+                )
+            )
+    return findings
+
+
+def _aither(
+    planned: Sequence[_Planned],
+    *,
+    remux: bool = False,
+    live_action_1080p: bool = False,
+) -> list[TrackerFinding]:
     findings: list[TrackerFinding] = []
     audio = [item for item in planned if item.kind is StreamKind.AUDIO]
     subtitles = [item for item in planned if item.kind is StreamKind.SUBTITLE]
@@ -418,6 +519,8 @@ def _aither(planned: Sequence[_Planned], *, remux: bool = False) -> list[Tracker
                     ),
                 )
             )
+    if live_action_1080p and not remux:
+        findings.extend(_aither_encode_audio(audio))
     english_audio = any(item.language == "en" and not item.commentary for item in audio)
     english_subtitles = any(
         item.language == "en" and not item.forced and not item.commentary for item in subtitles
@@ -442,16 +545,20 @@ def tracker_findings(
     playlist: PlaylistCandidate,
     tracks: Sequence[TrackSelection],
     remux: bool = False,
+    content_type: str | None = None,
+    external: Sequence[ExternalSource] = (),
 ) -> tuple[TrackerFinding, ...]:
     """Every deviation of the track plan from the chosen tracker's rules.
 
     ``remux``: an Aither-style remux, whose TrueHD tracks bring their
-    embedded AC-3 along as compatibility tracks.
+    embedded AC-3 along as compatibility tracks.  ``content_type``: Aither's
+    lossless audio rule names live action, so it stays off for anime.
+    ``external``: tracks fitted from other sources join the plan.
     """
 
     if profile is TrackerProfile.NONE:
         return ()
-    planned = _planned(playlist, tracks)
+    planned = _with_external(_planned(playlist, tracks), external)
     if profile is TrackerProfile.NCORE:
         if remux:
             return (
@@ -467,7 +574,12 @@ def tracker_findings(
                 ),
             )
         return tuple(_ncore(encoder, planned))
-    return tuple(_aither(planned, remux=remux))
+    videos = playlist.video_streams
+    height = videos[0].video.height if videos and videos[0].video else None
+    live_action_1080p = (
+        height is not None and height <= 1080 and str(content_type or "").upper() != "ANIME"
+    )
+    return tuple(_aither(planned, remux=remux, live_action_1080p=live_action_1080p))
 
 
 __all__ = [

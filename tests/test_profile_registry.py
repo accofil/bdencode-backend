@@ -58,8 +58,10 @@ def test_builtin_profiles_follow_the_tracker_screenshot_rules() -> None:
     assert (aither["screenshot_minimum"], aither["screenshot_maximum"]) == (3, 9)
     assert ncore["display_name"] == "nCore"
     assert (ncore["screenshot_minimum"], ncore["screenshot_maximum"]) == (3, 3)
-    assert aither["supports_dupe_check"] is False
-    assert ncore["supports_dupe_check"] is False
+    assert aither["supports_dupe_check"] is True
+    assert ncore["supports_dupe_check"] is True
+    assert aither["supports_upload"] is True
+    assert ncore["supports_upload"] is True
     # A preparation is bound to its profile's digest: a changed built-in would
     # make every preparation made with it fail validation after an update.
     assert aither["profile_digest"] == (

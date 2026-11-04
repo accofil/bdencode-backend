@@ -1,4 +1,4 @@
-# BDEncode
+# Accofil BDEncode
 
 **Blu-ray és UHD Blu-ray lemezek kódolása böngészőből, lépésről lépésre.**
 
@@ -41,12 +41,14 @@ A BDEncode egy kész Blu-ray-mappából (a lemez `BDMV` mappájából) vagy egy 
 - minden képkockát ellenőriz, és mérőszámokkal (SSIM, PSNR, VMAF) igazolja a minőséget;
 - összehasonlító (comparison) képeket készít a forrásról és a kódolásról, és kérésre feltölti őket egy képtárhelyre;
 - az Aither és az nCore szabályai szerint rendezi a sávokat, javasol kiadásnevet, és release-csomagot készít;
+- érintetlen remuxot készít a lemezből, az Aither REMUX útmutatója szerint;
+- más forrásból (például PAL DVD-ről) hangot és SRT-feliratot illeszt encode-ba, remuxba vagy kész fájlra, eltérő sebesség és vágás mellett is, a kép alapján mérve (lásd [docs/EXTERNAL_SOURCES.md](docs/EXTERNAL_SOURCES.md));
 - egyszerre egy kódolás fut, de közben a következő lemezeket már előkészítheted.
 
 **Amit nem csinál:**
 
 - **nem töri fel a lemez másolásvédelmét**: egy már kicsomagolt, `BDMV` mappát tartalmazó lemezmappát vagy egy lemezről készült, újrakódolás nélküli remux MKV-t (például MakeMKV-ből) vár (ISO-fájlt és streaming eredetű MKV-t nem);
-- **nem készít torrentet, és nem tölt fel trackerre**: a kész MKV-ból a torrentet a tracker szabályai szerint te készíted el;
+- Aitherre és nCore-ra torrentet készít, feltölt és qBittorrentben seedel, de csak akkor, ha lépésenként te indítod (lásd [docs/RELEASE_4_0.md](docs/RELEASE_4_0.md));
 - nem kezeli a 3D-t;
 - nem kódol GPU-val (a videókódolás mindig CPU-n fut; ha van NVIDIA GPU, a crop-keresés gyorsabb).
 
@@ -336,7 +338,7 @@ Bal oldalon a menü:
 | Menüpont | Mire való? |
 |---|---|
 | **Áttekintés** | a futó munka és a sor összefoglalója |
-| **Új kódolás** | új lemez hozzáadása |
+| **Új munka** | új lemez hozzáadása, vagy hang és felirat illesztése kész fájlra |
 | **Várólista** | az összes munka és állapotuk |
 | **Elkészült munkák** | a kész filmek |
 | **Összehasonlítások** | a comparison képek |
@@ -468,7 +470,7 @@ Ha van beállított AI-kulcs, az első megnyitáskor az AI értékel egyszer, é
 
 ### 10.1. Új munka létrehozása
 
-1. Kattints az **Új kódolás** menüpontra.
+1. Kattints az **Új munka** menüpontra, és válaszd a **Kódolás vagy remux** lehetőséget. A másik két út a [10.6. fejezetben](#106-hang-és-felirat-más-forrásból) van.
 2. **Forrás:** kattints a lemez mappájára. A program a `BDMV`-t tartalmazó mappákat **Blu-ray forrás** felirattal jelöli, a `.mkv` fájlokat **MKV remux** felirattal. MKV-ként csak lemezről készült remux fogadható el (pontosan egy Blu-ray videósáv; a Dolby Vision profil 5 streaming fájl nem). Ha nem látod a forrást, kattints a **Frissítés** gombra.
 3. Kattints a **Tovább** gombra.
 4. **Tartalom:** add meg a munka nevét (például a film címét), ellenőrizd a lemeztípust (BD vagy UHD), és válaszd ki, mi van a lemezen: **Film**, **Koncert**, **Anime** vagy **Sorozatlemez**.
@@ -536,6 +538,21 @@ A mappában találod az MKV-t, és mellette a MediaInfót, a BBCode-ot és az ö
 
 A kész munka oldalán a **Release előkészítése** panel összeállítja a feltöltéshez szükséges anyagokat: NFO, BBCode-leírás, MediaInfo, ellenőrzött képek, ellenőrzőösszegek. A torrentet a kész MKV-ból a tracker szabályai szerint te készíted el, és te töltöd fel.
 
+### 10.6. Hang és felirat más forrásból
+
+Ha például a BD-re a PAL DVD magyar szinkronja kell, az **Új munka** oldalon válassz:
+
+- **Hang vagy felirat illesztése:** kész encode-ra vagy remuxra, kódolás nélkül. A fájl képe és megtartott sávjai bájtra azonosak maradnak. Lemezt választva remux készül a külső sávokkal.
+- **Kódolás és illesztés:** új encode vagy remux, külső sávokkal is.
+
+A varázsló **Sávok** lépésének végén add meg a külső forrást (videófájl, DVD-mappa vagy DVD-képfájl), és jelöld be a sávokat. A program a két képet összehasonlítva kockára pontosan illeszti a hangot és a feliratot, majd **megáll**: kódolás még nem indul. A kártyán látod az eredményt, és letöltés nélkül, a böngészőben meghallgathatod az illesztési pontokat. Jóváhagyás után folytatódik a munka.
+
+A **néma részekre** figyelj: ahol a külső forrásból hiányzik a kép, a sáv csendes lesz. A teljes leírás: [docs/EXTERNAL_SOURCES.md](docs/EXTERNAL_SOURCES.md).
+
+### 10.7. Aitherre szánt 1080p hang
+
+Az Aither szabálya szerint az élőszereplős 1080p encode a veszteségmentes 5.1 hang miatt trumpolható. Ha kódolásnál az Aither-profilt választod, a program ezeket a sávokat magától átállítja: 2 csatorna fölött **E-AC-3 1024 kbps**, legfeljebb 2 csatornán **FLAC 16**. A változást kiírja, és visszaállíthatod. Remuxra és 2160p-re ez nem vonatkozik, 2160p-n a szabály éppen fordított.
+
 ---
 
 ## 11. Mindennapi használat
@@ -588,7 +605,7 @@ Frissítés előtt várd meg, hogy a futó kódolás befejeződjön.
 | **Windows:** a `localhost:8787` oldal nem jön be | Várj fél percet, és frissítsd az oldalt. Ha így sem megy, nyiss rendszergazdai PowerShellt, és futtasd: `Start-ScheduledTask -TaskName "BDEncode WSL"`, majd `wsl -d Debian -- sudo systemctl restart bdencode-api bdencode-worker nginx` |
 | **Szerver:** a `localhost:8787` oldal nem jön be | Nyitva van az SSH-alagút ablaka ([5.8](#58-a-felület-megnyitása-ssh-alagúton))? Ha igen, a szerveren: `sudo systemctl restart bdencode-api bdencode-worker nginx` |
 | **Swizzin:** az `/encoder/` oldal hibát ad | A szerveren: `sudo systemctl restart bdencode-api bdencode-worker` és `sudo systemctl reload nginx` |
-| A lemez nem látszik az **Új kódolás** oldalon | Jó mappát adtál meg a telepítéskor? A lemez mappájában közvetlenül legyen ott a `BDMV`. Kattints a **Frissítés** gombra. |
+| A lemez nem látszik az **Új munka** oldalon | Jó mappát adtál meg a telepítéskor? A lemez mappájában közvetlenül legyen ott a `BDMV`. Kattints a **Frissítés** gombra. |
 | A laptop elaludt, és a kódolás megállt | Ébresztés után a munka folytatódik. Állítsd be, hogy töltőn ne aludjon el. |
 | Elfogyott a hely | Töröld a régi, kész munkák ideiglenes fájljait (**Takarítás**), vagy a felesleges munkákat (**Munka törlése**). A [2. pontban](#2-mire-lesz-szükséged) megadott hely kell egy munkához. |
 | **Ellenőrzést kér** állapot | Nyisd meg a munkát: a kártya leírja, mi a teendő ([11. pont](#11-mindennapi-használat)). |

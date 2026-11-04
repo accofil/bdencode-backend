@@ -213,7 +213,27 @@ export function isRemuxJob(job: { selection?: unknown }): boolean {
   return typeof selection === "object" && selection !== null && (selection as { mode?: unknown }).mode === "remux";
 }
 
+/** A job that only adds tracks to a finished MKV: it encodes and demuxes nothing. */
+export function isFitJob(job: { selection?: unknown }): boolean {
+  const selection = job.selection;
+  return typeof selection === "object" && selection !== null && (selection as { mode?: unknown }).mode === "fit";
+}
+
+export type JobPurpose = "encode" | "fit" | "encode_fit";
+
+/** What the operator set out to do when creating the job; older jobs did not say. */
+export function jobPurpose(job: { settings?: unknown }): JobPurpose | null {
+  const value = (job.settings as { purpose?: unknown } | null | undefined)?.purpose;
+  return value === "encode" || value === "fit" || value === "encode_fit" ? value : null;
+}
+
 export function jobStateLabel(job: { state: JobState; selection?: unknown }): string {
+  if (isFitJob(job)) {
+    if (job.state === "ENCODING") return t("Előkészítés", "Preparing");
+    if (job.state === "MUXING") return t("A saját sávok kiválasztása", "Selecting the file's own tracks");
+    if (job.state === "QC") return t("A külső sávok muxolása és ellenőrzése", "Muxing and checking the external tracks");
+    if (job.state === "COMPARISON") return t("Képernyőképek", "Screenshots");
+  }
   if (isRemuxJob(job)) {
     if (job.state === "ENCODING") return t("Bontás eac3to-val", "Demuxing with eac3to");
     if (job.state === "COMPARISON") return t("Képernyőképek", "Screenshots");

@@ -94,6 +94,12 @@ class Settings:
         return self.data_root / "release-kits"
 
     @property
+    def seeding_root(self) -> Path:
+        """Hard links of the uploaded releases, where qBittorrent seeds them."""
+
+        return self.data_root / "seeding"
+
+    @property
     def resolved_release_profiles_path(self) -> Path:
         return self.release_profiles_path or self.state_root / "release-profiles.json"
 
@@ -151,6 +157,7 @@ class Settings:
             self.cache_root,
             self.updates_root,
             self.release_kits_root,
+            self.seeding_root,
             self.state_root / "overrides",
             self.state_root / "backups",
         ):

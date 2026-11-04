@@ -16,6 +16,7 @@ import { api } from "../api/client";
 import { AIAdviserPanel } from "../components/AIAdviserPanel";
 import { BackupsPanel } from "../components/BackupsPanel";
 import { ImageUploadPanel } from "../components/ImageUploadPanel";
+import { TrackerSettingsPanel } from "../components/TrackerSettingsPanel";
 import { cpuShareInForce, CpuPolicyPanel, useCpuPolicy } from "../components/CpuPolicyPanel";
 import { ReleaseUpdatePanel } from "../components/ReleaseUpdatePanel";
 import { Badge, Button, Card, LoadingPanel, Notice, PageHeader, ProgressBar } from "../components/ui";
@@ -184,6 +185,7 @@ export function SystemPage() {
           <CpuPolicyPanel />
           <AIAdviserPanel />
           <ImageUploadPanel />
+          <TrackerSettingsPanel />
           <ReleaseUpdatePanel />
           <BackupsPanel />
 

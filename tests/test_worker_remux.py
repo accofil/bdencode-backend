@@ -6,11 +6,15 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Sequence
 
 import pytest
 
 import bdencode.worker as worker_module
+from bdencode.external import spec as external_spec
+from bdencode.models import ContentType
+from bdencode.media.planner import TrackSelection
 from bdencode.config import Settings
 from bdencode.db import Database
 from bdencode.media.bluray import (
@@ -410,6 +414,211 @@ def test_a_remux_runs_from_eac3to_to_the_published_release(remux_context) -> Non
     assert not any(
         command[0] in {"x264", "x265", "vspipe"} for command in runner.commands
     ), "a remux encodes nothing"
+
+
+def test_a_remux_the_serial_claim_moved_to_encoding_is_still_prepared(remux_context) -> None:
+    """The service claims READY jobs straight into ENCODING; 3.14.0 then stopped
+    with "the remux plan does not belong to the current selection"."""
+
+    _database, _settings, _scan, runner, worker = remux_context
+    ready = _select(remux_context)
+    claimed = worker.queue.advance(ready.id, JobState.ENCODING, message="claimed for serial encode")
+
+    result = worker.process_job(claimed)
+
+    assert result.state is JobState.COMPLETED, result.status_message
+    assert any(command[0] == "bdencode-eac3to" for command in runner.commands)
+
+
+def _external_selection() -> dict[str, Any]:
+    return {
+        **_remux_selection(),
+        "external_sources": [
+            {
+                "id": "e1",
+                "path": "/x.iso",
+                "tracks": [{"stream": "#0x80", "language": "hun", "default": True, "position": 0}],
+                "subtitles": [],
+            }
+        ],
+    }
+
+
+def _fit_stub(monkeypatch, worker, merged: list[str]) -> None:
+    review = {
+        "id": "e1",
+        "map_sha256": "a" * 64,
+        "map": {"segments": []},
+        "tracks": [{"stream": "#0x80", "pitch": "restore"}],
+        "subtitles": [],
+    }
+
+    def fit(paths, source, *_args):
+        directory = paths.work / "external" / source.id
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "review.json").write_text(json.dumps(review), encoding="utf-8")
+        return review
+
+    def signature(_input, output):
+        output.write_bytes(b"x")
+        return ["true"]
+
+    monkeypatch.setattr(worker, "_fit_external_source", fit)
+    monkeypatch.setattr(worker_module.external_source, "external_support", lambda: {"available": True, "missing": []})
+    monkeypatch.setattr(worker_module.external_source, "signature_command", signature)
+    monkeypatch.setattr(
+        worker, "_merge_external_tracks", lambda job, _paths, _selection: merged.append(job.id)
+    )
+
+
+def test_an_external_source_stops_before_the_work_until_its_fit_is_approved(remux_context, monkeypatch) -> None:
+    database, _settings, _scan, runner, worker = remux_context
+    merged: list[str] = []
+    _fit_stub(monkeypatch, worker, merged)
+    ready = _select(remux_context, _external_selection())
+
+    stopped = worker.process_job(ready)
+
+    assert stopped.state is JobState.NEEDS_REVIEW
+    assert "approval" in (stopped.status_message or "")
+    assert not any(command[0] == "bdencode-eac3to" for command in runner.commands)
+    assert merged == []
+
+    # Another map than the approved one stops it again.
+    selection = _external_selection()
+    selection["external_sources"][0]["approved_map_sha256"] = "b" * 64
+    again = worker.process_job(database.set_selection(stopped.id, selection))
+    assert again.state is JobState.NEEDS_REVIEW
+    assert merged == []
+
+    selection["external_sources"][0]["approved_map_sha256"] = "a" * 64
+    finished = worker.process_job(database.set_selection(again.id, selection))
+    assert finished.state is JobState.COMPLETED, finished.status_message
+    assert merged == [finished.id]
+
+
+def test_a_job_without_external_sources_never_reaches_the_merge(remux_context, monkeypatch) -> None:
+    _database, settings, _scan, _runner, worker = remux_context
+    ready = _select(remux_context)
+    result = worker.process_job(ready)
+    assert result.state is JobState.COMPLETED, result.status_message
+    paths = worker_module.JobPaths.create(settings, result.id)
+    assert not (paths.work / "output.base.mkv").exists()
+
+
+def test_a_repeated_merge_makes_the_deleted_samples_again(remux_context, monkeypatch, tmp_path: Path) -> None:
+    """Going through QC again, for example after image upload was turned off,
+    stopped with "source samples are gone" although the source was still there."""
+
+    _database, settings, _scan, runner, worker = remux_context
+    source = external_spec.ExternalSource(
+        id="e1",
+        path="/x.iso",
+        tracks=(external_spec.ExternalTrack(stream="#0x80", language="hun"),),
+    )
+    info = worker_module.external_source.SourceInfo(
+        kind="dvd-image",
+        path="/x.iso",
+        fps="25",
+        duration_seconds=10.0,
+        width=720,
+        height=576,
+        tracks=(
+            worker_module.external_source.SourceTrack(
+                stream="#0x80", codec="ac3", channels=2, sample_rate=48_000, bit_rate=None, language="hu"
+            ),
+        ),
+    )
+    monkeypatch.setattr(worker, "_external_input", lambda *_args: (info, ["-i", "x.vob"], {}))
+    paths = worker_module.JobPaths.create(settings, "again")
+    item = {
+        "directory": tmp_path,
+        "external_source": source,
+        "track": source.tracks[0],
+        "review": {"map": {"mode": "frame-locked"}, "fps": "25", "target_fps": "24000/1001"},
+    }
+
+    worker._stretch_external_again(paths, item, tmp_path / "track-00.stretched.f32")
+
+    command = next(item for item in runner.commands if "pcm_f32le" in item)
+    assert "aresample=50050:resampler=soxr:precision=28,asetrate=48000" in command
+    assert command[-1].endswith("track-00.stretched.f32")
+
+
+def _mkv_scan(tmp_path: Path) -> DiscScan:
+    source = tmp_path / "film.mkv"
+    source.write_bytes(b"x")
+    return replace(_remux_scan(tmp_path), source=source, source_kind="mkv")
+
+
+def _fit_selection(scan: DiscScan, **change: Any) -> dict[str, Any]:
+    playlist = scan.playlists[0]
+    return {
+        "schema_version": 2,
+        "mode": "fit",
+        "playlist_id": playlist.playlist_id,
+        "tracks": [
+            {"stream_id": stream.id, "action": "copy", "order": order}
+            for order, stream in enumerate(playlist.streams)
+            if stream.kind is not StreamKind.VIDEO
+        ],
+        "output_name": "Film.2020.1080p.BluRay.x264-GRP",
+        "upload_images": False,
+        "external_sources": [
+            {"id": "e1", "path": "/x.iso", "tracks": [{"stream": "#0x80", "language": "hun"}]}
+        ],
+        **change,
+    }
+
+
+def _fit_job(selection: dict[str, Any]) -> Any:
+    return SimpleNamespace(selection=selection, content_type=ContentType.FILM)
+
+
+def test_a_fit_needs_a_finished_mkv_and_something_to_fit(tmp_path: Path) -> None:
+    scan = _mkv_scan(tmp_path)
+    parsed = worker_module.parse_selection(_fit_job(_fit_selection(scan)), scan)
+    assert parsed.is_fit and not parsed.is_remux
+    assert parsed.external_sources[0].tracks[0].language == "hun"
+    with pytest.raises(worker_module.ReviewRequired, match="finished MKV"):
+        worker_module.parse_selection(_fit_job(_fit_selection(scan)), _remux_scan(tmp_path))
+    with pytest.raises(worker_module.ReviewRequired, match="at least one"):
+        worker_module.parse_selection(_fit_job(_fit_selection(scan, external_sources=[])), scan)
+
+
+def test_a_fit_cannot_convert_the_files_own_tracks(tmp_path: Path) -> None:
+    scan = _mkv_scan(tmp_path)
+    selection = _fit_selection(scan)
+    selection["tracks"][0]["action"] = "eac3"
+    with pytest.raises(worker_module.ReviewRequired, match="kept or left out"):
+        worker_module.parse_selection(_fit_job(selection), scan)
+    with pytest.raises(worker_module.ReviewRequired, match="unknown selection"):
+        worker_module.parse_selection(_fit_job(_fit_selection(scan, video={})), scan)
+
+
+def test_the_base_of_a_fit_leaves_out_only_the_omitted_tracks(tmp_path: Path) -> None:
+    scan = _mkv_scan(tmp_path)
+    playlist = scan.playlists[0]
+    audio = playlist.audio_streams
+    subtitles = playlist.subtitle_streams
+    file_tracks = [
+        {"id": 0, "type": "video"},
+        *({"id": 1 + index, "type": "audio"} for index in range(len(audio))),
+        *({"id": 1 + len(audio) + index, "type": "subtitles"} for index in range(len(subtitles))),
+    ]
+    tracks = [TrackSelection(audio[0].id, "omit", order=0)]
+    command, before, after = worker_module.fit_base_mux_command(
+        Path("o.mkv"), Path("r.mkv"), file_tracks, playlist, tracks, title="T"
+    )
+    kept = [str(1 + index) for index in range(1, len(audio))]
+    assert command[command.index("--audio-tracks") + 1] == ",".join(kept)
+    assert before[:2] == ["0:v:0", "0:a:1"]
+    assert after[:2] == ["0:v:0", "0:a:0"]
+    assert len(before) == len(after)
+    with pytest.raises(worker_module.ReviewRequired, match="changed since"):
+        worker_module.fit_base_mux_command(
+            Path("o.mkv"), Path("r.mkv"), file_tracks[:1], playlist, tracks, title="T"
+        )
 
 
 def test_a_video_that_decodes_differently_stops_the_remux(remux_context) -> None:

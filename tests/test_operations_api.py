@@ -459,17 +459,24 @@ def test_release_prepare_build_and_explicit_release_delete(
         assert built.status_code == 200
         ready = built.json()
         assert ready["state"] == "READY"
-        # Since 3.0 the kit holds no torrent and BDEncode neither seeds nor uploads.
+        # The kit itself holds no torrent; only the built-in Aither and nCore
+        # profiles have the torrent, upload and seed steps of 4.0.
         kit = settings.release_kits_root / ready["id"]
         assert kit.is_dir()
         assert not list(kit.glob("*.torrent"))
         assert not (kit / "upload-request.json").exists()
-        for action in ("export", "seed", "upload"):
+        for action in ("export", "upload"):
             removed_action = client.post(
                 f"/api/v1/release-preparations/{prepared['id']}/{action}",
                 json={"expected_version": ready["version"]},
             )
             assert removed_action.status_code in {404, 405}
+        for action in ("torrent", "seed"):
+            refused = client.post(
+                f"/api/v1/release-preparations/{prepared['id']}/{action}",
+                json={"expected_version": ready["version"]},
+            )
+            assert refused.status_code >= 400
         assert client.get(
             f"/api/v1/release-preparations/{prepared['id']}"
         ).json() == ready

@@ -261,10 +261,11 @@ _TIMESTAMP_JUMP = re.compile(
 # The demuxer and parser messages that the cut at a clip join (or at the end
 # of the title) causes: the earlier clip's last packet is incomplete, so the
 # MPEG-TS demuxer flags it ("Packet corrupt"), a TrueHD parser fails its
-# parity check, and the timestamps jump.  Only these are set apart by the
-# time of the join; every other message near a join is judged as usual.
+# parity check, and the timestamps jump.  FFmpeg reports the flagged packet a
+# second time ("corrupt input packet in stream 0").  Only these are set apart by
+# the time of the join; every other message near a join is judged as usual.
 _JOIN_ARTIFACT = re.compile(
-    r"(?i)(?:packet corrupt|parity check failed|PES packet size mismatch|"
+    r"(?i)(?:packet corrupt|corrupt input packet in stream|parity check failed|PES packet size mismatch|"
     r"timestamp discontinuity|non[- ]monoton|invalid dropping)"
 )
 

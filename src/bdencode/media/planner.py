@@ -41,6 +41,7 @@ _BCP47_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 class TrackAction(StrEnum):
     COPY = "copy"
     FLAC = "flac"
+    FLAC16 = "flac16"
     AC3 = "ac3"
     EAC3 = "eac3"
     DTS = "dts"
@@ -527,7 +528,7 @@ class EncodePlanner:
                 if stream.object_audio and selection.action is not TrackAction.COPY:
                     handling = (
                         "FLAC preserves channels/PCM but omits"
-                        if selection.action is TrackAction.FLAC
+                        if selection.action in {TrackAction.FLAC, TrackAction.FLAC16}
                         else "DTS core extraction omits"
                         if audio_policy.strategy == "dts_core_extract"
                         else "transcoding omits"

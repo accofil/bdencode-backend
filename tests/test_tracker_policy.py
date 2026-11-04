@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
-from bdencode.media.bluray import MediaStream, PlaylistCandidate, StreamKind, TrackRole
+from dataclasses import replace
+
+from bdencode.external.spec import ExternalSource, ExternalSubtitle, ExternalTrack
+from bdencode.media.bluray import (
+    MediaStream,
+    PlaylistCandidate,
+    StreamKind,
+    TrackRole,
+    VideoCodec,
+    VideoProperties,
+)
 from bdencode.media.planner import TrackSelection
 from bdencode.tracker_policy import TrackerProfile, tracker_findings
 
@@ -119,3 +129,120 @@ def test_a_hungarian_dub_may_be_default_only_under_the_ncore_rule() -> None:
     with pytest.raises(ValueError, match="dubbed audio track cannot be default"):
         resolve_audio_defaults(retained)
     assert resolve_audio_defaults(retained, allow_dub_default=True) == {"hu-ac3": True, "en-truehd": False}
+
+
+def _encode_playlist(height: int) -> PlaylistCandidate:
+    return PlaylistCandidate(
+        "00900",
+        6000.0,
+        streams=(
+            MediaStream(
+                "video",
+                0,
+                None,
+                StreamKind.VIDEO,
+                "h264",
+                video=VideoProperties(codec=VideoCodec.AVC, width=1920, height=height),
+            ),
+            audio("it-mono", "dts", 1, profile="DTS-HD MA", roles=(TrackRole.MAIN,)),
+            audio("en-51", "truehd", 6, roles=(TrackRole.MAIN,)),
+            audio("en-71", "dts", 8, profile="DTS-HD MA", roles=(TrackRole.MAIN,)),
+            audio("en-dd", "ac3", 6, roles=(TrackRole.MAIN,)),
+            replace(audio("en-20", "dts", 2, profile="DTS-HD MA", roles=(TrackRole.MAIN,)), bit_depth=24),
+            replace(audio("en-20-16", "dts", 2, profile="DTS-HD MA", roles=(TrackRole.MAIN,)), bit_depth=16),
+        ),
+    )
+
+
+def _aither_codes(playlist, *tracks, content_type="FILM", remux=False, external=()) -> list[str]:
+    return [
+        item.code
+        for item in tracker_findings(
+            TrackerProfile.AITHER,
+            encoder="x264",
+            playlist=playlist,
+            tracks=list(tracks),
+            content_type=content_type,
+            remux=remux,
+            external=external,
+        )
+        if item.code.startswith("aither_1080p") or item.code == "aither_language"
+    ]
+
+
+def test_aither_lossless_surround_makes_a_1080p_encode_trumpable() -> None:
+    playlist = _encode_playlist(1080)
+    assert _aither_codes(playlist, pick("en-51", "copy", 1, "eng")) == ["aither_1080p_lossless_surround"]
+    assert _aither_codes(playlist, pick("en-71", "flac", 1, "eng")) == ["aither_1080p_lossless_surround"]
+    assert _aither_codes(playlist, pick("en-51", "eac3", 1, "eng")) == []
+    assert _aither_codes(playlist, pick("en-dd", "copy", 1, "eng")) == []
+
+
+def test_aither_only_excuses_16_bit_flac_up_to_two_channels() -> None:
+    playlist = _encode_playlist(1080)
+    assert _aither_codes(playlist, pick("en-20", "copy", 1, "eng")) == ["aither_1080p_stereo_flac16"]
+    assert _aither_codes(playlist, pick("en-20", "flac", 1, "eng")) == ["aither_1080p_stereo_flac16"]
+    assert _aither_codes(playlist, pick("en-20", "flac16", 1, "eng")) == []
+    assert _aither_codes(playlist, pick("en-20-16", "flac", 1, "eng")) == []
+    # The rule names 5.1, but 2.0 is the only exception it gives.
+    assert _aither_codes(playlist, pick("it-mono", "copy", 1, "ita")) == ["aither_1080p_stereo_flac16"]
+
+
+def test_the_lossless_rule_is_about_live_action_encodes_up_to_1080p() -> None:
+    track = pick("en-51", "copy", 1, "eng")
+    assert _aither_codes(_encode_playlist(2160), track) == []
+    assert _aither_codes(_encode_playlist(1080), track, content_type="ANIME") == []
+    assert _aither_codes(_encode_playlist(1080), track, remux=True) == []
+
+
+def _source(language: str, position: int = 0, subtitle: str | None = None) -> ExternalSource:
+    return ExternalSource(
+        id="e1",
+        path="/x.iso",
+        tracks=(ExternalTrack(stream="#0x80", language=language, position=position),),
+        subtitles=(ExternalSubtitle(path="/x.srt", language=subtitle),) if subtitle else (),
+    )
+
+
+def test_aither_sees_a_fitted_dub_like_any_other_language() -> None:
+    playlist = _encode_playlist(1080)
+    plain = pick("en-dd", "copy", 1, "eng")
+    assert _aither_codes(playlist, plain, external=[_source("hun")]) == ["aither_language"]
+    assert _aither_codes(playlist, plain, external=[_source("eng")]) == []
+    # A fitted track never passes for the original language.
+    only_italian = pick("it-mono", "omit", 1, "ita")
+    assert "aither_language" not in _aither_codes(playlist, only_italian, external=[_source("hun")])
+
+
+def test_ncore_judges_a_fitted_hungarian_dub_by_its_place() -> None:
+    playlist = _encode_playlist(1080)
+    tracks = [pick("en-dd", "copy", 1, "eng")]
+
+    def found(position: int) -> list[str]:
+        return [
+            item.code
+            for item in tracker_findings(
+                TrackerProfile.NCORE,
+                encoder="x264",
+                playlist=playlist,
+                tracks=tracks,
+                external=[_source("hun", position)],
+            )
+        ]
+
+    assert "ncore_order" not in found(0)
+    assert "ncore_order" in found(5)
+
+
+def test_a_fitted_english_srt_counts_as_the_required_subtitle() -> None:
+    playlist = _encode_playlist(1080)
+    italian = pick("it-mono", "flac16", 1, "ita")
+    def found(*external):
+        return [
+            item.code
+            for item in tracker_findings(
+                TrackerProfile.AITHER, encoder="x264", playlist=playlist, tracks=[italian], external=external
+            )
+        ]
+    assert "aither_english_subtitles" in found()
+    assert "aither_english_subtitles" not in found(_source("ita", subtitle="eng"))

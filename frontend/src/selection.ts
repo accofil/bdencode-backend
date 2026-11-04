@@ -29,7 +29,7 @@ export interface StoredSelection {
   autoCrf: AutoCrfConfig | null;
   dynamicHdr: DynamicHdrMode | null;
   trackerProfile: "aither" | "ncore" | null;
-  mode: "encode" | "remux";
+  mode: "encode" | "remux" | "fit";
   remux: { imdb: string | null; tmdb: string | null };
 }
 
@@ -179,7 +179,7 @@ export function normalizeStoredSelection(value: unknown): StoredSelection | null
     trackerProfile: selection.tracker_profile === "aither" || selection.tracker_profile === "ncore"
       ? selection.tracker_profile
       : null,
-    mode: selection.mode === "remux" ? "remux" : "encode",
+    mode: selection.mode === "remux" || selection.mode === "fit" ? selection.mode : "encode",
     remux: {
       imdb: text(record(selection.remux)?.imdb),
       tmdb: text(record(selection.remux)?.tmdb),

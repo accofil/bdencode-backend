@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { MediaStream, Playlist, TrackSelection } from "./api/types";
-import { arrangeForTracker, plannedOrder } from "./trackerArrangement";
+import { aitherEncodeAudio, arrangeForTracker, plannedOrder } from "./trackerArrangement";
 
 const stream = (id: string, kind: "audio" | "subtitle", codec: string, extra: Partial<MediaStream> = {}): MediaStream => ({
   id, index: 0, pid: null, kind, codec, codec_profile: null, language: null, title: null, channels: null,
@@ -99,5 +99,40 @@ describe("arrangeForTracker", () => {
   it("gives every track a unique order", () => {
     const orders = arrangeForTracker("ncore", tracks, playlist, "x264").tracks.map((item) => item.order);
     expect(new Set(orders).size).toBe(orders.length);
+  });
+});
+
+describe("Aither's audio at 1080p", () => {
+  const video = { ...stream("v", "audio", "h264"), kind: "video", video: { height: 1080 } } as unknown as MediaStream;
+  const sources = [
+    stream("en51", "audio", "dts", { channels: 6, codec_profile: "DTS-HD MA", roles: ["main"] }),
+    stream("en71", "audio", "truehd", { channels: 8, roles: ["main"] }),
+    stream("it20", "audio", "dts", { channels: 2, codec_profile: "DTS-HD MA", roles: ["main"] }),
+    stream("dd", "audio", "ac3", { channels: 6, roles: ["main"] }),
+  ];
+  const film = { ...playlist, streams: [video, ...sources] } as Playlist;
+  const plan = sources.map((item, order) => ({ stream_id: item.id, action: "copy", language: null, name: null, default: false, forced: false, subtitle_kind: null, order })) as TrackSelection[];
+  const uhd = { ...film, streams: [{ ...video, video: { height: 2160 } }, ...sources] } as Playlist;
+
+  it("makes surround E-AC3 and stereo 16-bit FLAC, and leaves lossy tracks alone", () => {
+    const result = aitherEncodeAudio("aither", plan, film, "FILM");
+    const after = byId(result.tracks);
+    expect([after.en51.action, after.en71.action, after.it20.action, after.dd.action]).toEqual(["eac3", "eac3", "flac16", "copy"]);
+    expect(result.notes.join(" ")).toMatch(/8 csatorna 5\.1-re keveredik/);
+    expect(result.notes).toHaveLength(3);
+  });
+
+  it("changes nothing for other profiles, 2160p or anime", () => {
+    expect(aitherEncodeAudio("ncore", plan, film, "FILM").tracks).toBe(plan);
+    expect(aitherEncodeAudio("none", plan, film, "FILM").tracks).toBe(plan);
+    expect(aitherEncodeAudio("aither", plan, uhd, "FILM").tracks).toBe(plan);
+    expect(aitherEncodeAudio("aither", plan, film, "ANIME").tracks).toBe(plan);
+  });
+
+  it("is what the arrangement button does too, and an omitted track stays omitted", () => {
+    const omitted = plan.map((item) => (item.stream_id === "en71" ? { ...item, action: "omit" } : item)) as TrackSelection[];
+    const after = byId(arrangeForTracker("aither", omitted, film, "x264", "FILM").tracks);
+    expect(after.en51.action).toBe("eac3");
+    expect(after.en71.action).toBe("omit");
   });
 });

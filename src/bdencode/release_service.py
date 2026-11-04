@@ -286,6 +286,10 @@ class ReleaseService:
         self.maintenance = maintenance_journal or MaintenanceJournal(database, settings)
         self.runner = runner or CommandRunner()
         self._now = now or (lambda: datetime.now(UTC))
+        # Lazily: that module builds on this one.
+        from .release_publish import ReleasePublisher
+
+        self.publisher: ReleasePublisher = ReleasePublisher(self)
         self.maintenance.recover()
         self._recover_once_at_startup()
 
@@ -866,10 +870,25 @@ class ReleaseService:
                         pass
             raise ReleaseServiceError("release build failed safely") from None
 
+    def _uses_tracker_upload(self, record: ReleasePreparation) -> bool:
+        """The built-in Aither and nCore profiles upload; a file profile with its
+        own dupe-check endpoint keeps working as it did."""
+
+        from .release_publish import TRACKERS
+
+        profile = self._bound_profile(record)
+        return record.profile_id in TRACKERS and not (
+            profile.network and profile.network.dupe_check_endpoint
+        )
+
     def dupe_check(
         self, preparation_id: str, *, expected_version: int
     ) -> ReleasePreparationView:
         record = self.store.get(preparation_id)
+        if self._uses_tracker_upload(record):
+            return self.view(
+                self.publisher.dupe_check(preparation_id, expected_version=expected_version)
+            )
         if record.state is not ReleasePreparationState.READY:
             raise StateConflictError("dupe check requires a READY release kit")
         profile = self._bound_profile(record)
@@ -1031,6 +1050,7 @@ class ReleaseService:
                 self.maintenance.finalize(operation.id)
             except (MaintenanceSafetyError, OSError):
                 pass
+        self.publisher.discard(record)
 
 
 __all__ = [

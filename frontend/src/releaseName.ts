@@ -52,7 +52,7 @@ const CODEC_TOKENS: Record<string, string> = {
 // Scene habit: DDP5.1 / DD5.1 / AAC2.0, but TrueHD.7.1 / DTS-HD.MA.5.1.
 const ATTACHED_CHANNELS = new Set(["DDP", "DD", "AAC"]);
 const LOSSY_ACTIONS = new Set(["ac3", "eac3", "dts"]);
-const ACTION_FAMILIES: Record<string, string> = { flac: "FLAC", ac3: "DD", eac3: "DDP", dts: "DTS" };
+const ACTION_FAMILIES: Record<string, string> = { flac: "FLAC", flac16: "FLAC", ac3: "DD", eac3: "DDP", dts: "DTS" };
 
 /** Aither puts the spoken language after the year when there is no English audio. */
 const LANGUAGE_NAMES: Record<string, string> = {

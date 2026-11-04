@@ -90,7 +90,7 @@ def test_the_helper_accepts_exactly_the_formats_the_api_accepts() -> None:
         {**good, "value": IMGBB_KEY + "\n"},
         {**good, "value": "sk-ant-api03-" + "k" * 40},
         {**good, "credential": "catbox-userhash", "value": "x"},
-        {**good, "credential": "tracker-aither-api-token"},
+        {**good, "credential": "some-other-credential"},
     ):
         with pytest.raises(helper.RequestError):
             helper.validate(bad)
