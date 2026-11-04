@@ -308,3 +308,39 @@ describe("ComparisonPanel", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 });
+
+describe("ComparisonPanel for a remux", () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  it("shows the QC verdict, the screenshots, the eac3to log and copies the BBCode", async () => {
+    const payloads: Record<string, unknown> = {
+      manifest: { images: [{ png: "01-screenshot.png", frame: 100, timestamp: "00:12:00.000" }] },
+      qc: { status: "passed", checks: [{ check: "video:video", status: "passed", message: "video: every decoded frame equals the disc's" }] },
+    };
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const text = url.includes("bbcode") ? "[b]remux[/b]" : url.includes("log") ? "eac3to v3.36" : "";
+      return {
+        ok: true,
+        status: 200,
+        json: async () => (url.includes("qc") ? payloads.qc : payloads.manifest),
+        text: async () => text,
+      } as unknown as Response;
+    }));
+    const artifacts = [
+      makeArtifact({ id: "manifest", kind: "REPORT", name: "remux-screenshots.json", mime_type: "application/json" }),
+      makeArtifact({ id: "qc", kind: "REPORT", name: "remux-qc.json", mime_type: "application/json" }),
+      makeArtifact({ id: "log", kind: "LOG", name: "eac3to.log", mime_type: "text/plain" }),
+      makeArtifact({ id: "bbcode", kind: "BBCODE", name: "comparison.bbcode", mime_type: "text/plain" }),
+      makeArtifact({ id: "shot", kind: "VIDEO_COMPARISON", name: "01-screenshot.png", mime_type: "image/png" }),
+    ];
+
+    renderApp(<ComparisonPanel artifacts={artifacts} />);
+
+    expect(await screen.findByText("A remux érintetlen")).toBeInTheDocument();
+    expect(screen.getByText(/every decoded frame equals the disc's/)).toBeInTheDocument();
+    expect(await screen.findByAltText("Képernyőkép 00:12:00.000")).toBeInTheDocument();
+    expect(await screen.findByText("eac3to v3.36")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "BBCode másolása" })).toBeEnabled());
+    expect(screen.queryByText("Videó-összehasonlítás")).not.toBeInTheDocument();
+  });
+});

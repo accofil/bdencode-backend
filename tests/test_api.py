@@ -288,7 +288,7 @@ def test_health_capabilities_and_job_flow(tmp_path):
     with make_client(tmp_path) as client:
         capabilities = client.get("/api/v1/capabilities")
         assert capabilities.status_code == 200
-        assert capabilities.json()["backend_version"] == "3.13.0"
+        assert capabilities.json()["backend_version"] == "3.14.0"
         assert capabilities.json()["constraints"]["max_active_jobs"] == 1
         assert capabilities.json()["output_video_codecs"] == ["x264", "x265"]
         assert capabilities.json()["audio_actions"] == [
@@ -844,3 +844,98 @@ def test_health_reports_the_worker_and_the_free_disk_space(tmp_path, monkeypatch
     assert first["worker_active"] is False and second["worker_active"] is False
     assert calls == ["bdencode-worker.service"]  # the page polls often: systemd is asked once
     assert first["disk_total_bytes"] >= first["disk_free_bytes"] > 0
+
+
+def _remux_job(client: TestClient):
+    job = client.post(
+        "/api/v1/jobs", json={"source_path": "/storage/Film", "name": "Film"}
+    ).json()
+    client.post("/api/v1/jobs/claim-next")
+    scan = client.post("/api/v1/scans", json={"job_id": job["id"]}).json()
+    result = scan_result()
+    result["playlists"][0]["streams"].append(
+        {
+            "id": "audio:4352",
+            "index": 1,
+            "pid": 4352,
+            "kind": "audio",
+            "codec": "dts",
+            "codec_profile": "DTS-HD MA",
+            "channels": 6,
+            "sample_rate": 48000,
+            "bit_depth": 24,
+            "roles": [],
+        }
+    )
+    response = client.patch(
+        f"/api/v1/scans/{scan['id']}",
+        json={"status": "AWAITING_SELECTION", "result": result},
+    )
+    assert response.status_code == 200
+    return client.get(f"/api/v1/jobs/{job['id']}").json()
+
+
+def _remux_selection() -> dict[str, object]:
+    return {
+        "schema_version": 2,
+        "mode": "remux",
+        "playlist_id": "00001",
+        "angle": 1,
+        "output_name": "Film.2020.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-TAG",
+        "tracks": [{"stream_id": "audio:4352", "action": "copy", "language": "eng"}],
+        "upload_images": False,
+        "tracker_profile": "aither",
+    }
+
+
+def test_a_remux_selection_validates_without_encoder_settings(tmp_path, monkeypatch):
+    import bdencode.api as api_module
+
+    monkeypatch.setattr(
+        api_module,
+        "remux_support",
+        lambda: {"available": True, "eac3to": True, "wine": True, "uhd": False},
+    )
+    with make_client(tmp_path) as client:
+        job = _remux_job(client)
+        response = client.post(
+            f"/api/v1/jobs/{job['id']}/selection/validate",
+            json={"selection": _remux_selection(), "expected_version": job["version"]},
+        )
+
+        assert response.status_code == 200, response.text
+        preview = response.json()
+        assert preview["mode"] == "remux"
+        assert preview["encoder"] == "remux"
+        assert preview["settings"] == {}
+        assert preview["ffmpeg_video_args"] == []
+        capabilities = client.get("/api/v1/capabilities").json()["constraints"]
+        assert capabilities["remux"]["available"] is True
+
+        wrong = _remux_selection()
+        wrong["output_name"] = "Film.2020.1080p.BluRay.DTS-HD.MA.5.1.x264-TAG"
+        rejected = client.post(
+            f"/api/v1/jobs/{job['id']}/selection/validate",
+            json={"selection": wrong, "expected_version": job["version"]},
+        )
+        assert rejected.status_code in {400, 422}
+        assert "clean remux name" in rejected.text
+
+
+def test_a_host_without_eac3to_cannot_validate_a_remux(tmp_path, monkeypatch):
+    import bdencode.api as api_module
+
+    monkeypatch.setattr(
+        api_module,
+        "remux_support",
+        lambda: {"available": False, "eac3to": False, "wine": False, "uhd": False},
+    )
+    with make_client(tmp_path) as client:
+        job = _remux_job(client)
+        response = client.post(
+            f"/api/v1/jobs/{job['id']}/selection/validate",
+            json={"selection": _remux_selection(), "expected_version": job["version"]},
+        )
+
+        assert response.status_code in {400, 409, 422}
+        assert "remux_unavailable" in response.text

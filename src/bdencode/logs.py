@@ -107,9 +107,22 @@ def assert_secret_absent(path: Path, secret_values: Iterable[str]) -> None:
             raise ValueError("sanitized log still contains a supplied secret")
 
 
-def assert_public_metadata_absent(path: Path) -> None:
-    """Fail if a supposedly public log still exposes stable host metadata."""
+# The only Windows paths of an eac3to log made by bdencode-eac3to: the program
+# on Wine's C: and the disc mapped to S:.  They name no host path.
+_WINE_DRIVE_PATHS = re.compile(
+    r"C:\\eac3to\\eac3to\.exe|S:\\BDMV(?:\\[A-Za-z0-9_]+)*(?:\\[A-Za-z0-9_]+\.[A-Za-z0-9]+)?"
+)
+
+
+def assert_public_metadata_absent(path: Path, *, wine_drives: bool = False) -> None:
+    """Fail if a supposedly public log still exposes stable host metadata.
+
+    ``wine_drives`` admits the eac3to log's virtual drive paths (see
+    ``_WINE_DRIVE_PATHS``); every other path is still refused.
+    """
 
     content = path.read_text(encoding="utf-8", errors="replace")
+    if wine_drives:
+        content = _WINE_DRIVE_PATHS.sub("<wine-drive>", content)
     if sanitize_text(content, public=True) != content:
         raise ValueError("sanitized log still contains private host/job metadata")

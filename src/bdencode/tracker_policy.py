@@ -363,7 +363,7 @@ def _ncore(encoder: str, planned: Sequence[_Planned]) -> list[TrackerFinding]:
     return findings
 
 
-def _aither(planned: Sequence[_Planned]) -> list[TrackerFinding]:
+def _aither(planned: Sequence[_Planned], *, remux: bool = False) -> list[TrackerFinding]:
     findings: list[TrackerFinding] = []
     audio = [item for item in planned if item.kind is StreamKind.AUDIO]
     subtitles = [item for item in planned if item.kind is StreamKind.SUBTITLE]
@@ -382,6 +382,24 @@ def _aither(planned: Sequence[_Planned]) -> list[TrackerFinding]:
             )
         )
     for item in audio:
+        if remux and item.codec == "TRUEHD":
+            # A remux keeps the TrueHD's embedded AC-3 as its compatibility
+            # track, right after it.
+            continue
+        if remux and item.codec == "FLAC" and (item.source_channels or 0) > 2:
+            findings.append(
+                TrackerFinding(
+                    "aither_remux_multichannel_flac",
+                    t(
+                        f"A(z) {_language_name(item.language)} többcsatornás LPCM FLAC lesz; az "
+                        "Aither REMUX útmutatója 3.0 csatorna fölött TrueHD-t vagy DTS-HD MA-t "
+                        "kér (ehhez Dolby/DTS kódoló kell). Feltöltés előtt döntsd el.",
+                        f"The {_language_name(item.language)} multichannel LPCM becomes FLAC; "
+                        "Aither's REMUX guide wants TrueHD or DTS-HD MA above 2.0 channels "
+                        "(that needs the Dolby/DTS encoder). Decide before uploading.",
+                    ),
+                )
+            )
         if item.codec == "TRUEHD" and not any(
             other is not item
             and not other.commentary
@@ -423,15 +441,33 @@ def tracker_findings(
     encoder: str,
     playlist: PlaylistCandidate,
     tracks: Sequence[TrackSelection],
+    remux: bool = False,
 ) -> tuple[TrackerFinding, ...]:
-    """Every deviation of the track plan from the chosen tracker's rules."""
+    """Every deviation of the track plan from the chosen tracker's rules.
+
+    ``remux``: an Aither-style remux, whose TrueHD tracks bring their
+    embedded AC-3 along as compatibility tracks.
+    """
 
     if profile is TrackerProfile.NONE:
         return ()
     planned = _planned(playlist, tracks)
     if profile is TrackerProfile.NCORE:
+        if remux:
+            return (
+                TrackerFinding(
+                    "ncore_remux_unchecked",
+                    t(
+                        "Az nCore remux-szabályait a program nem ellenőrzi; a remux az "
+                        "Aither REMUX útmutatóját követi.",
+                        "nCore's remux rules are not checked; the remux follows Aither's "
+                        "REMUX guide.",
+                    ),
+                    "info",
+                ),
+            )
         return tuple(_ncore(encoder, planned))
-    return tuple(_aither(planned))
+    return tuple(_aither(planned, remux=remux))
 
 
 __all__ = [

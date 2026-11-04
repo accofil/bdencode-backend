@@ -41,7 +41,7 @@ from .audio import (
 )
 from .chapters import render_matroska_chapters
 from .config import Settings
-from .capabilities import capability_snapshot, dynamic_hdr_support
+from .capabilities import capability_snapshot, dynamic_hdr_support, remux_support
 from .crf_search import (
     STATUS_BEST_EFFORT,
     STATUS_MAX_CRF,
@@ -62,6 +62,7 @@ from .crf_search import (
 )
 from .db import Database, StateConflictError
 from .dolby_vision_scan import detect_dolby_vision_layers
+from .object_audio_scan import detect_object_audio
 from .hdr_dynamic import (
     DISCARD_PLAN,
     DOLBY_VISION_VBV_KBPS,
@@ -207,6 +208,7 @@ from .process import (
     redact_argv,
 )
 from .progress import EncodeProgressReporter, FFmpegProgressParser
+from . import dovi_layers, remux
 from .qc import av_sync
 from .qc.artifacts import inspect_png
 from .qc.audio import (
@@ -317,6 +319,7 @@ from .live_progress import (
 )
 from .review import read_upload_override, video_metrics_accepted
 from .tracker_bbcode import (
+    remux_bbcode,
     aither_comparison_bbcode,
     encoder_summary,
     gallery_bbcode,
@@ -535,12 +538,22 @@ _SELECTION_KEYS = {
     "upload_image_set",
     "dual_type_match",
     "tracker_profile",
+    # "encode" (the default) or "remux": an untouched Aither-style remux.
+    "mode",
+    "remux",
 }
+# A remux selection carries no video settings, crop or filter.
+_REMUX_SELECTION_KEYS = _SELECTION_KEYS - {"video", "crop", "temporal_filter", "dual_type_match"}
+_REMUX_OPTION_KEYS = {"imdb", "tmdb"}
 # Which comparison images are published: all of them, only the tone-mapped
 # SDR views of an HDR title (half the upload), or only the native pictures.
 UPLOAD_IMAGE_SETS = frozenset({"all", "sdr", "native"})
 # Images uploaded at the same time once the first one has locked the host.
 UPLOAD_PARALLELISM = 3
+# An UHD remux's raw video in the job's work/remux folder.
+REMUX_UHD_VIDEO = "video.hevc"
+# Screenshots of a remux per tracker profile (Aither asks for 3 or more).
+REMUX_SCREENSHOT_COUNT = {"aither": 6, "ncore": 3, "none": 6}
 _HASH_CACHE: dict[tuple[str, int, int, int, int, int], str] = {}
 _MAINTENANCE_MARKERS = (
     Path("/var/lib/bdencode/install-transactions/active"),
@@ -805,10 +818,36 @@ class ParsedSelection:
     dynamic_hdr: DynamicHdrMode = DynamicHdrMode.DISCARD
     # Whose rules the job follows: none, aither or ncore (see tracker_policy).
     tracker_profile: TrackerProfile = TrackerProfile.NONE
+    # "remux": no video encode; settings, crop and filter are then unused
+    # placeholders and ``remux`` holds the remux options.
+    mode: str = "encode"
+    remux: RemuxOptions | None = None
 
     @property
     def dub_may_be_default(self) -> bool:
         return self.tracker_profile is TrackerProfile.NCORE
+
+    @property
+    def is_remux(self) -> bool:
+        return self.mode == "remux"
+
+
+@dataclass(frozen=True, slots=True)
+class RemuxOptions:
+    """What a remux selection adds: the guide's global tags."""
+
+    imdb: str | None = None
+    tmdb: str | None = None
+
+
+def _is_remux_job(job: Job) -> bool:
+    return isinstance(job.selection, Mapping) and job.selection.get("mode") == "remux"
+
+
+# The states a remux runs through its own stages; UPLOADING is shared.
+_REMUX_STAGES = frozenset(
+    {JobState.READY, JobState.ENCODING, JobState.MUXING, JobState.QC, JobState.COMPARISON}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1106,11 +1145,15 @@ _FORBIDDEN_PUBLIC_JSON_KEYS = {
 }
 
 
-def _assert_public_sidecar_safe(path: Path) -> None:
-    """Reject private fields/values before any public upload or package copy."""
+def _assert_public_sidecar_safe(path: Path, *, wine_drives: bool = False) -> None:
+    """Reject private fields/values before any public upload or package copy.
+
+    ``wine_drives``: the eac3to log (and a BBCode quoting it) may name the
+    Wine drives bdencode-eac3to maps (eac3to on C:, the disc on S:).
+    """
 
     try:
-        assert_public_metadata_absent(path)
+        assert_public_metadata_absent(path, wine_drives=wine_drives)
         if path.suffix.casefold() != ".json":
             return
         document = json.loads(path.read_text(encoding="utf-8"))
@@ -2164,7 +2207,14 @@ def parse_selection(
     raw = job.selection
     if not isinstance(raw, Mapping):
         raise ReviewRequired("selection JSON is missing")
-    unknown = set(raw) - _SELECTION_KEYS
+    mode = raw.get("mode", "encode")
+    if mode == "remux":
+        return parse_remux_selection(job, scan)
+    if mode != "encode":
+        raise ReviewRequired("selection mode must be encode or remux")
+    unknown = set(raw) - _SELECTION_KEYS - {"mode"}
+    if "remux" in raw:
+        raise ReviewRequired("remux options belong to a remux selection")
     if unknown:
         raise ReviewRequired(
             "unknown selection field(s): " + ", ".join(sorted(unknown))
@@ -2501,6 +2551,292 @@ def parse_selection(
         ),
     )
     return parsed
+
+
+def parse_remux_selection(job: Job, scan: DiscScan) -> ParsedSelection:
+    """An Aither-style remux: the disc's own streams, nothing re-encoded.
+
+    The video is always kept; audio is copied untouched except Blu-ray LPCM,
+    which becomes FLAC as the guide demands; PGS subtitles are copied or
+    left out.  Everything an encode needs (settings, crop, filter) is a
+    placeholder the remux stages never read.
+    """
+
+    raw = job.selection
+    assert isinstance(raw, Mapping)
+    unknown = set(raw) - _REMUX_SELECTION_KEYS
+    if unknown:
+        raise ReviewRequired(
+            "unknown remux selection field(s): " + ", ".join(sorted(unknown))
+        )
+    if raw.get("schema_version", 2) != 2 or isinstance(raw.get("schema_version"), bool):
+        raise ReviewRequired("remux selection schema_version must be 2")
+    missing = {"playlist_id", "angle", "tracks", "output_name", "upload_images"} - set(raw)
+    if missing:
+        raise ReviewRequired("missing selection field(s): " + ", ".join(sorted(missing)))
+    try:
+        tracker_profile = TrackerProfile(raw.get("tracker_profile", "none"))
+    except ValueError as exc:
+        raise ReviewRequired("tracker_profile must be none, aither or ncore") from exc
+    if scan.is_mkv:
+        raise ReviewRequired(
+            "a remux is made from the disc itself, not from an existing MKV remux",
+            details={"code": "remux_needs_disc"},
+        )
+    playlist_text = str(raw["playlist_id"]).lower().removesuffix(".mpls")
+    if not playlist_text.isdigit():
+        raise ReviewRequired("playlist_id must be numeric")
+    playlist_id = playlist_text.zfill(5)
+    try:
+        playlist = scan.playlist(playlist_id)
+    except KeyError as exc:
+        raise ReviewRequired(str(exc)) from exc
+    if raw["angle"] != 1 or isinstance(raw["angle"], bool):
+        raise ReviewRequired(
+            "a remux keeps the playlist's first angle; angle must be 1",
+            details={"code": "remux_angle"},
+        )
+    videos = playlist.video_streams
+    if not videos or videos[0].video is None:
+        raise ReviewRequired(
+            "the selected playlist has no video stream",
+            details={"code": "remux_video_streams"},
+        )
+    # A second video stream is only acceptable as the Dolby Vision enhancement
+    # layer the scan identified; anything else would silently lose a picture.
+    if len(videos) > 1 and not (
+        len(videos) == 2
+        and scan.disc_kind is DiscKind.UHD
+        and videos[0].video.dolby_vision_el_stream_id == videos[1].id
+    ):
+        raise ReviewRequired(
+            "the playlist has a second video stream that is not a recognized "
+            "Dolby Vision enhancement layer",
+            details={"code": "remux_video_streams"},
+        )
+    video_family = remux.stream_family(videos[0])
+    if video_family not in remux.VIDEO_FAMILIES or videos[0].video.three_d:
+        raise ReviewRequired(
+            f"the playlist's {videos[0].codec} video cannot be remuxed",
+            details={"code": "remux_video_codec"},
+        )
+    video = videos[0].video
+    if video.frame_rate is None or video.height is None:
+        raise ReviewRequired("source video geometry/timing is incomplete")
+
+    tracks_raw = raw["tracks"]
+    if not isinstance(tracks_raw, list):
+        raise ReviewRequired("tracks must be an array")
+    allowed_track = {
+        "stream_id",
+        "action",
+        "language",
+        "name",
+        "default",
+        "forced",
+        "subtitle_kind",
+        "order",
+    }
+    stream_by_id = {stream.id: stream for stream in playlist.streams}
+    tracks: list[TrackSelection] = []
+    for number, item in enumerate(tracks_raw):
+        if not isinstance(item, Mapping) or set(item) - allowed_track:
+            raise ReviewRequired(f"tracks[{number}] contains unknown fields")
+        if "stream_id" not in item or "action" not in item:
+            raise ReviewRequired(f"tracks[{number}] needs stream_id and action")
+        order_value = item.get("order", number)
+        if type(order_value) is not int or order_value < 0:
+            raise ReviewRequired(
+                f"invalid tracks[{number}]: order must be a non-negative integer"
+            )
+        try:
+            selected = TrackSelection(
+                stream_id=str(item["stream_id"]),
+                action=TrackAction(str(item["action"]).lower()),
+                language=item.get("language"),
+                name=item.get("name"),
+                default=item.get("default"),
+                forced=item.get("forced"),
+                subtitle_kind=item.get("subtitle_kind"),
+                order=order_value,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ReviewRequired(f"invalid tracks[{number}]: {exc}") from exc
+        stream = stream_by_id.get(selected.stream_id)
+        if stream is None:
+            raise ReviewRequired(f"tracks[{number}] references an unknown stream")
+        if stream.kind is StreamKind.VIDEO:
+            raise ReviewRequired(f"tracks[{number}]: a remux always keeps its video")
+        family = remux.stream_family(stream)
+        action = selected.action
+        if stream.kind is StreamKind.AUDIO:
+            if selected.forced or selected.subtitle_kind is not None:
+                raise ReviewRequired(f"tracks[{number}] audio cannot be forced")
+            if family not in remux.AUDIO_FAMILIES:
+                raise ReviewRequired(
+                    f"tracks[{number}]: {stream.codec} audio cannot be remuxed",
+                    details={"code": "remux_audio_codec"},
+                )
+            expected = TrackAction.FLAC if family == "LPCM" else TrackAction.COPY
+            if action not in {expected, TrackAction.OMIT}:
+                raise ReviewRequired(
+                    f"tracks[{number}]: a remux keeps {stream.codec} audio as "
+                    f"{expected.value} (the guide converts only LPCM, to FLAC)",
+                    details={"code": "remux_audio_action"},
+                )
+        else:
+            if action not in {TrackAction.COPY, TrackAction.OMIT}:
+                raise ReviewRequired(f"tracks[{number}]: subtitles are copied or omitted")
+            if action is TrackAction.COPY:
+                if family != "PGS":
+                    raise ReviewRequired(
+                        f"tracks[{number}]: only PGS subtitles can be remuxed",
+                        details={"code": "remux_subtitle_codec"},
+                    )
+                if selected.subtitle_kind not in {"full", "forced"}:
+                    raise ReviewRequired(
+                        f"tracks[{number}] retained subtitle needs an explicit full/forced classification"
+                    )
+                if selected.forced is not None and selected.forced is not (
+                    selected.subtitle_kind == "forced"
+                ):
+                    raise ReviewRequired(
+                        f"tracks[{number}] subtitle forced flag conflicts with subtitle_kind"
+                    )
+        tracks.append(selected)
+    if len({item.stream_id for item in tracks}) != len(tracks):
+        raise ReviewRequired("each playlist track may be selected only once")
+    retained_audio = [
+        item
+        for item in tracks
+        if item.action is not TrackAction.OMIT
+        and stream_by_id[item.stream_id].kind is StreamKind.AUDIO
+    ]
+    if not retained_audio:
+        raise ReviewRequired("a remux needs at least one audio track")
+
+    options_raw = raw.get("remux", {})
+    if not isinstance(options_raw, Mapping) or set(options_raw) - _REMUX_OPTION_KEYS:
+        raise ReviewRequired("remux options may contain imdb and tmdb")
+    imdb = options_raw.get("imdb") or None
+    tmdb = options_raw.get("tmdb") or None
+    if imdb is not None and not (isinstance(imdb, str) and remux.IMDB_ID.fullmatch(imdb)):
+        raise ReviewRequired("remux.imdb must look like tt0123456")
+    if tmdb is not None and not (isinstance(tmdb, str) and remux.TMDB_ID.fullmatch(tmdb)):
+        raise ReviewRequired("remux.tmdb must look like movie/123 or tv/123")
+
+    output_name = str(raw["output_name"]).removesuffix(".mkv")
+    if not _SAFE_OUTPUT_RE.fullmatch(output_name) or output_name in {".", ".."}:
+        raise ReviewRequired("output_name contains unsafe characters")
+    if not isinstance(raw["upload_images"], bool):
+        raise ReviewRequired("upload_images must be boolean")
+    image_upload_provider = str(raw.get("image_upload_provider", "auto")).lower()
+    if image_upload_provider not in {"auto", "imgbb", "catbox", "freeimage"}:
+        raise ReviewRequired(
+            "image_upload_provider must be auto, imgbb, catbox or freeimage"
+        )
+    upload_image_set = str(raw.get("upload_image_set", "all")).lower()
+    if upload_image_set not in UPLOAD_IMAGE_SETS:
+        raise ReviewRequired("upload_image_set must be all, sdr or native")
+    _validate_release_name(
+        output_name,
+        facts=remux_release_facts(scan=scan, playlist=playlist, tracks=tracks),
+    )
+    return ParsedSelection(
+        playlist_id=playlist_id,
+        angle=1,
+        settings=recommended_profile(
+            VideoEncoder.X264, content_type=job.content_type.value.lower()
+        ),
+        crop=VapourSynthCrop(left=0, top=0, right=0, bottom=0),
+        temporal_filter=TemporalFilter.PROGRESSIVE,
+        tracks=tuple(tracks),
+        output_name=output_name,
+        upload_images=raw["upload_images"],
+        image_upload_provider=image_upload_provider,
+        upload_image_set=upload_image_set,
+        dual_type_match=False,
+        schema_version=2,
+        tracker_profile=tracker_profile,
+        mode="remux",
+        remux=RemuxOptions(imdb=imdb, tmdb=tmdb),
+    )
+
+
+def remux_output_order(
+    playlist: PlaylistCandidate, tracks: Sequence[TrackSelection]
+) -> list[tuple[TrackSelection, MediaStream]]:
+    """Retained audio, then subtitles, each in the operator's order."""
+
+    streams = {item.id: item for item in playlist.streams}
+    retained = [
+        (item, streams[item.stream_id])
+        for item in sorted(tracks, key=lambda value: value.order)
+        if item.action is not TrackAction.OMIT
+    ]
+    # A kept TrueHD brings its embedded AC-3 itself, whatever its row says.
+    kept = {stream.id for _item, stream in retained}
+    retained = [
+        pair
+        for pair in retained
+        if (parent := remux.embedded_core_parent(pair[1], playlist.audio_streams)) is None
+        or parent.id not in kept
+    ]
+    return [pair for pair in retained if pair[1].kind is StreamKind.AUDIO] + [
+        pair for pair in retained if pair[1].kind is StreamKind.SUBTITLE
+    ]
+
+
+def remux_release_facts(
+    *,
+    scan: DiscScan,
+    playlist: PlaylistCandidate,
+    tracks: Sequence[TrackSelection],
+    atmos: Mapping[str, bool] | None = None,
+) -> ReleaseFacts:
+    """What a remux name may say: the untouched video and the kept audio.
+
+    A TrueHD track brings its embedded AC-3 along as the next track.
+    ``atmos`` overrides the scan's object-audio guess per stream with what
+    eac3to read from the bitstream (FFmpeg 5 does not see TrueHD Atmos).
+    """
+
+    audio: list[AudioOutput] = []
+    for item, stream in remux_output_order(playlist, tracks):
+        if stream.kind is not StreamKind.AUDIO:
+            continue
+        family = remux.stream_family(stream)
+        language = item.bcp47(stream).split("-")[0].casefold()
+        commentary = TrackRole.COMMENTARY in stream.roles
+        audio.append(
+            AudioOutput(
+                codec="FLAC" if family == "LPCM" else family,
+                channels=stream.channels,
+                atmos=(atmos or {}).get(stream.id, stream.object_audio),
+                language=language,
+                commentary=commentary,
+            )
+        )
+        if family == "TRUEHD":
+            audio.append(
+                AudioOutput(
+                    codec="DD",
+                    channels=min(stream.channels or 6, 6),
+                    language=language,
+                    commentary=commentary,
+                )
+            )
+    video_stream = playlist.video_streams[0]
+    video = video_stream.video
+    assert video is not None
+    return ReleaseFacts(
+        encoder="remux",
+        audio=tuple(audio),
+        dynamic_range=remux.dynamic_range(video),
+        video_codec=remux.VIDEO_NAME_CODECS[remux.stream_family(video_stream)],
+        resolution=remux.resolution_text(video.height, video.field_order, video.frame_rate),
+        uhd=scan.disc_kind is DiscKind.UHD,
+    )
 
 
 def chapter_keyframe_seconds(playlist: PlaylistCandidate) -> tuple[float, ...]:
@@ -3097,6 +3433,8 @@ class PipelineWorker:
         if job.state is JobState.SCANNING:
             with self._step(paths, "scan", ("Lemez beolvasása", "Reading the disc")):
                 self._scan(job, paths)
+        elif _is_remux_job(job) and job.state in _REMUX_STAGES:
+            self._process_remux_stage(job, paths)
         elif job.state is JobState.READY:
             self._prepare(job, paths)
         elif job.state is JobState.ENCODING:
@@ -3473,6 +3811,7 @@ class PipelineWorker:
                 # A remux has one video track: there is no separate Dolby
                 # Vision enhancement-layer stream to look for.
                 result = self._detect_dolby_vision_layers(paths, source, result)
+                result = self._detect_object_audio(paths, source, result)
             atomic_write_json(paths.scan_json, result.to_dict())
             _write_stage(marker, inputs, [paths.scan_json])
         result_json = json.loads(paths.scan_json.read_text(encoding="utf-8"))
@@ -3587,6 +3926,24 @@ class PipelineWorker:
             LOG.exception("job %s: the Dolby Vision layer probe failed; the scan is kept as it was", paths.root.name)
             return scan
 
+    def _detect_object_audio(
+        self, paths: JobPaths, source: Path, scan: DiscScan
+    ) -> DiscScan:
+        """Recognise Atmos and DTS:X, which FFmpeg 5 does not report."""
+
+        try:
+            return detect_object_audio(
+                scan,
+                source,
+                run=self._runner(paths).run,
+                read_text=lambda path: path.read_text(encoding="utf-8", errors="replace"),
+                work=paths.analysis / "object-audio-probe",
+                logs=paths.logs,
+            )
+        except Exception:  # a failed probe must never fail the scan
+            LOG.exception("job %s: the object-audio probe failed; the scan is kept as it was", paths.root.name)
+            return scan
+
     @staticmethod
     def _crop_policy_inputs(
         scan: DiscScan,
@@ -3649,6 +4006,9 @@ class PipelineWorker:
         instead of silently falling back to the original zero margins.
         """
 
+        if _is_remux_job(job):
+            # A remux has no crop, CRF or dynamic-HDR decision to replay.
+            return self._load_scan_and_selection(job, paths)
         scan, selection = self._load_prepared_crop_selection(job, paths)
         selection = self._apply_auto_crf(job, paths, selection)
         if selection.dynamic_hdr is not DynamicHdrMode.DISCARD:
@@ -4931,9 +5291,20 @@ class PipelineWorker:
                 },
             )
 
-    def _prepare(self, job: Job, paths: JobPaths, *, advance: bool = True) -> None:
-        scan, selection = self._load_scan_and_selection(job, paths)
-        playlist = scan.playlist(selection.playlist_id)
+    def _prepare_reference(
+        self,
+        job: Job,
+        paths: JobPaths,
+        scan: DiscScan,
+        selection: ParsedSelection,
+        playlist: PlaylistCandidate,
+    ) -> str:
+        """The lossless reference remux of the playlist, checked; its SHA-256.
+
+        Shared by encodes and remuxes: a remux's QC compares its output with
+        this independent FFmpeg demux of the same playlist.
+        """
+
         pcm_bluray_audio: list[PcmBlurayAudio] = []
         for ordinal, stream in enumerate(playlist.audio_streams):
             if stream.codec.casefold() != "pcm_bluray":
@@ -5003,15 +5374,21 @@ class PipelineWorker:
 
         with self._step(paths, "reference-hash", ("Referencia ellenőrzőösszege", "Reference checksum")):
             reference_sha256 = sha256_file(paths.reference)
-        source_video = playlist.video_streams[0].video
-        assert source_video is not None
-        crop_report = paths.analysis / "crop-policy.json"
-        crop_marker = paths.stages / "crop-policy.json"
         # The full decode of the reference (source integrity) runs beside the
         # video encode; preparation only enforces what the remux reported,
         # after checking the playlist's clip joins.
         self._verify_clip_joins(paths, playlist, reference_sha256)
         self._enforce_source_history(paths)
+        return reference_sha256
+
+    def _prepare(self, job: Job, paths: JobPaths, *, advance: bool = True) -> None:
+        scan, selection = self._load_scan_and_selection(job, paths)
+        playlist = scan.playlist(selection.playlist_id)
+        reference_sha256 = self._prepare_reference(job, paths, scan, selection, playlist)
+        source_video = playlist.video_streams[0].video
+        assert source_video is not None
+        crop_report = paths.analysis / "crop-policy.json"
+        crop_marker = paths.stages / "crop-policy.json"
 
         if playlist.duration_seconds <= 0:
             raise ReviewRequired(
@@ -9902,6 +10279,9 @@ class PipelineWorker:
                 details={"action": "rerun_mux_and_qc"},
             )
         mux_digest = current_mux_digest
+        if selection.is_remux:
+            self._remux_upload_and_finalize(job, paths, scan, selection, mux_digest)
+            return
         video_manifest_path = paths.comparison / "video-comparison.json"
         try:
             video_manifest = json.loads(video_manifest_path.read_text(encoding="utf-8"))
@@ -9958,6 +10338,1551 @@ class PipelineWorker:
         allowed_names = {path.name for path in pngs}
         if len(allowed_names) != len(pngs):
             raise RuntimeError("comparison image basenames are not unique")
+        checkpoint, uploaded, provider_lock = self._upload_evidence_images(
+            job,
+            paths,
+            selection,
+            pngs,
+            manifest_pairs=video_manifest.get("pairs"),
+        )
+
+        bbcode = paths.comparison / "comparison.bbcode"
+        aither_comparison = paths.comparison / "comparison-aither.bbcode"
+        pairs_document = video_manifest.get("pairs")
+        published = pairs_document if isinstance(pairs_document, list) else []
+        lines = [f"[b]{selection.output_name} — comparison[/b]"]
+        if uploaded and provider_lock:
+            lines.append(f"[i]Image host: {provider_lock}[/i]")
+        if uploaded:
+            # GALLERY_WIDTH-pixel pictures, each linked to its full size.
+            lines.extend(gallery_bbcode(published, uploaded))
+        else:
+            lines.append(
+                "[i]Image upload was disabled; see the lossless PNG sidecars.[/i]"
+            )
+        # Aither's interactive comparison as a separate, ready-to-paste
+        # option, for every job (not only Aither tracker jobs).
+        comparison_lines = aither_comparison_bbcode(published, uploaded)
+        bbcode_outputs = [checkpoint, bbcode]
+        if comparison_lines:
+            atomic_write_text(aither_comparison, "\n".join(comparison_lines) + "\n")
+            _assert_public_sidecar_safe(aither_comparison)
+            bbcode_outputs.append(aither_comparison)
+        else:
+            aither_comparison.unlink(missing_ok=True)
+        encode_log = paths.logs / "video-encode.log"
+        lines.extend(
+            tracker_bbcode(
+                selection.tracker_profile.value,
+                published,
+                uploaded,
+                encoder_log=(
+                    sanitize_text(
+                        encoder_summary(encode_log.read_text(encoding="utf-8", errors="replace"))
+                    )
+                    if selection.tracker_profile is TrackerProfile.AITHER and encode_log.is_file()
+                    else ""
+                ),
+                codec=selection.settings.encoder.value,
+            )
+        )
+        atomic_write_text(bbcode, "\n".join(lines) + "\n")
+        _assert_public_sidecar_safe(checkpoint)
+        _assert_public_sidecar_safe(bbcode)
+        upload_marker = paths.stages / "upload.json"
+        _write_stage(
+            upload_marker,
+            {
+                "upload_images": selection.upload_images,
+                "provider": provider_lock,
+                "images": {path.name: sha256_file(path) for path in pngs},
+            },
+            bbcode_outputs,
+        )
+        self._stop_at_operator_boundary(job.id)
+
+        # Upload adapters are external code and may run for minutes.  Re-open
+        # the trust boundary afterwards so a concurrent/local mutation cannot
+        # turn previously validated evidence (or the final MKV) into the
+        # public release between upload and staging.
+        if (
+            _recorded_output_sha256(paths.stages / "mux.json", paths.muxed_output)
+            != mux_digest
+            or sha256_file(paths.muxed_output) != mux_digest
+        ):
+            raise ReviewRequired(
+                "final Matroska changed during public evidence upload",
+                details={"action": "rerun_mux_and_qc"},
+            )
+        pngs = _current_comparison_pngs(paths, prune=False)
+        metric_sidecars = _current_video_metric_sidecars(paths)
+        revalidated_video_pins = _assert_stage_outputs_current(
+            paths.stages / "comparison.json",
+            [
+                video_manifest_path,
+                *metric_sidecars,
+                *(path for path in pngs if path.parent == paths.comparison),
+            ],
+            stage_name="video comparison",
+        )
+        revalidated_audio_pins = _assert_stage_outputs_current(
+            paths.stages / "qc-audio.json",
+            [
+                paths.analysis / "audio-comparison.json",
+                *(path for path in pngs if path.parent == paths.analysis),
+            ],
+            stage_name="audio QC",
+        )
+        revalidated_public_evidence = {
+            **revalidated_video_pins,
+            **revalidated_audio_pins,
+        }
+        if revalidated_public_evidence != validated_public_evidence:
+            raise ReviewRequired(
+                "public evidence checkpoint set changed during image upload",
+                details={"action": "rerun_qc"},
+            )
+        for public_metadata in (
+            video_manifest_path,
+            paths.analysis / "audio-comparison.json",
+            *metric_sidecars,
+            *bbcode_outputs,
+        ):
+            _assert_public_sidecar_safe(public_metadata)
+        upload_evidence_pins = _assert_stage_outputs_current(
+            upload_marker,
+            bbcode_outputs,
+            stage_name="upload checkpoint",
+        )
+        pinned_public_files = {
+            **validated_public_evidence,
+            **upload_evidence_pins,
+        }
+        if len(pinned_public_files) != len(validated_public_evidence) + len(
+            upload_evidence_pins
+        ):
+            raise ReviewRequired("public upload evidence overlaps producer outputs")
+
+        self._publish_release(
+            job,
+            paths,
+            scan,
+            selection,
+            mux_digest=mux_digest,
+            checkpoint=checkpoint,
+            evidence_inputs={
+                "comparison_sha256": sha256_file(
+                    paths.comparison / "video-comparison.json"
+                ),
+                "audio_sha256": sha256_file(paths.analysis / "audio-comparison.json"),
+            },
+            public_analysis_files=(
+                paths.analysis / "audio-comparison.json",
+                *(path for path in pngs if path.parent == paths.analysis),
+            ),
+            public_comparison_files=(
+                video_manifest_path,
+                *bbcode_outputs,
+                *metric_sidecars,
+                *(path for path in pngs if path.parent == paths.comparison),
+            ),
+            pinned_public_files=pinned_public_files,
+            bbcode_outputs=bbcode_outputs,
+            completion_message="encode, QC and comparison completed",
+        )
+
+    # --- remux: Aither's REMUX guide, nothing re-encoded ----------------------
+
+    def _process_remux_stage(self, job: Job, paths: JobPaths) -> None:
+        """One remux stage: READY prepares, ENCODING demuxes with eac3to,
+        MUXING muxes, QC proves the output untouched, COMPARISON takes the
+        screenshots.  UPLOADING is shared with encodes."""
+
+        if job.state is JobState.READY:
+            self._remux_prepare(job, paths)
+        elif job.state is JobState.ENCODING:
+            with self._step(paths, "eac3to", ("Bontás eac3to-val", "Demuxing with eac3to")):
+                self._remux_demux(job, paths)
+        elif job.state is JobState.MUXING:
+            with self._step(paths, "mux", ("Muxolás", "Muxing")):
+                self._remux_mux(job, paths)
+        elif job.state is JobState.QC:
+            with self._step(paths, "qc", ("Minőségellenőrzés (QC)", "Quality check (QC)")):
+                self._remux_qc(job, paths)
+        elif job.state is JobState.COMPARISON:
+            with self._step(paths, "screenshots", ("Képernyőképek", "Screenshots")):
+                self._remux_screenshots(job, paths)
+
+    def _remux_root(self, paths: JobPaths) -> Path:
+        """``work/remux``: eac3to's working directory (drive W:)."""
+
+        return _ensure_contained_directory(
+            paths.work / "remux", root=paths.work, description="remux directory"
+        )
+
+    def _eac3to_env(self, paths: JobPaths) -> dict[str, str]:
+        # The job's own Wine prefix: two jobs never share drive letters.
+        return {**os.environ, "BDENCODE_WINEPREFIX": str(paths.work / "wine")}
+
+    def _remux_plan_path(self, paths: JobPaths) -> Path:
+        return paths.analysis / "remux-plan.json"
+
+    def _remux_prepare(self, job: Job, paths: JobPaths) -> None:
+        scan, selection = self._load_scan_and_selection(job, paths)
+        support = remux_support()
+        if not support["available"]:
+            raise ReviewRequired(
+                "this host cannot make remuxes: eac3to or Wine is missing",
+                details={"code": "remux_unavailable", **support},
+            )
+        playlist = scan.playlist(selection.playlist_id)
+        reference_sha256 = self._prepare_reference(job, paths, scan, selection, playlist)
+        with self._step(paths, "language", ("Hangsávok nyelvének ellenőrzése", "Checking audio track languages")):
+            selection = self._resolve_selected_languages(job, scan, selection, paths)
+
+        listing_path = paths.analysis / "eac3to-listing.txt"
+        listing_marker = paths.stages / "eac3to-listing.json"
+        listing_command = remux.eac3to_listing_command(scan.source, selection.playlist_id)
+        listing_inputs = {
+            "schema_version": 1,
+            "scan_fingerprint": scan.fingerprint,
+            "command": listing_command,
+        }
+        if not _valid_stage(listing_marker, listing_inputs, [listing_path]):
+            with self._step(paths, "eac3to-listing", ("Lejátszási lista eac3to-val", "Reading the playlist with eac3to")):
+                self._runner(paths).run(
+                    listing_command,
+                    cwd=self._remux_root(paths),
+                    env=self._eac3to_env(paths),
+                    stdout_path=listing_path,
+                    stderr_path=paths.logs / "eac3to-listing.log",
+                    timeout=1800,
+                )
+            _write_stage(listing_marker, listing_inputs, [listing_path])
+        try:
+            listing = remux.parse_listing(
+                listing_path.read_text(encoding="utf-8", errors="replace")
+            )
+            matched = remux.match_tracks(playlist, listing)
+        except remux.RemuxError as exc:
+            raise ReviewRequired(
+                f"eac3to and the scan disagree about the playlist: {exc}",
+                details={"code": exc.code, "report": listing_path.name},
+            ) from exc
+
+        retained = remux_output_order(playlist, selection.tracks)
+        # The name must say Atmos exactly when the bitstream carries it; eac3to
+        # reads it, FFmpeg 5 does not.
+        atmos = {
+            stream.id: matched[stream.id].atmos and remux.stream_family(stream) != "DD"
+            for _item, stream in retained
+            if stream.kind is StreamKind.AUDIO
+        }
+        _validate_release_name(
+            selection.output_name,
+            facts=remux_release_facts(
+                scan=scan, playlist=playlist, tracks=selection.tracks, atmos=atmos
+            ),
+        )
+        video_stream = playlist.video_streams[0]
+        uhd = scan.disc_kind is DiscKind.UHD
+        video_props = video_stream.video
+        assert video_props is not None
+        if len(playlist.video_streams) > 1 and not support.get("dolby_vision"):
+            raise ReviewRequired(
+                "this host cannot join Dolby Vision layers: dovi_tool is missing",
+                details={"code": "remux_unavailable", **support},
+            )
+        try:
+            # The guide: eac3to cannot handle PTS timing on HEVC video.
+            outputs = remux.demux_outputs(
+                ([] if uhd else [(video_stream, matched[video_stream.id])])
+                + [(stream, matched[stream.id]) for _item, stream in retained]
+            )
+        except remux.RemuxError as exc:
+            raise ReviewRequired(str(exc), details={"code": exc.code}) from exc
+        chapters = listing.chapters
+        plan = {
+            "schema_version": 1,
+            "playlist_id": selection.playlist_id,
+            "reference_sha256": reference_sha256,
+            "listing_header": listing.header,
+            "chapters": bool(chapters and chapters.chapter_count),
+            "chapter_count": chapters.chapter_count if chapters else 0,
+            "outputs": [asdict(item) for item in outputs],
+            # An UHD disc's video comes from the reference, not from eac3to.
+            "video": (
+                {
+                    "stream_id": video_stream.id,
+                    "track": matched[video_stream.id].number,
+                    "family": remux.stream_family(video_stream),
+                    "filename": REMUX_UHD_VIDEO,
+                    "enhancement_layer": len(playlist.video_streams) > 1,
+                    "el_type": video_props.dolby_vision_el_type,
+                    "aspect": matched[video_stream.id].aspect,
+                }
+                if uhd
+                else None
+            ),
+            "tracks": {
+                str(track.number): {
+                    "label": track.label,
+                    "family": track.family,
+                    "language": track.language,
+                    "channels": track.channels,
+                    "bit_depth": track.bit_depth,
+                    "sample_rate": track.sample_rate,
+                    "atmos": track.atmos,
+                    "aspect": track.aspect,
+                    "video_format": track.video_format,
+                    "dialnorm_db": track.dialnorm_db,
+                }
+                for track in matched.values()
+            },
+        }
+        plan_path = self._remux_plan_path(paths)
+        atomic_write_json(plan_path, plan)
+        self._register_artifact(
+            job.id,
+            plan_path,
+            DatabaseArtifactKind.MANIFEST,
+            plan_path.name,
+            mime_type="application/json",
+        )
+        _write_stage(
+            paths.stages / "pipeline-prepare.json",
+            self._preparation_inputs(job, scan),
+            [paths.reference, plan_path, listing_path],
+        )
+        self.queue.advance(
+            job.id, JobState.ENCODING, message="remux prepared: eac3to matched the playlist"
+        )
+
+    def _load_remux_plan(self, job: Job, paths: JobPaths, scan: DiscScan) -> dict[str, Any]:
+        plan_path = self._remux_plan_path(paths)
+        if not _valid_stage(
+            paths.stages / "pipeline-prepare.json",
+            self._preparation_inputs(job, scan),
+            [paths.reference, plan_path, paths.analysis / "eac3to-listing.txt"],
+        ):
+            raise ReviewRequired(
+                "the remux plan does not belong to the current selection",
+                details={"action": "rerun_prepare"},
+            )
+        try:
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ReviewRequired("remux plan is unreadable") from exc
+        if not isinstance(plan, dict) or plan.get("schema_version") != 1:
+            raise ReviewRequired("remux plan schema is unsupported")
+        return plan
+
+    def _remux_files(self, paths: JobPaths, plan: Mapping[str, Any]) -> list[Path]:
+        root = self._remux_root(paths)
+        files = [root / str(item["filename"]) for item in plan["outputs"]]
+        if plan["chapters"]:
+            files.append(root / remux.CHAPTERS_NAME)
+        return files
+
+    def _remux_demux(self, job: Job, paths: JobPaths) -> None:
+        scan, selection = self._load_scan_and_selection(job, paths)
+        plan = self._load_remux_plan(job, paths, scan)
+        root = self._remux_root(paths)
+        outputs = [remux.DemuxOutput(**item) for item in plan["outputs"]]
+        command = remux.eac3to_demux_command(
+            scan.source, selection.playlist_id, outputs, chapters=bool(plan["chapters"])
+        )
+        log_path = root / remux.LOG_NAME
+        findings_path = paths.analysis / "eac3to-findings.json"
+        files = [*self._remux_files(paths, plan), log_path, findings_path]
+        inputs = {
+            "schema_version": 1,
+            "plan_sha256": sha256_file(self._remux_plan_path(paths)),
+            "command": command,
+        }
+        marker = paths.stages / "remux-demux.json"
+        if not _valid_stage(marker, inputs, files):
+            for stale in files:
+                stale.unlink(missing_ok=True)
+            console = paths.logs / "eac3to-demux.log"
+            console_errors = paths.logs / "eac3to-demux.stderr.log"
+            live = self._live(paths)
+
+            def progress() -> None:
+                text = ""
+                for part in (console, console_errors):
+                    try:
+                        text += part.read_text(encoding="utf-8", errors="replace")[-4096:]
+                    except OSError:
+                        pass
+                fraction = remux.eac3to_progress(text)
+                if fraction is not None:
+                    live.update(fraction)
+
+            self._run_reported(
+                paths,
+                command,
+                probe=progress,
+                cwd=root,
+                env=self._eac3to_env(paths),
+                stdout_path=console,
+                stderr_path=console_errors,
+            )
+            missing = [
+                path.name
+                for path in files[:-1]
+                if not path.is_file() or path.stat().st_size == 0
+            ]
+            if missing:
+                raise ReviewRequired(
+                    "eac3to did not write every planned file: " + ", ".join(missing),
+                    details={"code": "eac3to_missing_output", "missing": missing},
+                )
+            log = log_path.read_text(encoding="utf-8", errors="replace")
+            findings = remux.log_findings(log)
+            atomic_write_json(
+                findings_path,
+                {
+                    "schema_version": 1,
+                    "frames": remux.logged_frame_count(log),
+                    "findings": [asdict(item) for item in findings],
+                },
+            )
+            _write_stage(marker, inputs, files)
+        # eac3to is done: its Wine prefix (about 100 MB) is not needed again.
+        shutil.rmtree(paths.work / "wine", ignore_errors=True)
+        report = json.loads(findings_path.read_text(encoding="utf-8"))
+        errors = [item["text"] for item in report["findings"] if item["severity"] == "error"]
+        if errors:
+            raise ReviewRequired(
+                "eac3to reported an error while demuxing: " + errors[0],
+                details={"code": "eac3to_error", "errors": errors, "report": findings_path.name},
+            )
+        notes = [item for item in report["findings"] if item["severity"] != "error"]
+        if notes:
+            self.database.add_event(
+                EventCreate(
+                    job_id=job.id,
+                    kind="worker.eac3to-notes",
+                    message="eac3to logged warnings or notes; they are listed with the release",
+                    payload={"findings": notes},
+                )
+            )
+        if plan["video"] is not None:
+            self._remux_uhd_video(paths, plan)
+        self.queue.advance(job.id, JobState.MUXING, message="eac3to demux completed")
+
+    def _remux_video_files(self, paths: JobPaths, plan: Mapping[str, Any]) -> list[Path]:
+        """An UHD disc's raw video and the sizes of its layers."""
+
+        if plan["video"] is None:
+            return []
+        return [
+            self._remux_root(paths) / str(plan["video"]["filename"]),
+            paths.analysis / "remux-video.json",
+        ]
+
+    def _remux_uhd_video(self, paths: JobPaths, plan: Mapping[str, Any]) -> None:
+        """The HEVC base layer of the reference, joined with its Dolby Vision
+        enhancement layer into one profile 7 track when the disc has one."""
+
+        root = self._remux_root(paths)
+        video = plan["video"]
+        output = root / str(video["filename"])
+        report = paths.analysis / "remux-video.json"
+        base = root / "video-bl.hevc"
+        enhancement = root / "video-el.hevc"
+        dual = bool(video["enhancement_layer"])
+        inputs = {
+            "schema_version": 1,
+            "reference_sha256": _recorded_output_sha256(
+                paths.stages / "reference-remux.json", paths.reference
+            ),
+            "commands": [
+                remux.video_extract_command(paths.reference, 0, base),
+                *(
+                    [
+                        remux.video_extract_command(paths.reference, 1, enhancement),
+                        remux.dovi_mux_command(base, enhancement, output),
+                    ]
+                    if dual
+                    else []
+                ),
+            ],
+        }
+        marker = paths.stages / "remux-video.json"
+        if _valid_stage(marker, inputs, [output, report]):
+            return
+        with self._step(paths, "uhd-video", ("UHD videó kinyerése", "Extracting the UHD video")):
+            for stale in (output, report, base, enhancement):
+                stale.unlink(missing_ok=True)
+            log = paths.logs / "remux-video.log"
+            self._runner(paths).run(inputs["commands"][0], cwd=root, stderr_path=log)
+            sizes = {"bl_bytes": base.stat().st_size, "el_bytes": 0}
+            if dual:
+                self._runner(paths).run(inputs["commands"][1], cwd=root, stderr_path=log)
+                sizes["el_bytes"] = enhancement.stat().st_size
+                self._runner(paths).run(inputs["commands"][2], cwd=root, stderr_path=log)
+            else:
+                os.replace(base, output)
+            sizes["hevc_tier"] = remux.hevc_tier(output)
+            atomic_write_json(report, {"schema_version": 1, **sizes})
+            # The layers are in the output now; do not hold the space twice.
+            base.unlink(missing_ok=True)
+            enhancement.unlink(missing_ok=True)
+        _write_stage(marker, inputs, [output, report])
+
+    def _remux_duration(self, paths: JobPaths, playlist: PlaylistCandidate) -> Decimal:
+        """Exact title length: eac3to's frame count at the video's rate."""
+
+        video = playlist.video_streams[0].video
+        assert video is not None
+        try:
+            report = json.loads(
+                (paths.analysis / "eac3to-findings.json").read_text(encoding="utf-8")
+            )
+            frames = report.get("frames")
+        except (OSError, json.JSONDecodeError):
+            frames = None
+        if isinstance(frames, int) and frames > 0 and video.frame_rate:
+            rate = Fraction(video.frame_rate)
+            return Decimal(frames) * Decimal(rate.denominator) / Decimal(rate.numerator)
+        return Decimal(str(playlist.duration_seconds))
+
+    def _remux_layout(
+        self,
+        paths: JobPaths,
+        selection: ParsedSelection,
+        playlist: PlaylistCandidate,
+        plan: Mapping[str, Any],
+        probes: Mapping[str, Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """The final MKV's tracks with the guide's names, languages and flags."""
+
+        root = self._remux_root(paths)
+        duration = self._remux_duration(paths, playlist)
+        streams = {item.id: item for item in playlist.streams}
+        items = {item.stream_id: item for item in selection.tracks}
+        outputs = [remux.DemuxOutput(**item) for item in plan["outputs"]]
+        listed = plan["tracks"]
+
+        def probe_int(name: str, key: str) -> int | None:
+            value = probes.get(name, {}).get(key)
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                return None
+            return number if number > 0 else None
+
+        audio_outputs = [item for item in outputs if streams[item.stream_id].kind is StreamKind.AUDIO]
+        main = next(
+            (
+                item
+                for item in audio_outputs
+                if not item.compatibility
+                and TrackRole.COMMENTARY not in streams[item.stream_id].roles
+            ),
+            audio_outputs[0],
+        )
+        main_language = items[main.stream_id].bcp47(streams[main.stream_id])
+        main_primary = main_language.split("-")[0].casefold()
+
+        layout: list[dict[str, Any]] = []
+        if plan["video"] is not None:
+            layout.append(
+                self._remux_uhd_video_entry(
+                    paths, playlist, plan["video"], probes, main_language, duration
+                )
+            )
+        for output in outputs:
+            stream = streams[output.stream_id]
+            size = (root / output.filename).stat().st_size
+            rate_kbps = remux.kbps(size, duration)
+            track_info = listed.get(str(output.track), {})
+            entry: dict[str, Any] = {
+                "file": output.filename,
+                "stream_id": output.stream_id,
+                "family": output.family,
+                "compatibility": output.compatibility,
+                "kbps": rate_kbps,
+                "default": False,
+                "forced": False,
+                "original": False,
+                "commentary": False,
+                "hearing_impaired": False,
+                "visual_impaired": False,
+                "remove_dialnorm": False,
+                "default_duration": None,
+            }
+            if stream.kind is StreamKind.VIDEO:
+                video = stream.video
+                assert video is not None
+                entry.update(
+                    kind="video",
+                    language=main_language,
+                    default=True,
+                    default_duration=remux.default_duration(video.frame_rate, video.field_order),
+                    name=remux.video_track_name(
+                        family=output.family,
+                        kbps_value=rate_kbps,
+                        height=video.height,
+                        frame_rate=str(video.frame_rate),
+                        aspect=track_info.get("aspect"),
+                        profile=probes.get(output.filename, {}).get("profile"),
+                        level=probe_int(output.filename, "level"),
+                        field_order=video.field_order,
+                    ),
+                )
+            elif stream.kind is StreamKind.AUDIO:
+                item = items[output.stream_id]
+                language = item.bcp47(stream)
+                commentary = TrackRole.COMMENTARY in stream.roles
+                channels = probe_int(output.filename, "channels") or stream.channels
+                sample_rate = probe_int(output.filename, "sample_rate") or stream.sample_rate
+                bit_depth = (
+                    probe_int(output.filename, "bits_per_raw_sample")
+                    or track_info.get("bit_depth")
+                    or stream.bit_depth
+                )
+                described = remux.audio_track_name(
+                    family=output.family,
+                    channels=channels,
+                    sample_rate=sample_rate,
+                    kbps_value=rate_kbps,
+                    bit_depth=None if output.compatibility else bit_depth,
+                    atmos=bool(track_info.get("atmos")) and not output.compatibility,
+                    prefix=(
+                        "Compatibility Track"
+                        if output.compatibility
+                        else (item.name or None)
+                    ),
+                )
+                if commentary and not output.compatibility:
+                    described = item.name or stream.title or "Commentary"
+                entry.update(
+                    kind="audio",
+                    language=language,
+                    name=described,
+                    default=output is main,
+                    original=(
+                        language.split("-")[0].casefold() == main_primary
+                        and TrackRole.DUB not in stream.roles
+                    ),
+                    commentary=commentary,
+                    visual_impaired=TrackRole.AUDIO_DESCRIPTION in stream.roles,
+                    remove_dialnorm=(
+                        not output.compatibility
+                        and output.family in remux.REMOVE_DIALNORM_FAMILIES
+                    ),
+                )
+            else:
+                item = items[output.stream_id]
+                forced = item.subtitle_kind == "forced"
+                sdh = TrackRole.SDH in stream.roles
+                entry.update(
+                    kind="subtitle",
+                    language=item.bcp47(stream),
+                    name=item.name or ("Forced" if forced else "SDH" if sdh else None),
+                    forced=forced,
+                    hearing_impaired=sdh,
+                    commentary=TrackRole.COMMENTARY in stream.roles,
+                    explicit_default=item.default,
+                )
+            layout.append(entry)
+
+        subtitles = [entry for entry in layout if entry["kind"] == "subtitle"]
+        if any(entry["explicit_default"] is not None for entry in subtitles):
+            for entry in subtitles:
+                entry["default"] = bool(entry["explicit_default"])
+        elif main_primary != "en":
+            # The guide: regular English subtitles are default when the main
+            # audio is not English.
+            english = next(
+                (
+                    entry
+                    for entry in subtitles
+                    if entry["language"].split("-")[0].casefold() == "en"
+                    and not entry["forced"]
+                    and not entry["hearing_impaired"]
+                    and not entry["commentary"]
+                ),
+                None,
+            )
+            if english is not None:
+                english["default"] = True
+        for entry in subtitles:
+            entry.pop("explicit_default", None)
+        return layout
+
+    def _remux_uhd_video_entry(
+        self,
+        paths: JobPaths,
+        playlist: PlaylistCandidate,
+        planned: Mapping[str, Any],
+        probes: Mapping[str, Mapping[str, Any]],
+        language: str,
+        duration: Decimal,
+    ) -> dict[str, Any]:
+        """The UHD video track: BDInfo's HEVC line, measured on the layers."""
+
+        stream = playlist.video_streams[0]
+        video = stream.video
+        assert video is not None
+        filename = str(planned["filename"])
+        try:
+            sizes = json.loads((paths.analysis / "remux-video.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ReviewRequired("the UHD video report is missing") from exc
+        dynamic = remux.dynamic_range(video)
+        probe = probes.get(filename, {})
+        try:
+            level = int(probe.get("level"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            level = None
+        base_kbps = remux.kbps(int(sizes["bl_bytes"]), duration)
+        el_bytes = int(sizes["el_bytes"])
+        return {
+            "file": filename,
+            "stream_id": stream.id,
+            "family": "HEVC",
+            "compatibility": False,
+            "kbps": base_kbps,
+            "kind": "video",
+            "language": language,
+            "default": True,
+            "forced": False,
+            "original": False,
+            "commentary": False,
+            "hearing_impaired": False,
+            "visual_impaired": False,
+            "remove_dialnorm": False,
+            "default_duration": remux.default_duration(video.frame_rate, video.field_order),
+            "name": remux.video_track_name(
+                family="HEVC",
+                kbps_value=base_kbps,
+                height=video.height,
+                frame_rate=str(video.frame_rate),
+                aspect=planned.get("aspect"),
+                profile=probe.get("profile"),
+                level=level,
+                field_order=video.field_order,
+                bit_depth=video.bit_depth,
+                hdr=(
+                    "HDR10+"
+                    if "HDR10+" in dynamic
+                    else "HDR10"
+                    if "HDR" in dynamic
+                    else "HLG"
+                    if "HLG" in dynamic
+                    else None
+                ),
+                max_luminance_nits=remux.mastering_nits(
+                    video.hdr10_static.mastering_display if video.hdr10_static else None
+                ),
+                color_primaries="BT.2020" if (video.color_primaries or "").casefold() == "bt2020" else "BT.709",
+                hevc_tier=sizes.get("hevc_tier"),
+                dolby_vision=(
+                    # The guide: FEL above about 2500 kbps, otherwise MEL.
+                    (planned.get("el_type") or ("FEL" if remux.kbps(el_bytes, duration) > 2500 else "MEL"))
+                    if el_bytes
+                    else None
+                ),
+                dolby_vision_kbps=remux.kbps(el_bytes, duration) if el_bytes else None,
+            ),
+        }
+
+    def _remux_mux(self, job: Job, paths: JobPaths) -> None:
+        scan, selection = self._load_scan_and_selection(job, paths)
+        playlist = scan.playlist(selection.playlist_id)
+        plan = self._load_remux_plan(job, paths, scan)
+        root = self._remux_root(paths)
+        demux_marker = paths.stages / "remux-demux.json"
+        demux_files = [
+            *self._remux_files(paths, plan),
+            root / remux.LOG_NAME,
+            paths.analysis / "eac3to-findings.json",
+        ]
+        demux_pins = _assert_stage_outputs_current(
+            demux_marker, demux_files, stage_name="eac3to demux"
+        )
+        video_files = self._remux_video_files(paths, plan)
+        if video_files:
+            demux_pins.update(
+                _assert_stage_outputs_current(
+                    paths.stages / "remux-video.json", video_files, stage_name="UHD video"
+                )
+            )
+        probes_path = paths.analysis / "remux-streams.json"
+        probes: dict[str, Any] = {}
+        for item in [*plan["outputs"], *([plan["video"]] if plan["video"] else [])]:
+            name = str(item["filename"])
+            if item["family"] == "PGS":
+                continue
+            probe_path = root / f"{name}.probe.json"
+            self._runner(paths).run(
+                remux.stream_probe_command(root / name),
+                cwd=root,
+                stdout_path=probe_path,
+                stderr_path=paths.logs / "remux-probe.log",
+                timeout=600,
+            )
+            try:
+                document = json.loads(probe_path.read_text(encoding="utf-8") or "{}")
+                streams = document.get("streams") or [{}]
+            except (OSError, TypeError, ValueError, AttributeError):
+                streams = [{}]
+            probes[name] = streams[0] if isinstance(streams[0], dict) else {}
+        atomic_write_json(probes_path, {"schema_version": 1, "streams": probes})
+        layout = self._remux_layout(paths, selection, playlist, plan, probes)
+        layout_path = paths.analysis / "remux-tracks.json"
+        atomic_write_json(layout_path, {"schema_version": 1, "tracks": layout})
+
+        tags_path: Path | None = None
+        options = selection.remux or RemuxOptions()
+        tags = remux.tags_xml(imdb=options.imdb, tmdb=options.tmdb)
+        if tags is not None:
+            tags_path = root / "tags.xml"
+            atomic_write_text(tags_path, tags)
+        else:
+            (root / "tags.xml").unlink(missing_ok=True)
+        command = remux.remux_mkvmerge_command(
+            paths.muxed_output,
+            [
+                remux.RemuxTrack(
+                    path=root / entry["file"],
+                    kind=entry["kind"],
+                    language=entry["language"],
+                    name=entry["name"],
+                    default=entry["default"],
+                    forced=entry["forced"],
+                    original=entry["original"],
+                    commentary=entry["commentary"],
+                    hearing_impaired=entry["hearing_impaired"],
+                    visual_impaired=entry["visual_impaired"],
+                    remove_dialnorm=entry["remove_dialnorm"],
+                    default_duration=entry["default_duration"],
+                )
+                for entry in layout
+            ],
+            title=remux.container_title(selection.output_name),
+            chapters=root / remux.CHAPTERS_NAME if plan["chapters"] else None,
+            global_tags=tags_path,
+        )
+        inputs = {
+            "schema_version": 1,
+            "mode": "remux",
+            "demux": {str(path.name): list(pin) for path, pin in demux_pins.items()},
+            "layout": layout,
+            "tags": tags,
+            "command": command,
+        }
+        marker = paths.stages / "mux.json"
+        if not _valid_stage(marker, inputs, [paths.muxed_output]):
+            paths.muxed_output.unlink(missing_ok=True)
+            # mkvmerge exits 1 for warnings; they stay in its log.
+            self._runner(paths).run(
+                command,
+                cwd=root,
+                stdout_path=paths.logs / "mkvmerge.log",
+                stderr_path=paths.logs / "mkvmerge.stderr.log",
+                ok_returncodes=(0, 1),
+            )
+            if not paths.muxed_output.is_file():
+                raise RuntimeError("mkvmerge did not write the remux")
+            _write_stage(marker, inputs, [paths.muxed_output])
+        self.queue.advance(job.id, JobState.QC, message="remux muxed")
+
+    def _remux_layout_document(self, paths: JobPaths) -> list[dict[str, Any]]:
+        try:
+            document = json.loads(
+                (paths.analysis / "remux-tracks.json").read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ReviewRequired("remux track layout is missing") from exc
+        tracks = document.get("tracks") if isinstance(document, dict) else None
+        if not isinstance(tracks, list) or not tracks:
+            raise ReviewRequired("remux track layout is invalid")
+        return tracks
+
+    def _remux_qc(self, job: Job, paths: JobPaths) -> None:
+        """Prove the remux untouched: every frame and sample equals the disc's.
+
+        The reference is FFmpeg's independent demux of the same playlist, so
+        eac3to (under Wine) and mkvmerge are checked by a different reader.
+        Video and every audio track decode to the same MD5 as their reference
+        stream; the compatibility AC-3 (absent from the reference) is checked
+        for sync against its TrueHD; subtitle payloads must hash the same.
+        """
+
+        scan, selection = self._load_scan_and_selection(job, paths)
+        playlist = scan.playlist(selection.playlist_id)
+        output = paths.muxed_output
+        mux_digest = _recorded_output_sha256(paths.stages / "mux.json", output)
+        if mux_digest is None or sha256_file(output) != mux_digest:
+            raise ReviewRequired(
+                "the remux changed after its mux checkpoint",
+                details={"action": "rerun_mux_and_qc"},
+            )
+        plan = self._load_remux_plan(job, paths, scan)
+        layout = self._remux_layout_document(paths)
+        layout_digest = sha256_file(paths.analysis / "remux-tracks.json")
+        reference_sha256 = _recorded_output_sha256(
+            paths.stages / "reference-remux.json", paths.reference
+        )
+        if reference_sha256 is None:
+            raise ReviewRequired("the reference remux checkpoint is missing")
+        report_path = paths.analysis / "remux-qc.json"
+        mediainfo_path = paths.analysis / "mediainfo.txt"
+        identify_path = paths.analysis / "mkvmerge-identify.json"
+        qc_root = _ensure_contained_directory(
+            paths.work / "remux-qc", root=paths.work, description="remux QC directory"
+        )
+        inputs = {
+            "schema_version": 1,
+            "mux_sha256": mux_digest,
+            "reference_sha256": reference_sha256,
+            "layout_sha256": layout_digest,
+        }
+        marker = paths.stages / "remux-qc.json"
+        outputs = [report_path, mediainfo_path, identify_path]
+        if not _valid_stage(marker, inputs, outputs):
+            report = self._run_remux_qc(paths, playlist, plan, layout, qc_root)
+            atomic_write_json(report_path, report)
+            shutil.copyfile(qc_root / "final.mkvmerge.json", identify_path)
+            # Plain MediaInfo for the tracker's parser box: run on the relative
+            # name, so it shows the release's file name and no server path.
+            raw_mediainfo = qc_root / "mediainfo.txt"
+            self._runner(paths).run(
+                ["mediainfo", output.name],
+                cwd=output.parent,
+                stdout_path=raw_mediainfo,
+                stderr_path=paths.logs / "remux-mediainfo.log",
+                timeout=600,
+            )
+            atomic_write_text(
+                mediainfo_path,
+                raw_mediainfo.read_text(encoding="utf-8", errors="replace").replace(
+                    output.name, f"{selection.output_name}.mkv"
+                ),
+            )
+            _write_stage(marker, inputs, outputs)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        failures = [item for item in report["checks"] if item["status"] == "failed"]
+        if failures:
+            raise ReviewRequired(
+                "remux QC failed: " + failures[0]["message"],
+                details={"code": "remux_qc_failed", "report": report_path.name,
+                         "failures": [item["message"] for item in failures]},
+            )
+        self._register_artifact(
+            job.id,
+            report_path,
+            DatabaseArtifactKind.REPORT,
+            report_path.name,
+            mime_type="application/json",
+        )
+        self._register_artifact(
+            job.id,
+            mediainfo_path,
+            DatabaseArtifactKind.MEDIAINFO,
+            mediainfo_path.name,
+            mime_type="text/plain",
+        )
+        self._register_artifact(
+            job.id,
+            identify_path,
+            DatabaseArtifactKind.MKVINFO,
+            identify_path.name,
+            mime_type="application/json",
+        )
+        self.queue.advance(job.id, JobState.COMPARISON, message="remux verified untouched")
+
+    def _run_remux_qc(
+        self,
+        paths: JobPaths,
+        playlist: PlaylistCandidate,
+        plan: Mapping[str, Any],
+        layout: Sequence[Mapping[str, Any]],
+        qc_root: Path,
+    ) -> dict[str, Any]:
+        output = paths.muxed_output
+        checks: list[dict[str, Any]] = []
+
+        def check(name: str, passed: bool, message: str, **details: Any) -> None:
+            checks.append(
+                {
+                    "check": name,
+                    "status": "passed" if passed else "failed",
+                    "message": message,
+                    **details,
+                }
+            )
+
+        # 1. The container says what the plan says.
+        identify = qc_root / "final.mkvmerge.json"
+        self._runner(paths).run(
+            ["mkvmerge", "-J", str(output)],
+            cwd=qc_root,
+            stdout_path=identify,
+            stderr_path=paths.logs / "remux-identify.log",
+            timeout=600,
+        )
+        try:
+            identified = json.loads(identify.read_text(encoding="utf-8"))
+            tracks = identified["tracks"]
+        except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise ReviewRequired(f"the remux cannot be identified: {exc}") from exc
+        if len(tracks) != len(layout):
+            check(
+                "tracks",
+                False,
+                f"the remux has {len(tracks)} tracks, the plan {len(layout)}",
+            )
+        else:
+            problems: list[str] = []
+            for number, (track, planned) in enumerate(zip(tracks, layout)):
+                properties = track.get("properties", {})
+                # mkvmerge -J says "subtitles" for a subtitle track.
+                container_type = {"subtitle": "subtitles"}.get(planned["kind"], planned["kind"])
+                if track.get("type") != container_type:
+                    problems.append(f"track {number} is {track.get('type')}, planned {planned['kind']}")
+                    continue
+                language = properties.get("language_ietf") or properties.get("language")
+                expected = {
+                    "language": planned["language"],
+                    "track_name": planned.get("name"),
+                    "default_track": planned["default"],
+                    "flag_original": planned["original"],
+                    "flag_commentary": planned["commentary"],
+                    "flag_hearing_impaired": planned["hearing_impaired"],
+                    "flag_visual_impaired": planned["visual_impaired"],
+                }
+                actual = {
+                    "language": language,
+                    "track_name": properties.get("track_name"),
+                    "default_track": bool(properties.get("default_track")),
+                    "flag_original": bool(properties.get("flag_original")),
+                    "flag_commentary": bool(properties.get("flag_commentary")),
+                    "flag_hearing_impaired": bool(properties.get("flag_hearing_impaired")),
+                    "flag_visual_impaired": bool(properties.get("flag_visual_impaired")),
+                }
+                if planned["kind"] == "subtitle":
+                    expected["forced_track"] = planned["forced"]
+                    actual["forced_track"] = bool(properties.get("forced_track"))
+                for key, value in expected.items():
+                    if actual[key] != value:
+                        problems.append(f"track {number} {key} is {actual[key]!r}, planned {value!r}")
+                if properties.get("content_encoding_algorithms"):
+                    problems.append(f"track {number} is compressed in the container")
+            check(
+                "tracks",
+                not problems,
+                problems[0] if problems else "every track has its planned name, language and flags",
+                problems=problems,
+            )
+        video_plan = plan.get("video")
+        if video_plan and video_plan.get("enhancement_layer"):
+            # The container must announce the joined layers, or players would
+            # treat the file as plain HDR10.
+            dovi_report = qc_root / "final.dovi.json"
+            self._runner(paths).run(
+                remux.dovi_probe_command(output),
+                cwd=qc_root,
+                stdout_path=dovi_report,
+                stderr_path=paths.logs / "remux-dovi-probe.log",
+                timeout=600,
+            )
+            record = remux.parse_dovi_record(dovi_report.read_text(encoding="utf-8"))
+            check(
+                "dolby_vision",
+                record == {"dv_profile": 7, "rpu_present_flag": 1, "el_present_flag": 1, "bl_present_flag": 1},
+                f"Dolby Vision record: {record}",
+            )
+        chapters = identified.get("chapters") or []
+        chapter_count = sum(int(item.get("num_entries", 0)) for item in chapters)
+        check(
+            "chapters",
+            chapter_count == int(plan.get("chapter_count") or 0),
+            f"{chapter_count} chapters, the disc has {plan.get('chapter_count') or 0}",
+        )
+
+        # 2. Every decoded frame and sample equals the reference's.
+        reference_audio = {
+            stream.id: ordinal for ordinal, stream in enumerate(playlist.audio_streams)
+        }
+        reference_subtitles = {
+            stream.id: ordinal for ordinal, stream in enumerate(playlist.subtitle_streams)
+        }
+        jobs: list[tuple[str, str, str, str]] = [("video", "v:0", "v:0", "video")]
+        final_audio = 0
+        final_subtitle = 0
+        subtitle_pairs: list[tuple[str, int, int]] = []
+        sync_pairs: list[tuple[str, int, int, MediaStream]] = []
+        streams_by_id = {stream.id: stream for stream in playlist.audio_streams}
+        for planned in layout:
+            if planned["kind"] == "audio":
+                sibling = (
+                    next(
+                        (
+                            stream
+                            for stream in playlist.audio_streams
+                            if remux.embedded_core_parent(stream, playlist.audio_streams)
+                            is streams_by_id[planned["stream_id"]]
+                        ),
+                        None,
+                    )
+                    if planned["compatibility"]
+                    else None
+                )
+                reference_stream = sibling or streams_by_id[planned["stream_id"]]
+                # The compatibility AC-3 of a reference without its own AC-3
+                # has nothing to equal; its sync against the TrueHD still counts.
+                if sibling is not None or not planned["compatibility"]:
+                    jobs.append(
+                        (
+                            planned["file"],
+                            f"a:{reference_audio[reference_stream.id]}",
+                            f"a:{final_audio}",
+                            "audio",
+                        )
+                    )
+                sync_pairs.append(
+                    (
+                        planned["file"],
+                        reference_audio[reference_stream.id],
+                        final_audio,
+                        reference_stream,
+                    )
+                )
+                final_audio += 1
+            elif planned["kind"] == "subtitle":
+                subtitle_pairs.append(
+                    (planned["file"], reference_subtitles[planned["stream_id"]], final_subtitle)
+                )
+                final_subtitle += 1
+        tasks: list[Callable[[], object]] = []
+        for label, reference_stream, final_stream, _kind in jobs:
+            for side, path, stream in (
+                ("reference", paths.reference, reference_stream),
+                ("final", output, final_stream),
+            ):
+                target = qc_root / f"{label}.{side}.md5"
+
+                def task(path: Path = path, stream: str = stream, target: Path = target) -> None:
+                    self._runner(paths).run(
+                        remux.decoded_md5_command(path, stream),
+                        cwd=qc_root,
+                        stdout_path=target,
+                        stderr_path=target.with_suffix(".log"),
+                    )
+
+                tasks.append(task)
+        with self._step(paths, "remux-decode", ("Képkockák és minták összevetése", "Comparing every frame and sample")):
+            self._run_independent(paths, tasks)
+        for label, reference_stream, final_stream, kind in jobs:
+            try:
+                reference_md5 = remux.parse_md5(
+                    (qc_root / f"{label}.reference.md5").read_text(encoding="utf-8")
+                )
+                final_md5 = remux.parse_md5(
+                    (qc_root / f"{label}.final.md5").read_text(encoding="utf-8")
+                )
+            except (OSError, remux.RemuxError) as exc:
+                check(f"{kind}:{label}", False, f"{label} could not be decoded: {exc}")
+                continue
+            check(
+                f"{kind}:{label}",
+                reference_md5 == final_md5,
+                (
+                    f"{label}: every decoded {'frame' if kind == 'video' else 'sample'} "
+                    "equals the disc's"
+                )
+                if reference_md5 == final_md5
+                else f"{label} decodes differently from the disc",
+                reference_md5=reference_md5,
+                final_md5=final_md5,
+            )
+
+        if video_plan and video_plan.get("enhancement_layer"):
+            # Decoding covers only the base layer: the enhancement layer and the
+            # RPU are compared unit by unit.
+            layers = {
+                "reference": (paths.reference, 1, dovi_layers.LAYER),
+                "final": (output, 0, dovi_layers.JOINED),
+            }
+
+            def layer_task(side: str) -> Callable[[], object]:
+                path, ordinal, form = layers[side]
+                target = qc_root / f"enhancement-layer.{side}.json"
+                return lambda: self._runner(paths).run(
+                    remux.enhancement_layer_command(path, ordinal, form),
+                    cwd=qc_root,
+                    stdout_path=target,
+                    stderr_path=target.with_suffix(".log"),
+                )
+
+            with self._step(
+                paths,
+                "remux-enhancement-layer",
+                ("A Dolby Vision-réteg összevetése", "Comparing the Dolby Vision layer"),
+            ):
+                self._run_independent(paths, [layer_task(side) for side in layers])
+            try:
+                digests = {
+                    side: json.loads(
+                        (qc_root / f"enhancement-layer.{side}.json").read_text(encoding="utf-8")
+                    )
+                    for side in layers
+                }
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ReviewRequired(f"the enhancement layer cannot be compared: {exc}") from exc
+            same = digests["reference"] == digests["final"] and bool(digests["final"].get("units"))
+            check(
+                "dolby_vision_layer",
+                same,
+                f"{digests['final'].get('units')} enhancement layer and RPU units equal the disc's"
+                if same
+                else "the enhancement layer differs from the disc's",
+                reference=digests["reference"],
+                final=digests["final"],
+            )
+
+        # 3. Subtitles: the same PGS payload.
+        for label, reference_ordinal, final_ordinal in subtitle_pairs:
+            hashes = {}
+            for side, path, ordinal in (
+                ("reference", paths.reference, reference_ordinal),
+                ("final", output, final_ordinal),
+            ):
+                target = qc_root / f"{label}.{side}.streamhash"
+                self._runner(paths).run(
+                    stream_payload_hash_command(path, stream_type="s", stream=ordinal),
+                    cwd=qc_root,
+                    stdout_path=target,
+                    stderr_path=target.with_suffix(".log"),
+                )
+                hashes[side] = target.read_text(encoding="utf-8").strip().split("=")[-1]
+            check(
+                f"subtitle:{label}",
+                hashes["reference"] == hashes["final"] and bool(hashes["final"]),
+                f"{label}: the subtitle payload equals the disc's"
+                if hashes["reference"] == hashes["final"]
+                else f"{label}: the subtitle payload differs from the disc's",
+                **hashes,
+            )
+
+        # 4. Equal samples can still sit elsewhere on the timeline: measure each
+        # track's sound against the disc, from the start of the video on both
+        # sides, and each subtitle's first event the same way.
+        reference_origin = self._probe_first_packet(
+            paths, paths.reference, "v:0", label="remux-reference-video"
+        )
+        final_origin = self._probe_first_packet(paths, output, "v:0", label="remux-final-video")
+        if reference_origin is None or final_origin is None:
+            raise ReviewRequired("the remux or its reference has no video packets")
+        duration = self._remux_duration(paths, playlist)
+        for label, reference_ordinal, final_ordinal, reference_stream in sync_pairs:
+            windows: list[av_sync.SyncWindow] = []
+            source_args = audio_decode_input_args(normalize_audio_codec_name(reference_stream.codec))
+            for index, start in enumerate(av_sync.window_starts(duration)):
+                reference_raw = qc_root / f"{label}.{index}.reference.f32"
+                final_raw = qc_root / f"{label}.{index}.final.f32"
+                self._runner(paths).run(
+                    av_sync.sync_window_command(
+                        paths.reference,
+                        reference_ordinal,
+                        start + reference_origin,
+                        reference_raw,
+                        input_args=source_args,
+                    ),
+                    cwd=qc_root,
+                    stderr_path=reference_raw.with_suffix(".log"),
+                )
+                self._runner(paths).run(
+                    av_sync.sync_window_command(output, final_ordinal, start + final_origin, final_raw),
+                    cwd=qc_root,
+                    stderr_path=final_raw.with_suffix(".log"),
+                )
+                windows.append(
+                    av_sync.window_result(
+                        start + final_origin,
+                        start + reference_origin,
+                        av_sync.read_samples(reference_raw),
+                        av_sync.read_samples(final_raw),
+                    )
+                )
+                reference_raw.unlink(missing_ok=True)
+                final_raw.unlink(missing_ok=True)
+            verdict = av_sync.judge(windows)
+            check(
+                f"sync:{label}",
+                verdict.status != "out_of_sync",
+                f"{label}: {verdict.lag_ms} ms from the disc ({verdict.status})",
+                sync=verdict.to_dict(),
+            )
+        for label, reference_ordinal, final_ordinal in subtitle_pairs:
+            reference_first = self._probe_first_packet(
+                paths, paths.reference, f"s:{reference_ordinal}", label=f"remux-reference-s{reference_ordinal}"
+            )
+            final_first = self._probe_first_packet(
+                paths, output, f"s:{final_ordinal}", label=f"remux-final-s{final_ordinal}"
+            )
+            if reference_first is None or final_first is None:
+                check(
+                    f"subtitle-sync:{label}",
+                    reference_first is None and final_first is None,
+                    f"{label}: no subtitle events on either side"
+                    if reference_first is None and final_first is None
+                    else f"{label}: subtitle events are missing on one side",
+                )
+                continue
+            shift_ms = ((final_first - final_origin) - (reference_first - reference_origin)) * 1000
+            check(
+                f"subtitle-sync:{label}",
+                abs(shift_ms) <= av_sync.TOLERANCE_MS,
+                f"{label}: first subtitle event {shift_ms:.3f} ms from the disc",
+            )
+
+        failed = [item for item in checks if item["status"] == "failed"]
+        return {
+            "schema_version": 1,
+            "status": "failed" if failed else "passed",
+            "checks": checks,
+        }
+
+    def _remux_screenshots(self, job: Job, paths: JobPaths) -> None:
+        """Evenly spread screenshots of the remux itself (Aither: 3 or more)."""
+
+        scan, selection = self._load_scan_and_selection(job, paths)
+        playlist = scan.playlist(selection.playlist_id)
+        output = paths.muxed_output
+        mux_digest = _recorded_output_sha256(paths.stages / "mux.json", output)
+        if mux_digest is None:
+            raise ReviewRequired("the remux mux checkpoint is missing")
+        video = playlist.video_streams[0].video
+        assert video is not None
+        count = REMUX_SCREENSHOT_COUNT.get(selection.tracker_profile.value, 6)
+        duration = self._remux_duration(paths, playlist)
+        rate = Fraction(video.frame_rate or "24000/1001")
+        # Skip the first and last tenth (logos, credits); land on a frame.
+        times = []
+        for index in range(count):
+            fraction = Decimal(index + 1) / Decimal(count + 1)
+            seconds = duration * (Decimal("0.1") + Decimal("0.8") * fraction)
+            frame = int(seconds * Decimal(rate.numerator) / Decimal(rate.denominator))
+            times.append(
+                (frame, Decimal(frame) * Decimal(rate.denominator) / Decimal(rate.numerator))
+            )
+        manifest_path = paths.comparison / "remux-screenshots.json"
+        public_log = paths.comparison / remux.LOG_NAME
+        pngs = [paths.comparison / f"{number + 1:02d}-screenshot.png" for number in range(count)]
+        demux_log = self._remux_root(paths) / remux.LOG_NAME
+        log_pins = _assert_stage_outputs_current(
+            paths.stages / "remux-demux.json", [demux_log], stage_name="eac3to demux"
+        )
+        inputs = {
+            "schema_version": 1,
+            "mux_sha256": mux_digest,
+            "frames": [frame for frame, _seconds in times],
+            "eac3to_log": [list(pin) for pin in log_pins.values()],
+        }
+        marker = paths.stages / "remux-screenshots.json"
+        outputs = [manifest_path, public_log, *pngs]
+        if not _valid_stage(marker, inputs, outputs):
+            atomic_write_text(
+                public_log,
+                remux.public_log(demux_log.read_text(encoding="utf-8", errors="replace")),
+            )
+            _assert_public_sidecar_safe(public_log, wine_drives=True)
+            for stale in paths.comparison.glob("*.png"):
+                stale.unlink(missing_ok=True)
+            images = []
+            live = self._live(paths)
+            for number, ((frame, seconds), png) in enumerate(zip(times, pngs)):
+                self._runner(paths).run(
+                    extract_png_at_timestamp_command(
+                        output,
+                        seconds,
+                        png,
+                        hdr_native=False,
+                        # The tone-mapped view for HDR (what a browser shows).
+                        source_hdr10="HDR" in remux.dynamic_range(video),
+                        color_primaries=video.color_primaries,
+                        color_transfer=video.color_transfer,
+                        color_matrix=video.color_matrix,
+                    ),
+                    cwd=paths.work,
+                    stderr_path=paths.logs / "remux-screenshots.log",
+                )
+                inspect_png(png)
+                images.append(
+                    {
+                        "png": png.name,
+                        "sha256": sha256_file(png),
+                        "frame": frame,
+                        "timestamp": remux.timestamp_text(seconds),
+                    }
+                )
+                live.update((number + 1) / count)
+            atomic_write_json(
+                manifest_path, {"schema_version": 1, "kind": "remux", "images": images}
+            )
+            _assert_public_sidecar_safe(manifest_path)
+            _write_stage(marker, inputs, outputs)
+        self._register_artifact(
+            job.id,
+            manifest_path,
+            DatabaseArtifactKind.REPORT,
+            manifest_path.name,
+            mime_type="application/json",
+        )
+        self._register_artifact(
+            job.id,
+            public_log,
+            DatabaseArtifactKind.LOG,
+            public_log.name,
+            mime_type="text/plain",
+        )
+        for png in pngs:
+            self._register_artifact(
+                job.id,
+                png,
+                DatabaseArtifactKind.VIDEO_COMPARISON,
+                png.name,
+                mime_type="image/png",
+            )
+        self.queue.advance(job.id, JobState.UPLOADING, message="remux screenshots taken")
+
+    def _remux_upload_and_finalize(
+        self,
+        job: Job,
+        paths: JobPaths,
+        scan: DiscScan,
+        selection: ParsedSelection,
+        mux_digest: str,
+    ) -> None:
+        """Upload the screenshots, write the BBCode with the eac3to log and
+        publish the remux with its public evidence."""
+
+        manifest_path = paths.comparison / "remux-screenshots.json"
+        public_log = paths.comparison / remux.LOG_NAME
+        qc_report = paths.analysis / "remux-qc.json"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            images = [item for item in manifest["images"] if isinstance(item, Mapping)]
+        except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise ReviewRequired("remux screenshot manifest is missing or invalid") from exc
+        pngs = [paths.comparison / str(item["png"]) for item in images]
+
+        def evidence_pins() -> dict[Path, tuple[int, str]]:
+            pins = _assert_stage_outputs_current(
+                paths.stages / "remux-screenshots.json",
+                [manifest_path, public_log, *pngs],
+                stage_name="remux screenshots",
+            )
+            pins.update(
+                _assert_stage_outputs_current(
+                    paths.stages / "remux-qc.json", [qc_report], stage_name="remux QC"
+                )
+            )
+            return pins
+
+        validated = evidence_pins()
+        for public_metadata in (manifest_path, qc_report):
+            _assert_public_sidecar_safe(public_metadata)
+        _assert_public_sidecar_safe(public_log, wine_drives=True)
+        checkpoint, uploaded, provider_lock = self._upload_evidence_images(
+            job, paths, replace(selection, upload_image_set="all"), pngs, manifest_pairs=None
+        )
+        try:
+            findings = json.loads(
+                (paths.analysis / "eac3to-findings.json").read_text(encoding="utf-8")
+            ).get("findings", [])
+        except (OSError, json.JSONDecodeError):
+            findings = []
+        bbcode = paths.comparison / "comparison.bbcode"
+        lines = remux_bbcode(
+            selection.output_name,
+            images,
+            uploaded,
+            provider=provider_lock,
+            profile=selection.tracker_profile.value,
+            eac3to_log=public_log.read_text(encoding="utf-8"),
+            notes=[
+                str(item.get("text"))
+                for item in findings
+                if isinstance(item, Mapping) and item.get("severity") == "warning"
+            ],
+        )
+        atomic_write_text(bbcode, "\n".join(lines) + "\n")
+        _assert_public_sidecar_safe(checkpoint)
+        _assert_public_sidecar_safe(bbcode, wine_drives=True)
+        bbcode_outputs = [checkpoint, bbcode]
+        upload_marker = paths.stages / "upload.json"
+        _write_stage(
+            upload_marker,
+            {
+                "mode": "remux",
+                "upload_images": selection.upload_images,
+                "provider": provider_lock,
+                "images": {path.name: sha256_file(path) for path in pngs},
+            },
+            bbcode_outputs,
+        )
+        self._stop_at_operator_boundary(job.id)
+        # Upload adapters are external code: re-check everything published.
+        if (
+            _recorded_output_sha256(paths.stages / "mux.json", paths.muxed_output)
+            != mux_digest
+            or sha256_file(paths.muxed_output) != mux_digest
+        ):
+            raise ReviewRequired(
+                "final Matroska changed during public evidence upload",
+                details={"action": "rerun_mux_and_qc"},
+            )
+        if evidence_pins() != validated:
+            raise ReviewRequired(
+                "public evidence checkpoint set changed during image upload",
+                details={"action": "rerun_qc"},
+            )
+        upload_pins = _assert_stage_outputs_current(
+            upload_marker, bbcode_outputs, stage_name="upload checkpoint"
+        )
+        self._publish_release(
+            job,
+            paths,
+            scan,
+            selection,
+            mux_digest=mux_digest,
+            checkpoint=checkpoint,
+            evidence_inputs={
+                "mode": "remux",
+                "screenshots_sha256": sha256_file(manifest_path),
+                "qc_sha256": sha256_file(qc_report),
+            },
+            public_comparison_files=(manifest_path, public_log, *bbcode_outputs, *pngs),
+            public_analysis_files=(qc_report,),
+            pinned_public_files={**validated, **upload_pins},
+            bbcode_outputs=bbcode_outputs,
+            completion_message="remux, QC and screenshots completed",
+        )
+
+    def _upload_evidence_images(
+        self,
+        job: Job,
+        paths: JobPaths,
+        selection: ParsedSelection,
+        pngs: Sequence[Path],
+        *,
+        manifest_pairs: object,
+    ) -> tuple[Path, dict[str, Any], str | None]:
+        """Upload the public images to one host, resumable image by image.
+
+        Returns the checkpoint, the uploaded images by PNG name and the host
+        the package is locked to (None when upload is off).
+        """
+
+        allowed_names = {path.name for path in pngs}
         checkpoint = paths.comparison / "uploads.json"
         checkpoint_document: dict[str, Any] = {}
         uploaded: dict[str, Any] = {}
@@ -10075,7 +12000,6 @@ class PipelineWorker:
 
         if selection.upload_images:
             try:
-                manifest_pairs = video_manifest.get("pairs")
                 to_upload = _images_to_upload(
                     pngs,
                     selection.upload_image_set,
@@ -10314,123 +12238,25 @@ class PipelineWorker:
                     "images": {},
                 },
             )
+        return checkpoint, uploaded, provider_lock
 
-        bbcode = paths.comparison / "comparison.bbcode"
-        aither_comparison = paths.comparison / "comparison-aither.bbcode"
-        pairs_document = video_manifest.get("pairs")
-        published = pairs_document if isinstance(pairs_document, list) else []
-        lines = [f"[b]{selection.output_name} — comparison[/b]"]
-        if uploaded and provider_lock:
-            lines.append(f"[i]Image host: {provider_lock}[/i]")
-        if uploaded:
-            # GALLERY_WIDTH-pixel pictures, each linked to its full size.
-            lines.extend(gallery_bbcode(published, uploaded))
-        else:
-            lines.append(
-                "[i]Image upload was disabled; see the lossless PNG sidecars.[/i]"
-            )
-        # Aither's interactive comparison as a separate, ready-to-paste
-        # option, for every job (not only Aither tracker jobs).
-        comparison_lines = aither_comparison_bbcode(published, uploaded)
-        bbcode_outputs = [checkpoint, bbcode]
-        if comparison_lines:
-            atomic_write_text(aither_comparison, "\n".join(comparison_lines) + "\n")
-            _assert_public_sidecar_safe(aither_comparison)
-            bbcode_outputs.append(aither_comparison)
-        else:
-            aither_comparison.unlink(missing_ok=True)
-        encode_log = paths.logs / "video-encode.log"
-        lines.extend(
-            tracker_bbcode(
-                selection.tracker_profile.value,
-                published,
-                uploaded,
-                encoder_log=(
-                    sanitize_text(
-                        encoder_summary(encode_log.read_text(encoding="utf-8", errors="replace"))
-                    )
-                    if selection.tracker_profile is TrackerProfile.AITHER and encode_log.is_file()
-                    else ""
-                ),
-                codec=selection.settings.encoder.value,
-            )
-        )
-        atomic_write_text(bbcode, "\n".join(lines) + "\n")
-        _assert_public_sidecar_safe(checkpoint)
-        _assert_public_sidecar_safe(bbcode)
-        upload_marker = paths.stages / "upload.json"
-        _write_stage(
-            upload_marker,
-            {
-                "upload_images": selection.upload_images,
-                "provider": provider_lock,
-                "images": {path.name: sha256_file(path) for path in pngs},
-            },
-            bbcode_outputs,
-        )
-        self._stop_at_operator_boundary(job.id)
-
-        # Upload adapters are external code and may run for minutes.  Re-open
-        # the trust boundary afterwards so a concurrent/local mutation cannot
-        # turn previously validated evidence (or the final MKV) into the
-        # public release between upload and staging.
-        if (
-            _recorded_output_sha256(paths.stages / "mux.json", paths.muxed_output)
-            != mux_digest
-            or sha256_file(paths.muxed_output) != mux_digest
-        ):
-            raise ReviewRequired(
-                "final Matroska changed during public evidence upload",
-                details={"action": "rerun_mux_and_qc"},
-            )
-        pngs = _current_comparison_pngs(paths, prune=False)
-        metric_sidecars = _current_video_metric_sidecars(paths)
-        revalidated_video_pins = _assert_stage_outputs_current(
-            paths.stages / "comparison.json",
-            [
-                video_manifest_path,
-                *metric_sidecars,
-                *(path for path in pngs if path.parent == paths.comparison),
-            ],
-            stage_name="video comparison",
-        )
-        revalidated_audio_pins = _assert_stage_outputs_current(
-            paths.stages / "qc-audio.json",
-            [
-                paths.analysis / "audio-comparison.json",
-                *(path for path in pngs if path.parent == paths.analysis),
-            ],
-            stage_name="audio QC",
-        )
-        revalidated_public_evidence = {
-            **revalidated_video_pins,
-            **revalidated_audio_pins,
-        }
-        if revalidated_public_evidence != validated_public_evidence:
-            raise ReviewRequired(
-                "public evidence checkpoint set changed during image upload",
-                details={"action": "rerun_qc"},
-            )
-        for public_metadata in (
-            video_manifest_path,
-            paths.analysis / "audio-comparison.json",
-            *metric_sidecars,
-            *bbcode_outputs,
-        ):
-            _assert_public_sidecar_safe(public_metadata)
-        upload_evidence_pins = _assert_stage_outputs_current(
-            upload_marker,
-            bbcode_outputs,
-            stage_name="upload checkpoint",
-        )
-        pinned_public_files = {
-            **validated_public_evidence,
-            **upload_evidence_pins,
-        }
-        if len(pinned_public_files) != len(validated_public_evidence) + len(
-            upload_evidence_pins
-        ):
-            raise ReviewRequired("public upload evidence overlaps producer outputs")
+    def _publish_release(
+        self,
+        job: Job,
+        paths: JobPaths,
+        scan: DiscScan,
+        selection: ParsedSelection,
+        *,
+        mux_digest: str,
+        checkpoint: Path,
+        evidence_inputs: Mapping[str, str],
+        public_comparison_files: Sequence[Path],
+        public_analysis_files: Sequence[Path],
+        pinned_public_files: Mapping[Path, tuple[int, str]],
+        bbcode_outputs: Sequence[Path],
+        completion_message: str,
+    ) -> None:
+        """Copy the verified MKV and its public sidecars into completed/."""
 
         configured_completed_root = self.settings.completed_root
         if os.path.lexists(configured_completed_root) and _unsafe_directory_link(
@@ -10493,10 +12319,7 @@ class PipelineWorker:
             )
         finalize_inputs = {
             "mux_sha256": mux_digest,
-            "comparison_sha256": sha256_file(
-                paths.comparison / "video-comparison.json"
-            ),
-            "audio_sha256": sha256_file(paths.analysis / "audio-comparison.json"),
+            **evidence_inputs,
             "upload_sha256": sha256_file(checkpoint),
         }
         finalize_marker = paths.stages / "finalize.json"
@@ -10518,22 +12341,6 @@ class PipelineWorker:
         # Public release sidecars are rebuilt from an explicit allowlist.  This
         # also removes v1 logs/manifests and stale analysis files when an owned
         # completed directory is migrated in place.
-        public_analysis_files = tuple(
-            sidecar
-            for sidecar in (
-                paths.analysis / "audio-comparison.json",
-                *(path for path in pngs if path.parent == paths.analysis),
-            )
-        )
-        public_comparison_files = tuple(
-            sidecar
-            for sidecar in (
-                video_manifest_path,
-                *bbcode_outputs,
-                *metric_sidecars,
-                *(path for path in pngs if path.parent == paths.comparison),
-            )
-        )
         _replace_public_sidecars(
             completed=completed,
             comparison_source=paths.comparison,
@@ -10574,7 +12381,7 @@ class PipelineWorker:
         self._record_source_size(scan, selection, paths)
         self._write_manifest(job, selection, paths, final_output)
         completed_job = self.queue.advance(
-            job.id, JobState.COMPLETED, message="encode, QC and comparison completed"
+            job.id, JobState.COMPLETED, message=completion_message
         )
         self._cleanup_completed_work(completed_job, paths)
 
@@ -10749,6 +12556,7 @@ class PipelineWorker:
                 "bdencode-libbluray-scan",
                 "hdr10plus_tool",
                 "dovi_tool",
+                *(("bdencode-eac3to", "wine") if selection.is_remux else ()),
             )
         )
         optional_reports: dict[str, Any] = {}
@@ -10771,7 +12579,8 @@ class PipelineWorker:
                 "job_id": job.id,
                 "source_path": job.source_path,
                 "selection": job.selection,
-                "encoder_settings": selection.settings.to_dict(),
+                # A remux has no encoder; its settings are an unused placeholder.
+                "encoder_settings": None if selection.is_remux else selection.settings.to_dict(),
                 **optional_reports,
                 "output": {
                     "path": str(output),

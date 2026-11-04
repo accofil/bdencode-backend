@@ -37,10 +37,14 @@ class AudioOutput:
 
 @dataclass(frozen=True, slots=True)
 class ReleaseFacts:
-    encoder: str  # "x264" | "x265"
+    encoder: str  # "x264" | "x265" | "remux"
     audio: tuple[AudioOutput, ...] = ()
     # Any of SDR, HDR, HDR10+, DV, HLG.
     dynamic_range: frozenset[str] = frozenset({"SDR"})
+    # A remux names the untouched source codec and resolution instead.
+    video_codec: str | None = None  # AVC, HEVC, VC-1, MPEG-2
+    resolution: str | None = None  # 1080p, 1080i, 2160p, ...
+    uhd: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +56,8 @@ class ReleaseName:
     codec: str
     languages: tuple[str, ...]
     group: str | None
+    # A remux name's tokens after the video codec (the audio part).
+    tail: tuple[str, ...] = ()
 
 
 _GROUP = r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}"
@@ -75,7 +81,20 @@ RELEASE_NAME_PATTERNS: dict[str, re.Pattern[str]] = {
 EXAMPLE_NAMES = {
     "x264": "Title.Year.1080p.BluRay.DTS-HD.MA.5.1.x264-GROUP",
     "x265": "Title.Year.2160p.UHD.BluRay.TrueHD.7.1.Atmos.DV.HDR.x265-GROUP",
+    "remux": "Title.Year.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-GROUP",
+    "remux-uhd": "Title.Year.2160p.UHD.BluRay.REMUX.DV.HDR.HEVC.TrueHD.7.1.Atmos-GROUP",
 }
+
+# Aither's remux scheme: ``Title Year Resolution Source REMUX HDR VideoCodec
+# AudioCodec Channels Metadata-Crew``; the audio is the default track's.
+REMUX_NAME_PATTERN = re.compile(
+    r"^(?P<title>.+?)\.(?P<resolution>480[ip]|576[ip]|720p|1080[ip]|2160p)"
+    r"\.(?P<source>BluRay|UHD\.BluRay)\.REMUX"
+    r"(?P<middle>(?:\.[^.]+)*?)\.(?P<codec>AVC|HEVC|VC-1|MPEG-2)"
+    r"(?P<tail>(?:\.[^.]+)*)$",
+    re.IGNORECASE,
+)
+_GROUP_RE = re.compile(_GROUP)
 
 # Order matters: the first alternative that ends on a token boundary wins.
 _AUDIO = (
@@ -174,22 +193,30 @@ def audio_codec_family(codec: str, profile: str | None = None) -> str:
     return "OTHER"
 
 
-def parse_release_name(name: str, encoder: str) -> ReleaseName | None:
-    """Split a name that fits the grammar; ``None`` when it does not."""
-
-    pattern = RELEASE_NAME_PATTERNS.get(encoder)
-    match = pattern.fullmatch(name) if pattern else None
-    if match is None:
-        return None
-    middle = match.group("middle")
+def _split_tokens(text: str) -> list[str] | None:
     tokens: list[str] = []
-    position = 1 if middle.startswith(".") else 0
-    while position < len(middle):
-        token = _TOKEN.match(middle, position)
+    position = 1 if text.startswith(".") else 0
+    while position < len(text):
+        token = _TOKEN.match(text, position)
         if token is None:
             return None
         tokens.append(token.group(0))
         position = token.end() + 1
+    return tokens
+
+
+def parse_release_name(name: str, encoder: str) -> ReleaseName | None:
+    """Split a name that fits the grammar; ``None`` when it does not."""
+
+    if encoder == "remux":
+        return parse_remux_name(name)
+    pattern = RELEASE_NAME_PATTERNS.get(encoder)
+    match = pattern.fullmatch(name) if pattern else None
+    if match is None:
+        return None
+    tokens = _split_tokens(match.group("middle"))
+    if tokens is None:
+        return None
     languages = tuple(
         item for item in match.group("languages").split(".") if item
     )
@@ -201,6 +228,36 @@ def parse_release_name(name: str, encoder: str) -> ReleaseName | None:
         codec=match.group("codec"),
         languages=languages,
         group=match.group("group"),
+    )
+
+
+def parse_remux_name(name: str) -> ReleaseName | None:
+    """Split an Aither remux name; the audio tokens follow the video codec."""
+
+    # The group follows the first hyphen of the last dot-separated part
+    # (``...5.1-TAG``); the audio tokens themselves may contain hyphens.
+    head, dot, last = name.rpartition(".")
+    group: str | None = None
+    if "-" in last:
+        last, _, group = last.partition("-")
+        if not last or not _GROUP_RE.fullmatch(group):
+            return None
+    match = REMUX_NAME_PATTERN.fullmatch(f"{head}{dot}{last}")
+    if match is None:
+        return None
+    middle = _split_tokens(match.group("middle"))
+    tail = _split_tokens(match.group("tail"))
+    if middle is None or tail is None:
+        return None
+    return ReleaseName(
+        title=match.group("title"),
+        resolution=match.group("resolution"),
+        source=match.group("source"),
+        tokens=tuple(middle + tail),
+        codec=match.group("codec"),
+        languages=(),
+        group=group,
+        tail=tuple(tail),
     )
 
 
@@ -230,15 +287,94 @@ def _codec_satisfies(claimed: str, actual: str) -> bool:
     return claimed == actual or (claimed == "DTSHDMA" and actual == "DTSX")
 
 
+_DYNAMIC_KINDS = ("hdr10plus", "hdr", "dv", "hlg", "sdr")
+
+
+def _token_kind(text: str) -> str | None:
+    token = _TOKEN.fullmatch(text)
+    if token is None:
+        return None
+    return next((kind for kind, value in token.groupdict().items() if value), None)
+
+
+def _remux_problems(parsed: ReleaseName, facts: ReleaseFacts) -> list[str]:
+    """Aither's remux scheme on top of the shared truthfulness checks."""
+
+    problems: list[str] = []
+    if facts.video_codec and parsed.codec.upper() != facts.video_codec.upper():
+        problems.append(
+            f"output_name says {parsed.codec} but the untouched video is {facts.video_codec}"
+        )
+    if facts.resolution and parsed.resolution.lower() != facts.resolution.lower():
+        problems.append(
+            f"output_name says {parsed.resolution} but the video is {facts.resolution}"
+        )
+    uhd_source = parsed.source.upper() == "UHD.BLURAY"
+    if uhd_source != facts.uhd:
+        problems.append(
+            "output_name must say UHD.BluRay for an UHD disc"
+            if facts.uhd
+            else "output_name says UHD.BluRay but the source is a Blu-ray"
+        )
+    head = parsed.tokens[: len(parsed.tokens) - len(parsed.tail)]
+    for text in head:
+        if _token_kind(text) not in {*_DYNAMIC_KINDS, "hybrid", "dual"}:
+            problems.append(
+                f"output_name has {text} before the video codec; the remux scheme "
+                "puts only HDR tags there and the audio after the codec"
+            )
+    for text in parsed.tail:
+        if _token_kind(text) in _DYNAMIC_KINDS:
+            problems.append(f"output_name has {text} after the video codec; HDR tags go before it")
+    claims = _audio_claims(parsed.tail)
+    main = next((item for item in facts.audio if not item.commentary), None)
+    if not claims:
+        problems.append("output_name must name the default audio track's codec and channels")
+    elif main is not None:
+        family, channels, text = claims[0]
+        if not _codec_satisfies(family, main.codec) or (
+            channels is not None and main.channels is not None and channels != main.channels
+        ):
+            problems.append(
+                f"output_name advertises {text}, but the default audio track is "
+                f"{AUDIO_CODEC_LABELS.get(main.codec, main.codec)} "
+                f"{channel_layout(main.channels) or ''}".rstrip()
+            )
+        if channels is None:
+            problems.append("output_name must give the default audio track's channels (e.g. 5.1)")
+    stated = {_token_kind(text) for text in head}
+    dynamic = facts.dynamic_range
+    if "DV" in dynamic and "dv" not in stated:
+        problems.append("output_name must say DV: the video keeps its Dolby Vision")
+    if "HDR10+" in dynamic and "hdr10plus" not in stated:
+        problems.append("output_name must say HDR10+: the video keeps its HDR10+ metadata")
+    elif "HDR" in dynamic and not stated & {"hdr", "hdr10plus"}:
+        problems.append("output_name must say HDR: the video is HDR10")
+    if "HLG" in dynamic and "hlg" not in stated:
+        problems.append("output_name must say HLG")
+    if main is not None and main.atmos and not any(
+        _token_kind(text) == "atmos" for text in parsed.tail
+    ):
+        problems.append("output_name must say Atmos: the default audio track carries Atmos")
+    return problems
+
+
 def release_name_problems(name: str, facts: ReleaseFacts) -> list[str]:
     """Every reason the name is not a truthful encode name for ``facts``."""
 
-    example = EXAMPLE_NAMES.get(facts.encoder, EXAMPLE_NAMES["x265"])
+    remux = facts.encoder == "remux"
+    example = EXAMPLE_NAMES.get(
+        ("remux-uhd" if facts.uhd else "remux") if remux else facts.encoder,
+        EXAMPLE_NAMES["x265"],
+    )
     parsed = parse_release_name(name, facts.encoder) if "_" not in name else None
     if parsed is None:
-        return [f"output_name must be a clean encode name such as {example}"]
+        kind = "remux" if remux else "encode"
+        return [f"output_name must be a clean {kind} name such as {example}"]
     compact = re.sub(r"[^A-Z0-9]+", "", name.upper())
     problems: list[str] = []
+    if remux:
+        problems.extend(_remux_problems(parsed, facts))
     if any(tag in compact for tag in _SOURCE_DISC_TAGS):
         problems.append(
             "output_name contains a source-disc/source-codec tag; remove inherited release metadata"
@@ -308,11 +444,13 @@ __all__ = [
     "AudioOutput",
     "EXAMPLE_NAMES",
     "RELEASE_NAME_PATTERNS",
+    "REMUX_NAME_PATTERN",
     "ReleaseFacts",
     "ReleaseName",
     "audio_codec_family",
     "channel_count",
     "channel_layout",
     "parse_release_name",
+    "parse_remux_name",
     "release_name_problems",
 ]

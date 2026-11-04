@@ -3,7 +3,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { Link } from "react-router";
 import type { Job } from "../api/types";
 import { locale, t } from "../i18n";
-import { contentLabel, formatDate, formatStatusMessage, stageProgress, stateLabel, stateTone } from "../utils";
+import { contentLabel, formatDate, formatStatusMessage, stageProgress, jobStateLabel, stateTone } from "../utils";
 import { Badge, ProgressBar } from "./ui";
 
 type JobControlState = "RUNNING" | "PAUSE_REQUESTED" | "PAUSED" | "CANCEL_REQUESTED";
@@ -42,7 +42,7 @@ function statusPresentation(job: Job) {
   if (controlState === "PAUSED") return { label: t("Szüneteltetve", "Paused"), tone: "warning" as const };
   if (controlState === "PAUSE_REQUESTED") return { label: t("Szüneteltetés folyamatban", "Pausing"), tone: "warning" as const };
   if (controlState === "CANCEL_REQUESTED") return { label: t("Megszakítás folyamatban", "Cancelling"), tone: "danger" as const };
-  return { label: stateLabel(job.state), tone: stateTone(job.state) };
+  return { label: jobStateLabel(job), tone: stateTone(job.state) };
 }
 
 function JobActionControls({

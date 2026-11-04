@@ -575,6 +575,9 @@ class ReleaseService:
             raise ReleaseServiceError(
                 "comparison evidence escaped the completed release"
             )
+        remux_manifest = resolved_root / "remux-screenshots.json"
+        if not _is_link_or_reparse(remux_manifest) and remux_manifest.is_file():
+            return self._remux_screenshots(resolved_root, remux_manifest, profile)
         manifest_path = resolved_root / "video-comparison.json"
         if _is_link_or_reparse(manifest_path) or not manifest_path.is_file():
             raise ReleaseServiceError("video comparison manifest is unavailable")
@@ -629,6 +632,44 @@ class ReleaseService:
         indexes = {
             round(index * (len(candidates) - 1) / (maximum - 1))
             for index in range(maximum)
+        }
+        return tuple(candidates[index] for index in sorted(indexes))
+
+    def _remux_screenshots(
+        self,
+        root: Path,
+        manifest_path: Path,
+        profile: ConfiguredReleaseProfile,
+    ) -> tuple[Path, ...]:
+        """A remux has no comparison: its own clean screenshots, spread evenly."""
+
+        try:
+            document = json.loads(manifest_path.read_text(encoding="utf-8"))
+            images = document["images"]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ReleaseServiceError("remux screenshot manifest is invalid") from exc
+        candidates = _without_uniform(
+            [
+                candidate
+                for item in images
+                if isinstance(item, dict)
+                and (
+                    candidate := _comparison_png(
+                        root, {"png": item.get("png"), "sha256": item.get("sha256")}, "png"
+                    )
+                )
+                is not None
+            ]
+        )
+        if len(candidates) < profile.tracker.screenshot_minimum:
+            raise ReleaseServiceError("completed remux has too few validated screenshots")
+        maximum = profile.tracker.screenshot_maximum
+        if len(candidates) <= maximum:
+            return tuple(candidates)
+        if maximum == 1:
+            return (candidates[len(candidates) // 2],)
+        indexes = {
+            round(index * (len(candidates) - 1) / (maximum - 1)) for index in range(maximum)
         }
         return tuple(candidates[index] for index in sorted(indexes))
 

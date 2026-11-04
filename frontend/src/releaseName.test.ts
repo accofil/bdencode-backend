@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import type { MediaStream, Playlist, TrackSelection, VideoProperties } from "./api/types";
 import {
   buildReleaseName,
+  buildRemuxName,
   plannedDynamicRange,
   releaseAudio,
+  remuxReleaseAudio,
+  remuxResolution,
   sanitizeReleaseTag,
   titleBaseOf,
   type ReleaseAudio,
@@ -101,5 +104,62 @@ describe("release name inputs", () => {
     expect(titleBaseOf("Mintafilm.1080p.BluRay.x264")).toBe("Mintafilm");
     expect(titleBaseOf("La.Femme.Nikita.1990.FRENCH.2160p.UHD.BluRay.x265-TAG")).toBe("La.Femme.Nikita.1990.FRENCH");
     expect(titleBaseOf("Some Disc Name 2001")).toBe("Some.Disc.Name.2001");
+  });
+});
+
+// The same names pass tests/test_release_naming.py.
+describe("buildRemuxName", () => {
+  const video = { codec: "avc", height: 1080, frame_rate: "24000/1001", field_order: "progressive" } as VideoProperties;
+
+  it("writes Aither's remux scheme for a Blu-ray", () => {
+    expect(buildRemuxName({
+      base: "The.Quiet.2005",
+      uhd: false,
+      video,
+      videoCodec: "h264",
+      audio: [audio("DTSHDMA", 6, "en")],
+      dynamicRange: ["SDR"],
+      tag: "TAG",
+    })).toBe("The.Quiet.2005.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-TAG");
+  });
+
+  it("puts HDR before the codec and Atmos after the audio for an UHD disc", () => {
+    expect(buildRemuxName({
+      base: "Housemaid.2025",
+      uhd: true,
+      video: { ...video, height: 2160 },
+      videoCodec: "hevc",
+      audio: [audio("TRUEHD", 8, "en", { atmos: true })],
+      dynamicRange: ["HDR", "DV"],
+      tag: "TAG",
+    })).toBe("Housemaid.2025.2160p.UHD.BluRay.REMUX.DV.HDR.HEVC.TrueHD.7.1.Atmos-TAG");
+  });
+
+  it("adds the language when there is no English audio and Dual-Audio with an English dub", () => {
+    expect(buildRemuxName({
+      base: "Mother.and.Son.2022",
+      uhd: false,
+      video,
+      videoCodec: "h264",
+      audio: [audio("DTSHDMA", 6, "fr")],
+      dynamicRange: ["SDR"],
+    })).toBe("Mother.and.Son.2022.FRENCH.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1");
+    expect(buildRemuxName({
+      base: "Mother.and.Son.2022",
+      uhd: false,
+      video,
+      videoCodec: "h264",
+      audio: [audio("DTSHDMA", 6, "fr"), audio("DD", 6, "en")],
+      dynamicRange: ["SDR"],
+    })).toBe("Mother.and.Son.2022.1080p.BluRay.REMUX.Dual-Audio.AVC.DTS-HD.MA.5.1");
+  });
+
+  it("names Blu-ray LPCM as the FLAC it becomes, and interlaced video as 1080i except at 25 fps", () => {
+    const stream = { id: "audio:1", kind: "audio", codec: "pcm_bluray", channels: 2, roles: [], language: { bcp47: "en" } } as unknown as MediaStream;
+    const playlist = { streams: [stream] } as Playlist;
+    const track = { stream_id: "audio:1", action: "flac", order: 0 } as TrackSelection;
+    expect(remuxReleaseAudio([track], playlist)[0].codec).toBe("FLAC");
+    expect(remuxResolution({ ...video, field_order: "tt", frame_rate: "30000/1001" })).toBe("1080i");
+    expect(remuxResolution({ ...video, field_order: "tt", frame_rate: "25/1" })).toBe("1080p");
   });
 });

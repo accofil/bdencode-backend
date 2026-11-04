@@ -653,6 +653,37 @@ install_optional_release_tool hdr10plus_tool 1.7.2 \
     hdr10plus_tool-1.7.2-x86_64-unknown-linux-musl.tar.gz \
     https://github.com/quietvoid/hdr10plus_tool/releases/download/1.7.2/hdr10plus_tool-1.7.2-x86_64-unknown-linux-musl.tar.gz
 
+# eac3to 3.36, the demuxer of Aither's remux guide (a personal remux must
+# carry its log), with the wrapper that runs it under Wine.  Wine itself
+# (wine, wine64, wine32:i386) is an operator prerequisite: enabling the i386
+# architecture is outside this installer's rollback.  Without either the
+# remux mode stays unavailable and bdencode doctor says so.  The pinned
+# archive is cached, so an update does not depend on madshi.net.
+install_optional_eac3to() {
+    local sha256=e7977cf3e87310619986b3d1d30385f66b297b189594ead3d6518b0673c05905
+    local cache="$data_root/cache/tools/eac3to-3.36-$sha256.zip"
+    local work="$data_root/cache/build/eac3to-$release_id"
+    if install -d -m 0700 "$data_root/cache/tools" "$work" \
+        && { { [[ -f "$cache" ]] && echo "$sha256  $cache" | sha256sum --check --quiet -; } \
+            || { curl -fsSL --retry 3 --max-time 300 -o "$work/eac3to.zip" http://madshi.net/eac3to.zip \
+                && echo "$sha256  $work/eac3to.zip" | sha256sum --check --quiet - \
+                && mv -f -- "$work/eac3to.zip" "$cache"; }; } \
+        && python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' \
+            "$cache" "$work" \
+        && test -f "$work/eac3to/eac3to.exe" \
+        && install -d -m 0755 "$tool_release/lib" \
+        && rm -rf -- "$tool_release/lib/eac3to" \
+        && cp -R -- "$work/eac3to" "$tool_release/lib/eac3to" \
+        && install -m 0755 "$repo_root/install/bdencode-eac3to" "$tool_release/bin/bdencode-eac3to"; then
+        :
+    else
+        rm -rf -- "$tool_release/lib/eac3to" "$tool_release/bin/bdencode-eac3to"
+        echo "WARNING: eac3to was not installed; the remux mode stays unavailable." >&2
+    fi
+    rm -rf -- "$work"
+}
+install_optional_eac3to
+
 # Publish immutable, root-owned static assets outside the private encode tree.
 # The current web pointer is part of the durable installer snapshot, so a crash
 # after activation restores the frontend together with backend/tool pointers.

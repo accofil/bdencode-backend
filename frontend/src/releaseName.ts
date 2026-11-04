@@ -197,6 +197,72 @@ export function buildReleaseName(input: ReleaseNameInput): string {
   return `${parts.join(".")}${group}`;
 }
 
+export interface RemuxNameInput {
+  /** Title and year, dot separated. */
+  base: string;
+  uhd: boolean;
+  video: VideoProperties | null | undefined;
+  /** The scan's video codec name (h264, hevc, vc1, mpeg2video). */
+  videoCodec: string;
+  audio: ReleaseAudio[];
+  /** Any of SDR, HDR, HDR10+, DV, HLG. */
+  dynamicRange: string[];
+  tag?: string;
+}
+
+const REMUX_VIDEO_CODECS: Record<string, string> = { h264: "AVC", hevc: "HEVC", vc1: "VC-1", mpeg2video: "MPEG-2" };
+
+/** The remux's planned audio: untouched copies, Blu-ray LPCM as FLAC. */
+export function remuxReleaseAudio(tracks: TrackSelection[], playlist: Playlist): ReleaseAudio[] {
+  return releaseAudio(tracks, playlist).map((item) => item.codec === "LPCM" ? { ...item, codec: "FLAC" } : item);
+}
+
+/** What the untouched video is; mirrors the backend's remux.dynamic_range. */
+export function remuxDynamicRange(video: VideoProperties | null | undefined): string[] {
+  const transfer = String(video?.color_transfer ?? "").toLowerCase();
+  const values: string[] = [];
+  if (video?.hdr10 || transfer === "smpte2084") values.push("HDR");
+  else if (transfer === "arib-std-b67" || transfer === "hlg") values.push("HLG");
+  if (video?.hdr10_plus) values.push("HDR10+");
+  if (video?.dolby_vision) values.push("DV");
+  return values.length ? values : ["SDR"];
+}
+
+/** BDInfo's line count: 1080p, or 1080i for interlaced video that is not 25 fps. */
+export function remuxResolution(video: VideoProperties | null | undefined): string {
+  const height = video?.height ?? 0;
+  const line = height > 1088 ? 2160 : height > 720 ? 1080 : height > 576 ? 720 : height > 480 ? 576 : 480;
+  const order = String(video?.field_order ?? "progressive").toLowerCase();
+  const [numerator, denominator] = String(video?.frame_rate ?? "").split("/").map(Number);
+  const fps = denominator ? numerator / denominator : numerator;
+  const interlaced = !["progressive", "unknown", ""].includes(order) && fps !== 25;
+  return `${line}${interlaced ? "i" : "p"}`;
+}
+
+/** Aither's remux scheme, as the backend checks it:
+ * Title.Year.1080p.BluRay.REMUX[.HDR].AVC.DTS-HD.MA.5.1[.Atmos]-TAG */
+export function buildRemuxName(input: RemuxNameInput): string {
+  const tag = input.tag ? sanitizeReleaseTag(input.tag) : "";
+  const spoken = input.audio.filter((item) => !item.commentary);
+  const main = spoken[0] ?? input.audio[0];
+  const languages = new Set(spoken.map((item) => item.language).filter((item) => item !== "und"));
+  const languageSuffix = new RegExp(`\\.(?:${[...new Set(Object.values(LANGUAGE_NAMES))].join("|")})$`, "i");
+  const base = input.base.replace(languageSuffix, "") || input.base;
+  const languageTag = main && !languages.has("en") ? LANGUAGE_NAMES[main.language] : undefined;
+  const parts = [
+    languageTag ? `${base}.${languageTag}` : base,
+    remuxResolution(input.video),
+    input.uhd ? "UHD.BluRay" : "BluRay",
+    "REMUX",
+    ...dynamicTokens(input.dynamicRange, "aither"),
+  ];
+  if (main && main.language !== "en" && languages.size === 2 && languages.has("en")) parts.push("Dual-Audio");
+  parts.push(REMUX_VIDEO_CODECS[input.videoCodec.toLowerCase()] ?? "AVC");
+  const audio = audioToken(main);
+  if (audio) parts.push(audio);
+  return `${parts.join(".")}${tag ? `-${tag}` : ""}`;
+}
+
 /** The title part of an existing name: everything before the resolution, or a cleaned title. */
 export function titleBaseOf(name: string): string {
   const match = /^(.+?)\.(?:1080p|2160p)\./i.exec(name.trim());

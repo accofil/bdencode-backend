@@ -50,6 +50,8 @@ VERSION_ARGS: dict[str, tuple[str, ...]] = {
     "bdencode-vmaf": ("--help",),
     "hdr10plus_tool": ("--version",),
     "dovi_tool": ("--version",),
+    "bdencode-eac3to": ("--version",),
+    "wine": ("--version",),
 }
 
 
@@ -168,6 +170,24 @@ def x265_build_support(runner: CommandRunner | None = None) -> dict[str, bool]:
     except (OSError, TimeoutError, subprocess.SubprocessError):
         text = ""
     return x265_support_from_help(text)
+
+
+def remux_support() -> dict[str, object]:
+    """Whether this host can make Aither-style remuxes.
+
+    The remux demuxes with eac3to, which runs under Wine through the
+    installer's ``bdencode-eac3to`` wrapper; Wine is an operator prerequisite.
+    """
+
+    wrapper = shutil.which("bdencode-eac3to")
+    wine = shutil.which("wine")
+    return {
+        "available": bool(wrapper and wine),
+        "eac3to": wrapper is not None,
+        "wine": wine is not None,
+        # A dual-layer Dolby Vision disc also needs dovi_tool to join its layers.
+        "dolby_vision": shutil.which(DOVI_TOOL) is not None,
+    }
 
 
 def dynamic_hdr_support(

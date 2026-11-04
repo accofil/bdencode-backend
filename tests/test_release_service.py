@@ -719,3 +719,24 @@ def test_black_frames_never_become_screenshots(tmp_path: Path) -> None:
     black.write_bytes(b"x" * 14_000)
 
     assert _without_uniform([black, *big]) == big
+
+
+def test_a_remux_release_kit_uses_its_own_screenshots(tmp_path: Path) -> None:
+    service, job_id, payload = _fixture(tmp_path)
+    comparison = payload.parent / "comparison"
+    (comparison / "video-comparison.json").unlink()
+    images = []
+    for number in range(1, 7):
+        png = comparison / f"{number:02d}-screenshot.png"
+        png.write_bytes(b"\x89PNG\r\n\x1a\n" + f"remux {number}".encode())
+        images.append({"png": png.name, "sha256": sha256_file(png), "frame": number, "timestamp": "00:00:01.000"})
+    (comparison / "remux-screenshots.json").write_text(
+        json.dumps({"schema_version": 1, "kind": "remux", "images": images}), encoding="utf-8"
+    )
+    created = service.create(job_id, profile_id="ncore", metadata=_metadata(payload))
+
+    ready = service.build(created.id, expected_version=created.version)
+
+    chosen = _kit_screenshot_digests(service, ready)
+    assert len(chosen) == 3
+    assert chosen <= {item["sha256"] for item in images}

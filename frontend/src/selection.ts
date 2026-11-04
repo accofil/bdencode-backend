@@ -1,6 +1,6 @@
 import type { AutoCrfConfig, DetailLevel, DynamicHdrMode, ImageUploadProvider, SelectionPayload, TrackAction, UploadImageSet } from "./api/types";
 
-type Crop = SelectionPayload["video"]["crop"];
+type Crop = NonNullable<SelectionPayload["video"]>["crop"];
 
 export interface StoredTrackSelection {
   stream_id: string;
@@ -29,6 +29,8 @@ export interface StoredSelection {
   autoCrf: AutoCrfConfig | null;
   dynamicHdr: DynamicHdrMode | null;
   trackerProfile: "aither" | "ncore" | null;
+  mode: "encode" | "remux";
+  remux: { imdb: string | null; tmdb: string | null };
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -177,5 +179,10 @@ export function normalizeStoredSelection(value: unknown): StoredSelection | null
     trackerProfile: selection.tracker_profile === "aither" || selection.tracker_profile === "ncore"
       ? selection.tracker_profile
       : null,
+    mode: selection.mode === "remux" ? "remux" : "encode",
+    remux: {
+      imdb: text(record(selection.remux)?.imdb),
+      tmdb: text(record(selection.remux)?.tmdb),
+    },
   };
 }

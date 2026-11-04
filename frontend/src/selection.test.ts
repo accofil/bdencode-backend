@@ -19,6 +19,8 @@ describe("normalizeStoredSelection", () => {
       autoCrf: null,
       dynamicHdr: null,
       trackerProfile: null,
+      mode: "encode",
+      remux: { imdb: null, tmdb: null },
     });
   });
 
@@ -70,6 +72,8 @@ describe("normalizeStoredSelection", () => {
       autoCrf: null,
       dynamicHdr: null,
       trackerProfile: null,
+      mode: "encode",
+      remux: { imdb: null, tmdb: null },
     });
   });
 
@@ -118,5 +122,21 @@ describe("normalizeStoredSelection quality options", () => {
       target_vmaf: 95,
     });
     expect(normalizeStoredSelection({ video: { dynamic_hdr: "always" } })?.dynamicHdr).toBeNull();
+  });
+});
+
+describe("normalizeStoredSelection for a remux", () => {
+  it("keeps the mode and the remux tags, and has no video settings to lose", () => {
+    const stored = normalizeStoredSelection({
+      mode: "remux",
+      playlist_id: "1.mpls",
+      angle: 1,
+      tracks: [],
+      remux: { imdb: "tt0123456", tmdb: "" },
+    });
+
+    expect(stored?.mode).toBe("remux");
+    expect(stored?.remux).toEqual({ imdb: "tt0123456", tmdb: null });
+    expect(stored?.settings).toEqual({});
   });
 });
