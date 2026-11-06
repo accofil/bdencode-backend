@@ -87,6 +87,13 @@ describe("formatEventMessage", () => {
     expect(formatStatusMessage(timeout, "")).toMatch(/ötperces időkorlátot/i);
   });
 
+  it("localizes the check of a crop that follows the detected border", () => {
+    expect(formatEventMessage(
+      "worker.crop-tight-reach",
+      "crop verification: the automatic crop follows the detected border; top 22px: 3100 of the 139426 frames touching this edge reach past it (2.22%, limit 25%); bottom 22px: 213 of the 141400 frames touching this edge reach past it (0.15%, limit 25%)",
+    )).toBe("Crop-ellenőrzés: az automatikus crop a felismert szélhez igazodik. felső 22 px: a szélt elérő 139426 képkockából 3100 túlnyúlik rajta (2.22%, határ 25%); alsó 22 px: a szélt elérő 141400 képkockából 213 túlnyúlik rajta (0.15%, határ 25%).");
+  });
+
   it("localizes the warnings that let a job continue", () => {
     expect(formatEventMessage(
       "worker.crop-verification-warning",

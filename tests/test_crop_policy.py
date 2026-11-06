@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from bdencode.qc.crop import (
+    DEFAULT_TIGHT_CROP_SUPPORT_RATIO,
     automatic_crop,
     count_crop_observations,
     CropDetectionEvidence,
@@ -15,6 +16,7 @@ from bdencode.qc.crop import (
     keyframe_cropdetect_commands,
     parse_stable_cropdetect,
     plan_cropdetect_intervals,
+    tightened_edges,
     validate_operator_crop,
     variable_aspect_evidence,
     verify_crop_against_full_decode,
@@ -190,6 +192,208 @@ def test_crop_policy_allows_no_crop_when_no_bar_is_detected() -> None:
     assert decision.status == "accepted"
     assert decision.requested == CropMargins()
     assert decision.residual == CropMargins()
+
+
+def _border_log(*counts: tuple[int, int, int]) -> str:
+    """Cropdetect lines of a 1920x1080 title: (lines, top border, bottom border)."""
+
+    return "".join(
+        f"crop=1920:{1080 - top - bottom}:0:{top}\n" * lines
+        for lines, top, bottom in counts
+    )
+
+
+def _gap_evidence(
+    detected: CropMargins, widest: CropMargins, support: str = "0.99"
+) -> CropDetectionEvidence:
+    return CropDetectionEvidence(
+        crop=detected,
+        source_width=1920,
+        source_height=1080,
+        observations=1000,
+        supporting_observations=int(Decimal(support) * 1000),
+        support_ratio=Decimal(support),
+        jitter_pixels=2,
+        safe_crop=widest,
+    )
+
+
+def test_a_stable_two_pixel_gap_uses_the_detected_border() -> None:
+    """Super Troopers 3: one bright frame moved the widest canvas to 20, and a
+    nearly black row stayed at the top and the bottom of the encode."""
+
+    # A narrow opening line, then the running envelope of the three real heights.
+    evidence = parse_stable_cropdetect(
+        _border_log((1, 60, 60), (3317, 22, 22), (2103, 20, 22), (2047, 20, 20)),
+        source_width=1920,
+        source_height=1080,
+    )
+    assert evidence.crop == CropMargins(top=22, bottom=22)
+    assert evidence.safe_crop == CropMargins(top=20, bottom=20)
+    assert evidence.support_ratio > Decimal("0.999")
+
+    selected = automatic_crop(evidence)
+
+    assert selected == CropMargins(top=22, bottom=22)
+    decision = validate_operator_crop(selected, evidence)
+    assert decision.requested == CropMargins(top=22, bottom=22)
+    assert decision.release_safe == CropMargins(top=20, bottom=20)
+    assert decision.residual == CropMargins()
+    assert tightened_edges(selected, decision.release_safe) == ("top", "bottom")
+
+
+def test_a_variable_aspect_title_keeps_the_widest_canvas() -> None:
+    detected = CropMargins(top=22, bottom=22)
+    widest = CropMargins(top=20, bottom=20)
+    evidence = _gap_evidence(detected, widest)
+    assert automatic_crop(evidence) == detected
+
+    assert automatic_crop(evidence, widest_only=True) == widest
+    flagged = CropDetectionEvidence(
+        crop=detected,
+        source_width=1920,
+        source_height=1080,
+        observations=1000,
+        supporting_observations=990,
+        support_ratio=Decimal("0.99"),
+        jitter_pixels=2,
+        safe_crop=widest,
+        variable_aspect=True,
+    )
+    assert automatic_crop(flagged) == widest
+
+
+@pytest.mark.parametrize(
+    ("detected", "widest"),
+    [
+        # More than the margin on one edge: every edge keeps the widest canvas.
+        (CropMargins(top=24, bottom=22), CropMargins(top=20, bottom=20)),
+        (CropMargins(left=12, top=22, bottom=22), CropMargins(left=8, top=20, bottom=20)),
+        # A detected border wider than the canvas is no tightening at all.
+        (CropMargins(top=18, bottom=22), CropMargins(top=20, bottom=20)),
+    ],
+)
+def test_a_larger_gap_keeps_the_widest_canvas(
+    detected: CropMargins, widest: CropMargins
+) -> None:
+    assert automatic_crop(_gap_evidence(detected, widest)) == widest
+
+
+def test_low_support_keeps_the_widest_canvas() -> None:
+    detected = CropMargins(top=22, bottom=22)
+    widest = CropMargins(top=20, bottom=20)
+
+    assert DEFAULT_TIGHT_CROP_SUPPORT_RATIO == Decimal("0.95")
+    assert automatic_crop(_gap_evidence(detected, widest, "0.95")) == detected
+    assert automatic_crop(_gap_evidence(detected, widest, "0.94")) == widest
+
+
+def test_a_border_below_eight_pixels_stays_uncropped() -> None:
+    # Eight detected, six on the widest canvas: the tightening starts no crop.
+    assert automatic_crop(
+        _gap_evidence(CropMargins(top=8, bottom=8), CropMargins(top=6, bottom=6))
+    ) == CropMargins()
+    assert automatic_crop(
+        _gap_evidence(CropMargins(top=6, bottom=6), CropMargins(top=4, bottom=4))
+    ) == CropMargins()
+    # Eight on the canvas is a real border, so the detected one applies.
+    assert automatic_crop(
+        _gap_evidence(CropMargins(top=10, bottom=10), CropMargins(top=8, bottom=8))
+    ) == CropMargins(top=10, bottom=10)
+    # A thin side stays uncropped beside a tightened letterbox.
+    assert automatic_crop(
+        _gap_evidence(
+            CropMargins(left=2, top=22, bottom=22), CropMargins(top=20, bottom=20)
+        )
+    ) == CropMargins(top=22, bottom=22)
+
+
+def test_the_automatic_crop_still_refuses_an_unaligned_border() -> None:
+    with pytest.raises(ValueError, match="chroma"):
+        automatic_crop(
+            _gap_evidence(CropMargins(top=21, bottom=20), CropMargins(top=20, bottom=20))
+        )
+
+
+def _frames(*counts: tuple[int, int, int]) -> str:
+    """A per-frame log at 24 fps: (frames, top border, bottom border)."""
+
+    lines: list[str] = []
+    for frames, top, bottom in counts:
+        for _ in range(frames):
+            t = len(lines) / 24
+            lines.append(f"t:{t:.6f} crop=1920:{1080 - top - bottom}:0:{top}")
+    return "\n".join(lines) + "\n"
+
+
+def _verify_tight(log: str):
+    return verify_crop_against_full_decode(
+        log,
+        CropMargins(top=22, bottom=22),
+        source_width=1920,
+        source_height=1080,
+        release_safe=CropMargins(top=20, bottom=20),
+    )
+
+
+def test_a_faint_row_in_bright_frames_passes_and_stays_on_record() -> None:
+    # Super Troopers 3 per frame: 2.2% of the frames touching the top edge reach
+    # past it, in runs of up to 8.6 seconds.
+    verification = _verify_tight(_frames((1000, 22, 22), (206, 20, 22), (5000, 22, 22)))
+
+    assert verification.passed
+    top, bottom = verification.tight_edges
+    assert (top.edge, top.used, top.frames_touching, top.frames_past) == ("top", 22, 6206, 206)
+    assert top.share == pytest.approx(206 / 6206)
+    assert (bottom.edge, bottom.frames_past) == ("bottom", 0)
+    assert verification.to_dict()["tight_edges"][0]["failed"] is False
+    assert "206 of the 6206 frames" in verification.tight_summary()
+
+
+def test_a_real_picture_edge_past_the_tightened_crop_fails() -> None:
+    verification = _verify_tight(_frames((300, 22, 22), (700, 20, 20)))
+
+    assert not verification.passed
+    assert verification.persistent_runs == 0
+    assert [item.failed for item in verification.tight_edges] == [True, True]
+    assert "shows picture past it" in verification.summary()
+    assert "top 22px: 700 of the 1000 frames" in verification.summary()
+
+    # Exactly at the limit counts as a real edge, just below it does not.
+    assert not _verify_tight(_frames((750, 22, 22), (250, 20, 20))).passed
+    assert _verify_tight(_frames((751, 22, 22), (249, 20, 20))).passed
+
+
+def test_a_few_frames_past_the_tightened_crop_are_a_flash_even_at_a_high_share() -> None:
+    # Half a second is twelve frames at 24 fps.
+    assert _verify_tight(_frames((3, 22, 22), (11, 20, 20), (20, 40, 40))).passed
+    assert not _verify_tight(_frames((3, 22, 22), (12, 20, 20), (20, 40, 40))).passed
+
+
+def test_picture_beyond_the_margin_still_fails_a_tightened_crop() -> None:
+    verification = _verify_tight(_frames((1000, 22, 22), (12, 18, 22), (5000, 22, 22)))
+
+    assert not verification.passed
+    assert verification.persistent_runs == 1
+    assert "cuts into the picture" in verification.summary()
+
+
+def test_a_crop_within_the_widest_canvas_has_no_tight_edges() -> None:
+    log = _frames((300, 22, 22), (700, 20, 20))
+    same = verify_crop_against_full_decode(
+        log,
+        CropMargins(top=20, bottom=20),
+        source_width=1920,
+        source_height=1080,
+        release_safe=CropMargins(top=20, bottom=20),
+    )
+    assert same.passed and same.tight_edges == ()
+    assert "tight_edges" not in same.to_dict()
+    # Without the canvas (a manual crop) only the margin rule applies.
+    manual = verify_crop_against_full_decode(
+        log, CropMargins(top=22, bottom=22), source_width=1920, source_height=1080
+    )
+    assert manual.passed and manual.tight_edges == ()
 
 
 def test_automatic_crop_uses_release_safe_borders_and_preserves_thin_noise() -> None:

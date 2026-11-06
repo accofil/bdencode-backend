@@ -151,6 +151,139 @@ def test_too_few_keyframes_fall_back_to_scanning_every_frame(context) -> None:
     assert report["decision"]["requested"]["top"] == 138
 
 
+def _border_lines(*counts: tuple[int, int, int]) -> list[str]:
+    """Per-frame lines at 24 fps: (frames, top border, bottom border)."""
+
+    lines: list[str] = []
+    for frames, top, bottom in counts:
+        for _ in range(frames):
+            lines.append(_line(len(lines) / 24, 1920, 1080 - top - bottom, 0, top))
+    return lines
+
+
+def _document(lines: list[str]) -> str:
+    return "\n".join(lines) + "\n"
+
+
+def test_the_automatic_crop_follows_a_stable_border_and_the_full_decode_checks_it(
+    context,
+) -> None:
+    database, settings, _scan, _scanner, runner, worker = context
+    job, ready = _ready_job(context)
+    _write_crop_logs(
+        runner,
+        keyframes=_document(_border_lines((20, 22, 22), (15, 20, 22), (15, 20, 20))),
+        full=_document(_border_lines((400, 22, 22), (9, 20, 22), (400, 22, 22))),
+    )
+    paths = JobPaths.create(settings, job.id)
+
+    encoding = worker.process_one_stage(ready)
+
+    assert encoding.state is JobState.ENCODING
+    report = json.loads((paths.analysis / "crop-policy.json").read_text("utf-8"))
+    assert report["decision"]["requested"] == {"left": 0, "top": 22, "right": 0, "bottom": 22}
+    assert report["decision"]["release_safe"]["top"] == 20
+    assert report["tightened_edges"] == ["top", "bottom"]
+
+    result = worker.process_one_stage(encoding)
+
+    assert result.state is JobState.MUXING
+    verification = json.loads(
+        (paths.analysis / "crop-verification.json").read_text("utf-8")
+    )
+    assert verification["status"] == "passed"
+    assert verification["tight_edges"][0]["frames_past"] == 9
+    (event,) = [
+        item for item in database.list_events(job_id=job.id) if item.kind == "worker.crop-tight-reach"
+    ]
+    assert "9 of the 809 frames" in (event.message or "")
+
+
+def test_a_tightened_crop_that_fails_stops_the_job_and_the_restart_keeps_the_widest_canvas(
+    context,
+) -> None:
+    _database, settings, _scan, _scanner, runner, worker = context
+    job, ready = _ready_job(context)
+    _write_crop_logs(
+        runner,
+        keyframes=_document(_border_lines((20, 22, 22), (15, 20, 22), (15, 20, 20))),
+        # Still mostly 22, so the rescan would pick it again without the failure.
+        full=_document(_border_lines((60, 22, 22), (40, 20, 20))),
+    )
+    paths = JobPaths.create(settings, job.id)
+    encoding = worker.process_one_stage(ready)
+    assert encoding.state is JobState.ENCODING
+
+    result = worker.process_job(encoding)
+
+    assert result.state is JobState.NEEDS_REVIEW
+    assert "shows picture past it" in (result.status_message or "") + (result.error or "")
+    verification = json.loads(
+        (paths.analysis / "crop-verification.json").read_text("utf-8")
+    )
+    assert verification["status"] == "needs_review"
+    assert [item["failed"] for item in verification["tight_edges"]] == [True, True]
+    assert not (paths.stages / "crop-policy.json").exists()
+
+    worker._prepare(ready, paths, advance=False)
+
+    assert "-skip_frame" not in _crop_scans(runner)[-1]
+    report = json.loads((paths.analysis / "crop-policy.json").read_text("utf-8"))
+    assert report["scan"] == "full"
+    assert report["evidence"]["crop"]["top"] == 22
+    assert report["decision"]["requested"] == {"left": 0, "top": 20, "right": 0, "bottom": 20}
+    assert report["tightened_edges"] == []
+
+
+def test_a_variable_aspect_profile_keeps_the_widest_canvas_within_the_margin(context) -> None:
+    _database, settings, _scan, _scanner, runner, worker = context
+    job, ready = _ready_job(context)
+    # A narrow opening, then the film at 22 with a bright frame at 20.
+    opening = [_line(t, 1920, 800, 0, 140) for t in range(2)]
+    film = [_line(1000 + t, 1920, 1036, 0, 22) for t in range(60)]
+    wider = [_line(2000 + t, 1920, 1040, 0, 20) for t in range(40)]
+    log = _document(opening + film + wider)
+    _write_crop_logs(runner, keyframes=log, full=log)
+    paths = JobPaths.create(settings, job.id)
+
+    worker._prepare(ready, paths, advance=False)
+
+    report = json.loads((paths.analysis / "crop-policy.json").read_text("utf-8"))
+    assert report["aspect_profile"]["variable"] is True
+    assert report["evidence"]["crop"]["top"] == 22
+    assert report["decision"]["requested"] == {"left": 0, "top": 20, "right": 0, "bottom": 20}
+    assert report["tightened_edges"] == []
+
+
+def test_a_manual_crop_is_not_judged_as_a_tightened_automatic_one(context) -> None:
+    database, settings, scan, _scanner, runner, worker = context
+    job = _enqueue(database, scan.source)
+    claimed = JobQueue(database).claim_next()
+    assert claimed is not None
+    worker.process_one_stage(claimed)
+    selection = _selection()
+    selection["video"]["crop"] = {"left": 0, "top": 22, "right": 0, "bottom": 22}
+    ready = database.set_selection(job.id, selection)
+    _write_crop_logs(
+        runner,
+        keyframes=_document(_border_lines((20, 22, 22), (15, 20, 22), (15, 20, 20))),
+        full=_document(_border_lines((60, 22, 22), (40, 20, 20))),
+    )
+    paths = JobPaths.create(settings, job.id)
+    encoding = worker.process_one_stage(ready)
+    assert encoding.state is JobState.ENCODING
+
+    result = worker.process_one_stage(encoding)
+
+    assert result.state is JobState.MUXING
+    report = json.loads((paths.analysis / "crop-policy.json").read_text("utf-8"))
+    assert report["selection_mode"] == "manual"
+    verification = json.loads(
+        (paths.analysis / "crop-verification.json").read_text("utf-8")
+    )
+    assert "tight_edges" not in verification
+
+
 def test_the_full_decode_beside_the_encode_verifies_the_crop(context) -> None:
     _database, settings, _scan, _scanner, runner, worker = context
     job, encoding = _prepare_encoding(context)

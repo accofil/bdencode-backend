@@ -506,7 +506,7 @@ Ha a scan elkészült, a munka oldalán megjelenik a **Te következel** kártya.
 - Kezdő módban a program biztonságos alapértékeket ad; ezeket nyugodtan hagyd így.
 - Minden beállítás mellett egy **?** gomb nyitja meg a magyar nyelvű magyarázatot.
 - Ha beállítottad az AI-tanácsadót, itt kérhetsz tőle javaslatot (**AI-javaslat kérése**).
-- A fekete sávok levágása (crop) automatikus.
+- A fekete sávok levágása (crop) automatikus. Ha a felismert szél csak néhány világos kocka miatt tér el legfeljebb 2 pixellel a legszélesebb képtől, a program a felismert szélig vág, így nem marad sötét csík a kép szélén. Ezt a teljes dekódolás minden képkockán ellenőrzi; a részletek a [kézikönyvben](docs/REFERENCE.md#744-változó-képarány-imax-jelenetek) vannak.
 
 **4. Ellenőrzés**
 

@@ -773,6 +773,21 @@ A worker a film crop-vizsgálatából **képarányprofilt** is készít (`crop-p
 
 Az ilyen film korábban gyakran felesleges kézi crop-felülvizsgálatot igényelt, mert nincs egyetlen domináns fekete sáv. Mostantól, ha a napló néhány (legfeljebb három) lépcsős, szigorúan csak növekvő burkológörbét mutat, és a legszélesebb vászon legalább 10 másodpercig látszik, az automatikus crop a **legszélesebb vásznat** tartja meg. Ez konstrukció szerint nem vág le képet; legrosszabb esetben néhány kódolt fekete sáv marad a szűkebb jelenetekben. Zajos vagy sok lépcsős napló továbbra is felülvizsgálatot kér, kézi cropnál a meglévő `variable_aspect_ratio` védelem érvényes.
 
+**Felismert szél vagy legszélesebb vászon.** Az automatikus crop alapesetben a kulcskockás vizsgálat legszélesebb vásznát tartja meg. Ezt azonban egyetlen világos kocka is véglegesen eltolja, és egy halvány átmeneti sor sötét csíkként az encode szélén marad. Ezért a program a **felismert szélt** használja, ha egyszerre teljesül, hogy:
+
+- a felismert szél és a legszélesebb vászon minden élen legfeljebb 2 pixelben tér el;
+- a vizsgálat legalább 95%-a egyezik a felismert széllel (`DEFAULT_TIGHT_CROP_SUPPORT_RATIO`);
+- a cím nem változó képarányú;
+- ez nem egy korábban elbukott ellenőrzés utáni újrakezdés.
+
+Minden más esetben marad a legszélesebb vászon. A 8 pixelnél keskenyebb szegélyt a legszélesebb vászon alapján továbbra sem vágja le, és a 4:2:0 páros vágási szabály is érvényes. A választás a `crop-policy.json` `tightened_edges` mezőjében látszik.
+
+A teljes dekódolás minden képkockán ellenőrzi ezt a választást. A mérés élenként azt nézi, hogy az élt elérő kockák hány százaléka nyúlik túl rajta (`crop-verification.json` › `tight_edges`). Ha ez legalább 25% (`DEFAULT_TIGHT_CROP_MAX_REACH_SHARE`), és legalább fél másodpercnyi kockát érint, akkor az a kép valódi széle: a munka megáll felülvizsgálatra, és az újraindítás minden képkockát megvizsgál, majd a legszélesebb vásznat tartja meg. Kisebb aránynál a munka folytatódik, és `worker.crop-tight-reach` esemény rögzíti a számokat. A Super Troopers 3 mért értéke 2,22% (felső) és 0,15% (alsó). Ez az egyetlen valódi cím, amelyen a szabály eddig működésbe lépett, a 25% ezért indokolt becslés, nem sok filmen kimért határ.
+
+Ha a munka nem áll meg, legfeljebb 2 pixelnyi képsor veszhet el az érintett kockákon. Kézi cropnál ez a szabály nem fut: ott a megadott érték és a meglévő 2 pixeles tűrés érvényes.
+
+Ismert korlát: ha a felismert szél és a legszélesebb vászon megegyezik, nincs mit szűkíteni, így egy ott maradt halvány szélső sor az encode-ban marad.
+
 #### 7.4.5. Profilkönyvtár
 
 A videóbeállítások között a **Profilkönyvtár** kártya a beállítások újrahasznosítására és megosztására való.
