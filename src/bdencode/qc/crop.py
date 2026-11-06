@@ -33,6 +33,19 @@ DEFAULT_FULL_TITLE_SAMPLE_FPS = Decimal("1")
 # is recorded as a warning.  Half a second is twelve frames at 24 fps.
 DEFAULT_PERSISTENT_CUT_SECONDS = 0.5
 DEFAULT_UNTIMED_PERSISTENT_FRAMES = 12
+# The automatic crop follows the detected border instead of the widest one only
+# when the two differ by at most DEFAULT_SAFETY_MARGIN_PIXELS on every edge and
+# this share of the scan agrees with the detected border.  The stability gate
+# of 0.70 leaves too much of the title unexplained to give up the widest canvas;
+# real scope titles measured 0.9966 to 0.9999, and 0.95 still allows a dark
+# opening of a few minutes in a two-hour film.
+DEFAULT_TIGHT_CROP_SUPPORT_RATIO = Decimal("0.95")
+# Of the frames whose picture touches a tightened edge, the share that goes past
+# it.  A faint transition row crosses the cropdetect limit only in bright frames
+# (Super Troopers 3: 2.2% at the top, 0.15% at the bottom), while on a real edge
+# nearly every touching frame goes past.  A quarter separates the two with room
+# on both sides; above it the job stops, and a restart keeps the widest canvas.
+DEFAULT_TIGHT_CROP_MAX_REACH_SHARE = 0.25
 
 
 _CROP_OBSERVATION_PATTERN = re.compile(
@@ -908,6 +921,14 @@ def validate_operator_crop(
     )
 
 
+def tightened_edges(used: CropMargins, release_safe: CropMargins) -> tuple[str, ...]:
+    """The edges a crop removes more of than the widest sampled canvas allows."""
+
+    return tuple(
+        edge for edge in _EDGES if getattr(used, edge) > getattr(release_safe, edge)
+    )
+
+
 def _cuts(used: CropMargins, picture: CropMargins, safety_margin_pixels: int) -> bool:
     return any(
         getattr(used, edge) - getattr(picture, edge) > safety_margin_pixels
@@ -940,6 +961,31 @@ class CropCutRun:
 
 
 @dataclass(frozen=True, slots=True)
+class TightEdgeReach:
+    """How the full decode's frames relate to one edge tightened past the widest canvas."""
+
+    edge: str
+    used: int
+    frames_touching: int
+    frames_past: int
+    failed: bool
+
+    @property
+    def share(self) -> float:
+        return self.frames_past / self.frames_touching if self.frames_touching else 0.0
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "edge": self.edge,
+            "used": self.used,
+            "frames_touching": self.frames_touching,
+            "frames_past": self.frames_past,
+            "share": round(self.share, 6),
+            "failed": self.failed,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class CropVerification:
     """The crop of an encode checked against the picture of every frame.
 
@@ -958,16 +1004,35 @@ class CropVerification:
     runs: tuple[CropCutRun, ...] = ()
     persistent_runs: int = 0
     flash_runs: int = 0
+    tight_edges: tuple[TightEdgeReach, ...] = ()
+    maximum_tight_reach_share: float = DEFAULT_TIGHT_CROP_MAX_REACH_SHARE
 
     @property
     def passed(self) -> bool:
-        return self.persistent_runs == 0
+        return self.persistent_runs == 0 and not any(
+            item.failed for item in self.tight_edges
+        )
 
     @property
     def flashes(self) -> tuple[CropCutRun, ...]:
         return tuple(run for run in self.runs if not run.persistent)
 
+    def tight_summary(self) -> str:
+        """What the frames say about the edges tightened past the widest canvas."""
+
+        return "; ".join(
+            f"{item.edge} {item.used}px: {item.frames_past} of the "
+            f"{item.frames_touching} frames touching this edge reach past it "
+            f"({item.share:.2%}, limit {self.maximum_tight_reach_share:.0%})"
+            for item in self.tight_edges
+        )
+
     def summary(self) -> str:
+        if self.persistent_runs == 0 and not self.passed:
+            return (
+                "the automatic crop follows the detected border, but the full decode "
+                f"shows picture past it: {self.tight_summary()}"
+            )
         if self.passed:
             if self.flash_runs:
                 longest = max(
@@ -996,7 +1061,16 @@ class CropVerification:
         return f"the crop cuts into the picture of the full decode: {edges}{when}"
 
     def to_dict(self) -> dict[str, object]:
+        tight: dict[str, object] = (
+            {
+                "tight_edges": [item.to_dict() for item in self.tight_edges],
+                "maximum_tight_reach_share": self.maximum_tight_reach_share,
+            }
+            if self.tight_edges
+            else {}
+        )
         return {
+            **tight,
             "passed": self.passed,
             "used": self.used.to_dict(),
             "envelope": self.envelope.to_dict(),
@@ -1071,6 +1145,8 @@ def verify_crop_against_full_decode(
     safety_margin_pixels: int = DEFAULT_SAFETY_MARGIN_PIXELS,
     minimum_persistent_seconds: float = DEFAULT_PERSISTENT_CUT_SECONDS,
     untimed_persistent_frames: int = DEFAULT_UNTIMED_PERSISTENT_FRAMES,
+    release_safe: CropMargins | None = None,
+    maximum_tight_reach_share: float = DEFAULT_TIGHT_CROP_MAX_REACH_SHARE,
 ) -> CropVerification:
     """Check a crop against a per-frame cropdetect log of the full decode.
 
@@ -1086,6 +1162,13 @@ def verify_crop_against_full_decode(
     timestamps ``untimed_persistent_frames`` frames count as persistent.  A
     cumulative (``reset=0``) log is still judged safely: after a flash its
     envelope stays wide, so it fails as before, never more leniently.
+
+    ``release_safe`` is the widest canvas of the scan, given for an automatic
+    crop.  An edge tightened past it sits within the safety margin of that
+    canvas, so the check above cannot see picture there.  Such an edge also
+    fails when, of the frames touching it, at least
+    ``maximum_tight_reach_share`` go past it for at least the persistent time:
+    then it is a real picture edge, not a faint row in a few bright frames.
     """
 
     if source_width < 1 or source_height < 1:
@@ -1094,6 +1177,8 @@ def verify_crop_against_full_decode(
         raise ValueError("crop safety margin cannot be negative")
     if minimum_persistent_seconds <= 0 or untimed_persistent_frames < 1:
         raise ValueError("the persistence threshold must be positive")
+    if not 0 < maximum_tight_reach_share <= 1:
+        raise ValueError("the tight crop reach share must be above zero and at most one")
     frames = _frame_observations(
         log, source_width=source_width, source_height=source_height
     )
@@ -1156,6 +1241,21 @@ def verify_crop_against_full_decode(
     reported.sort(
         key=lambda run: (run.start_seconds is None, run.start_seconds or 0.0)
     )
+    tight_edges: list[TightEdgeReach] = []
+    for edge in tightened_edges(used, release_safe) if release_safe else ():
+        limit = getattr(used, edge)
+        touching = sum(getattr(margins, edge) <= limit for margins in pictures)
+        past = sum(getattr(margins, edge) < limit for margins in pictures)
+        tight_edges.append(
+            TightEdgeReach(
+                edge=edge,
+                used=limit,
+                frames_touching=touching,
+                frames_past=past,
+                failed=past >= required_frames
+                and past >= maximum_tight_reach_share * touching,
+            )
+        )
     return CropVerification(
         used=used,
         envelope=envelope,
@@ -1168,6 +1268,8 @@ def verify_crop_against_full_decode(
         runs=tuple(reported),
         persistent_runs=len(persistent_runs),
         flash_runs=len(flash_runs),
+        tight_edges=tuple(tight_edges),
+        maximum_tight_reach_share=maximum_tight_reach_share,
     )
 
 
@@ -1175,26 +1277,49 @@ def automatic_crop(
     evidence: CropDetectionEvidence,
     *,
     substantial_border_pixels: int = DEFAULT_SUBSTANTIAL_BORDER_PIXELS,
+    safety_margin_pixels: int = DEFAULT_SAFETY_MARGIN_PIXELS,
+    minimum_support_ratio: Decimal = DEFAULT_TIGHT_CROP_SUPPORT_RATIO,
+    widest_only: bool = False,
 ) -> CropMargins:
-    """Choose the conservative sampled crop without trimming thin edge noise.
+    """Choose the sampled crop without trimming thin edge noise.
 
     ``safe_crop`` is the largest active canvas observed across the sampled
-    title, so it protects variable-aspect material.  Borders below the policy
-    threshold remain untouched because removing a few dark edge pixels is
-    riskier than preserving them.
+    title, so it protects variable-aspect material.  One bright frame moves that
+    canvas for good, though, and a faint transition row would stay in the encode
+    as a dark line.  So the detected border is used when it is within
+    ``safety_margin_pixels`` of the canvas on every edge and nearly the whole
+    scan agrees with it; the full decode then checks that choice against every
+    frame (:func:`verify_crop_against_full_decode`).  ``widest_only`` keeps the
+    canvas: the caller knows the title changes aspect, or that check has failed.
+
+    Borders below the policy threshold remain untouched because removing a few
+    dark edge pixels is riskier than preserving them; the widest canvas decides
+    that, so a tightened edge never starts a crop of its own.
     """
 
     if substantial_border_pixels < 1:
         raise ValueError("substantial crop border must be positive")
     release_safe = evidence.safe_crop or evidence.crop
+    chosen = (
+        evidence.crop
+        if not widest_only
+        and not evidence.variable_aspect
+        and evidence.support_ratio >= minimum_support_ratio
+        and all(
+            0 <= getattr(evidence.crop, edge) - getattr(release_safe, edge)
+            <= safety_margin_pixels
+            for edge in _EDGES
+        )
+        else release_safe
+    )
     selected = CropMargins(
         **{
             edge: (
-                getattr(release_safe, edge)
+                getattr(chosen, edge)
                 if getattr(release_safe, edge) >= substantial_border_pixels
                 else 0
             )
-            for edge in ("left", "top", "right", "bottom")
+            for edge in _EDGES
         }
     )
     selected.validate_subsampled()
@@ -1210,6 +1335,7 @@ __all__ = [
     "CropPolicyDecision",
     "CropPolicyError",
     "CropVerification",
+    "TightEdgeReach",
     "automatic_crop",
     "count_crop_observations",
     "cropdetect_commands",
@@ -1219,6 +1345,7 @@ __all__ = [
     "parse_aspect_profile",
     "parse_stable_cropdetect",
     "plan_cropdetect_intervals",
+    "tightened_edges",
     "validate_operator_crop",
     "variable_aspect_evidence",
     "verify_crop_against_full_decode",

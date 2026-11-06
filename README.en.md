@@ -508,7 +508,7 @@ When the scan is done, the job page shows the **Your turn** card. Open the **Set
 - In Beginner mode the program gives safe defaults; just keep them.
 - The **?** button next to every setting opens an explanation.
 - If you set up the AI adviser, you can ask it here (**Ask for an AI suggestion**).
-- Cropping the black bars is automatic.
+- Cropping the black bars is automatic. When the detected border differs from the widest picture by at most 2 pixels, only because of a few bright frames, the program crops to the detected border, so no dark line stays at the edge of the picture. The full decode checks this on every frame; the details are in the [reference manual](docs/REFERENCE.md#744-változó-képarány-imax-jelenetek) (Hungarian).
 
 **4. Check**
 

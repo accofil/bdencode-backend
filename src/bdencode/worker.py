@@ -244,6 +244,7 @@ from .qc.crop import (
     keyframe_cropdetect_commands,
     parse_aspect_profile,
     parse_stable_cropdetect,
+    tightened_edges,
     validate_operator_crop,
     variable_aspect_evidence,
     verify_crop_against_full_decode,
@@ -5320,6 +5321,11 @@ class PipelineWorker:
         checkpoint, so a restart scans every frame and encodes with the crop
         that keeps the whole picture.  A shorter flash in the bar is recorded
         as a ``worker.crop-verification-warning`` and the job continues.
+
+        An automatic crop that follows the detected border instead of the widest
+        canvas is checked against that canvas too.  Too many frames past it stop
+        the job the same way, and the restart keeps the canvas; a few are recorded
+        as a ``worker.crop-tight-reach``.
         """
 
         report = paths.analysis / "crop-verification.json"
@@ -5330,6 +5336,11 @@ class PipelineWorker:
             used = ActiveCropMargins(**crop_document["decision"]["requested"])
             source_width = int(crop_document["evidence"]["source_width"])
             source_height = int(crop_document["evidence"]["source_height"])
+            release_safe = (
+                ActiveCropMargins(**crop_document["decision"]["release_safe"])
+                if crop_document.get("selection_mode") == "automatic"
+                else None
+            )
         except (OSError, KeyError, TypeError, ValueError) as exc:
             raise ReviewRequired(f"crop verification needs the crop report: {exc}") from exc
         try:
@@ -5338,6 +5349,7 @@ class PipelineWorker:
                 used,
                 source_width=source_width,
                 source_height=source_height,
+                release_safe=release_safe,
             )
         except CropPolicyError as exc:
             atomic_write_json(
@@ -5384,6 +5396,23 @@ class PipelineWorker:
                             verification.minimum_persistent_seconds
                         ),
                         "runs": [run.to_dict() for run in verification.flashes[:5]],
+                    },
+                )
+            )
+        if verification.passed and any(
+            item.frames_past for item in verification.tight_edges
+        ):
+            self.database.add_event(
+                EventCreate(
+                    job_id=paths.root.name,
+                    kind="worker.crop-tight-reach",
+                    message=(
+                        "crop verification: the automatic crop follows the detected "
+                        f"border; {verification.tight_summary()}"
+                    ),
+                    payload={
+                        "report": report.name,
+                        "edges": [item.to_dict() for item in verification.tight_edges],
                     },
                 )
             )
@@ -5709,10 +5738,13 @@ class PipelineWorker:
         index_build = self._start_source_index(job, paths)
         try:
             if not _valid_stage(crop_marker, crop_inputs, [crop_report]):
+                verification_failed = self._crop_verification_failed(
+                    paths, reference_sha256
+                )
                 crop_log_path, crop_scan_mode = self._run_crop_scan(
                     paths,
                     duration_seconds=float(playlist.duration_seconds),
-                    full=self._crop_verification_failed(paths, reference_sha256),
+                    full=verification_failed,
                 )
                 crop_log = crop_log_path.read_text(encoding="utf-8", errors="replace")
                 try:
@@ -5745,8 +5777,20 @@ class PipelineWorker:
                         bottom=selection.crop.bottom,
                     )
                     automatic = not any(asdict(requested_crop).values())
+                    aspect_profile = parse_aspect_profile(
+                        crop_log,
+                        source_width=source_video.width,
+                        source_height=source_video.height,
+                        duration_seconds=float(playlist.duration_seconds),
+                    )
                     effective_crop = (
-                        automatic_crop(crop_evidence) if automatic else requested_crop
+                        automatic_crop(
+                            crop_evidence,
+                            widest_only=verification_failed
+                            or (aspect_profile is not None and aspect_profile.variable),
+                        )
+                        if automatic
+                        else requested_crop
                     )
                     crop_decision = validate_operator_crop(effective_crop, crop_evidence)
                 except CropPolicyError as exc:
@@ -5763,18 +5807,15 @@ class PipelineWorker:
                         f"crop policy requires review: {exc}",
                         details={"code": exc.code, "report": crop_report.name},
                     ) from exc
-                aspect_profile = parse_aspect_profile(
-                    crop_log,
-                    source_width=source_video.width,
-                    source_height=source_video.height,
-                    duration_seconds=float(playlist.duration_seconds),
-                )
                 atomic_write_json(
                     crop_report,
                     {
                         "schema_version": 1,
                         "status": "passed",
                         "selection_mode": "automatic" if automatic else "manual",
+                        "tightened_edges": list(
+                            tightened_edges(effective_crop, crop_decision.release_safe)
+                        ),
                         "scan": crop_scan_mode,
                         "evidence": crop_evidence.to_dict(),
                         "decision": crop_decision.to_dict(),

@@ -136,6 +136,7 @@ function eventKindLabel(kind: string): string | undefined {
     "worker.audio-qc-warning": ["Figyelmeztetés a hangellenőrzésből", "Audio check warning"],
     "worker.audio-continuity-warning": ["Hang a klipillesztéseknél", "Audio at the clip joins"],
     "worker.crop-verification-warning": ["Crop-ellenőrzés: rövid felvillanás", "Crop check: short flash"],
+    "worker.crop-tight-reach": ["Crop-ellenőrzés: felismert szél", "Crop check: detected border"],
     "worker.subtitle-decode-warning": ["Felirat-dekódolás: figyelmeztetés", "Subtitle decode warning"],
     "worker.video-duration-warning": ["Videóhossz: figyelmeztetés", "Video duration warning"],
     "worker.video-efficiency-warning": ["Videóméret: figyelmeztetés", "Video size warning"],
@@ -352,6 +353,15 @@ export function retiredScanWarning(message: string): boolean {
 }
 
 export function stabilityWarning(message: string): string | undefined {
+  const tightReach = /^crop verification: the automatic crop follows the detected border; (.+)$/.exec(message);
+  if (tightReach) {
+    const edgeNames: Record<string, string> = { left: "bal", top: "felső", right: "jobb", bottom: "alsó" };
+    const edges = tightReach[1].split("; ").map((part) => {
+      const edge = /^(left|top|right|bottom) (\d+)px: (\d+) of the (\d+) frames touching this edge reach past it \(([\d.]+)%, limit (\d+)%\)$/.exec(part);
+      return edge ? `${edgeNames[edge[1]]} ${edge[2]} px: a szélt elérő ${edge[4]} képkockából ${edge[3]} túlnyúlik rajta (${edge[5]}%, határ ${edge[6]}%)` : part;
+    });
+    return t(`Crop-ellenőrzés: az automatikus crop a felismert szélhez igazodik. ${edges.join("; ")}.`, `Crop check: the automatic crop follows the detected border. ${tightReach[1]}.`);
+  }
   const flash = /^crop verification: (\d+) short flash\(es\) reach into the cropped border \((\d+) frame\(s\), longest ([\d.]+) s\); the crop is kept and the job continues$/.exec(message);
   if (flash) return t(`Crop-ellenőrzés: ${flash[1]} rövid felvillanás ér bele a levágott sávba (${flash[2]} képkocka, a leghosszabb ${flash[3]} mp). A crop marad, a job folytatódik.`, `Crop check: ${flash[1]} short flash(es) reach into the cropped border (${flash[2]} frame(s), longest ${flash[3]} s). The crop is kept and the job continues.`);
   if (message === "the final subtitle decode shows known harmless differences; the job continues") return t("A kész feliratok dekódolása ismert, ártalmatlan eltéréseket mutat; a job folytatódik (részletek a subtitle-integrity.json-ban)", "The final subtitle decode shows known harmless differences; the job continues (details in subtitle-integrity.json)");
