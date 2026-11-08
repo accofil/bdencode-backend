@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client";
 import { setLanguage } from "../i18n";
 import { renderApp } from "../test/render";
-import { NewEncodePage } from "./NewEncodePage";
+import { NewEncodePage, visibleSourceEntries } from "./NewEncodePage";
 
 vi.mock("../api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api/client")>();
@@ -152,6 +152,48 @@ describe("NewEncodePage", () => {
     expect(screen.getByText(`/storage/${name}`)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Tovább" }));
     expect(screen.getByPlaceholderText("Például: A film címe (2024)")).toHaveValue(name.slice(0, -4));
+  });
+
+  it("hides MKV files on request, keeps discs and folders, and remembers the choice", async () => {
+    vi.mocked(api.sources).mockResolvedValue({
+      roots: ["/storage"],
+      path: "/storage",
+      entries: [
+        { name: "Extras", path: "/storage/Extras", is_bluray: false, kind: "folder" },
+        { name: "MOVIE_DISC", path: "/storage/MOVIE_DISC", is_bluray: true, kind: "bluray" },
+        { name: "Some Remux.mkv", path: "/storage/Some Remux.mkv", is_bluray: false, kind: "mkv" },
+      ],
+    });
+    const { unmount } = renderApp(<NewEncodePage />, "/new");
+    const toggle = await screen.findByRole("checkbox", { name: "Csak teljes lemezek" });
+    expect(toggle).not.toBeChecked();
+    expect(await screen.findByRole("button", { name: "Some Remux.mkv kiválasztása" })).toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(screen.queryByRole("button", { name: "Some Remux.mkv kiválasztása" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "MOVIE_DISC kiválasztása" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Extras megnyitása" })).toBeInTheDocument();
+
+    unmount();
+    renderApp(<NewEncodePage />, "/new");
+    expect(await screen.findByRole("checkbox", { name: "Csak teljes lemezek" })).toBeChecked();
+    expect(await screen.findByRole("button", { name: "MOVIE_DISC kiválasztása" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Some Remux.mkv kiválasztása" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Csak teljes lemezek" }));
+    expect(screen.getByRole("button", { name: "Some Remux.mkv kiválasztása" })).toBeInTheDocument();
+  });
+
+  it("filters source entries by kind and name together", () => {
+    const entries = [
+      { name: "Alpha", path: "/s/Alpha", is_bluray: false, kind: "folder" as const },
+      { name: "Alpha Disc", path: "/s/Alpha Disc", is_bluray: true, kind: "bluray" as const },
+      { name: "Alpha.mkv", path: "/s/Alpha.mkv", is_bluray: false, kind: "mkv" as const },
+      { name: "Legacy", path: "/s/Legacy", is_bluray: true },
+    ];
+    expect(visibleSourceEntries(entries, "", false)).toHaveLength(4);
+    expect(visibleSourceEntries(entries, "", true).map((entry) => entry.name)).toEqual(["Alpha", "Alpha Disc", "Legacy"]);
+    expect(visibleSourceEntries(entries, "alpha", true).map((entry) => entry.name)).toEqual(["Alpha", "Alpha Disc"]);
   });
 
   it("shows the wizard in English", async () => {
