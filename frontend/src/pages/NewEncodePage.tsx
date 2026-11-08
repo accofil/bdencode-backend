@@ -103,6 +103,28 @@ export function sourceEntryKind(entry: SourceEntry): "bluray" | "mkv" | "folder"
   return entry.kind ?? (entry.is_bluray ? "bluray" : "folder");
 }
 
+const DISCS_ONLY_KEY = "bdencode:source-discs-only";
+
+/**
+ * "Only full discs": MKV files are hidden. Plain folders stay, since they are
+ * the only way to reach a disc that lies deeper in the tree.
+ */
+export function visibleSourceEntries(entries: SourceEntry[], nameFilter: string, discsOnly: boolean): SourceEntry[] {
+  const needle = nameFilter.trim().toLocaleLowerCase("hu");
+  return entries.filter((entry) => {
+    if (discsOnly && sourceEntryKind(entry) === "mkv") return false;
+    return !needle || entry.name.toLocaleLowerCase("hu").includes(needle);
+  });
+}
+
+function loadDiscsOnly(): boolean {
+  try {
+    return localStorage.getItem(DISCS_ONLY_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 function loadDraft(): Draft {
   try {
     const stored = localStorage.getItem("bdencode:new-job-draft");
@@ -144,6 +166,7 @@ export function NewEncodePage() {
   const [step, setStep] = useState(1);
   const [browsePath, setBrowsePath] = useState<string | undefined>();
   const [folderFilter, setFolderFilter] = useState("");
+  const [discsOnly, setDiscsOnly] = useState(loadDiscsOnly);
   const [draft, setDraft] = useState<Draft>(loadDraft);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -188,11 +211,18 @@ export function NewEncodePage() {
     },
   });
 
-  const entries = useMemo(() => {
-    const needle = folderFilter.trim().toLocaleLowerCase("hu");
-    const values = sources.data?.entries ?? [];
-    return needle ? values.filter((entry) => entry.name.toLocaleLowerCase("hu").includes(needle)) : values;
-  }, [folderFilter, sources.data]);
+  const entries = useMemo(
+    () => visibleSourceEntries(sources.data?.entries ?? [], folderFilter, discsOnly),
+    [discsOnly, folderFilter, sources.data],
+  );
+  const changeDiscsOnly = (value: boolean) => {
+    setDiscsOnly(value);
+    try {
+      localStorage.setItem(DISCS_ONLY_KEY, value ? "1" : "0");
+    } catch {
+      // A szűrő ettől még működik, csak nem marad meg újratöltés után.
+    }
+  };
 
   const roots = sources.data?.roots ?? [];
   // The root holding the current folder (the longest match, so that
@@ -322,6 +352,10 @@ export function NewEncodePage() {
                 </button>
               ))}
             </nav>
+            <label className="source-discs-only" title={t("Az MKV-fájlokat elrejti. A mappák megmaradnak, hogy beljebb lehessen lépni.", "Hides MKV files. Folders stay, so you can still open them.")}>
+              <input type="checkbox" checked={discsOnly} onChange={(event) => changeDiscsOnly(event.target.checked)} />
+              <span>{t("Csak teljes lemezek", "Only full discs")}</span>
+            </label>
             <label className="search-field search-field--small">
               <Search size={16} aria-hidden="true" /><input aria-label={t("Mappa keresése", "Search folders")} value={folderFilter} onChange={(event) => setFolderFilter(event.target.value)} placeholder={t("Mappa vagy MKV keresése…", "Search folders or MKV files…")} />
             </label>
@@ -349,7 +383,7 @@ export function NewEncodePage() {
                   </div>
                 );
               })}
-              {!entries.length && <div className="folder-empty"><FolderOpen size={25} /><span>{t("Ebben a mappában nincs további könyvtár vagy MKV-fájl.", "This folder has no further subfolders or MKV files.")}</span></div>}
+              {!entries.length && <div className="folder-empty"><FolderOpen size={25} /><span>{discsOnly ? t("Ebben a mappában nincs teljes lemez vagy további könyvtár. Kapcsold ki a „Csak teljes lemezek” szűrőt az MKV-fájlok megjelenítéséhez.", "This folder has no full disc or further subfolder. Turn off “Only full discs” to show MKV files.") : t("Ebben a mappában nincs további könyvtár vagy MKV-fájl.", "This folder has no further subfolders or MKV files.")}</span></div>}
             </div>
           )}
 

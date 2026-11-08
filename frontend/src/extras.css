@@ -10,6 +10,9 @@
 .check-row { display: flex; align-items: flex-start; gap: 10px; margin-top: 12px; color: var(--text-soft); font-size: 12px; cursor: pointer; }
 .check-row input { margin-top: 3px; accent-color: var(--accent); }
 
+.source-discs-only { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; color: var(--text-soft); font-size: 12px; white-space: nowrap; cursor: pointer; }
+.source-discs-only input { accent-color: var(--accent); }
+
 .table-scroll { overflow-x: auto; margin-top: 12px; }
 
 /* -- Pixel inspector -------------------------------------------------------- */
