@@ -196,7 +196,12 @@ def test_planner_reads_an_mkv_source_file_directly(context) -> None:
     args = EncodePlanner._input_args(scan, scan.playlists[0], 1)
     assert args == ("-i", os.fspath(scan.source))
     disc = replace(scan, source=scan.source.parent, source_kind="disc")
-    assert EncodePlanner._input_args(disc, scan.playlists[0], 1)[:2] == ("-playlist", "1")
+    disc_args = EncodePlanner._input_args(disc, scan.playlists[0], 1)
+    playlist = disc_args.index("-playlist")
+    assert disc_args[playlist : playlist + 2] == ("-playlist", "1")
+    # A disc title gets the longer probe (a silent opening clip); a remux MKV is one file and does not.
+    assert disc_args.index("-analyzeduration") < disc_args.index("-i")
+    assert "-analyzeduration" not in args
 
 
 def test_text_subtitle_flag_is_only_for_subtitles() -> None:
