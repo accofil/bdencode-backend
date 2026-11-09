@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from bdencode.audio import audio_decode_input_args, audio_encode_args
+from bdencode.media.bluray import bluray_analyze_args
 from bdencode.media.profiles import EncoderSettings
 
 
@@ -59,6 +60,7 @@ def reference_remux_command(
         "-nostdin",
         "-v",
         "info",
+        *bluray_analyze_args(),
         "-playlist",
         str(int(plan.playlist_id)),
         "-angle",

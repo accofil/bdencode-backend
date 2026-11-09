@@ -17,6 +17,7 @@ from bdencode.encode import (
     reference_remux_command,
     subtitle_track_command,
 )
+from bdencode.media.bluray import BLURAY_ANALYZE_DURATION_MICROSECONDS
 from bdencode.media.profiles import VideoEncoder, recommended_profile
 from bdencode.mux import (
     CommonTimelinePlan,
@@ -50,6 +51,20 @@ def test_reference_remux_uses_libbluray_without_shell() -> None:
     assert command[command.index("-playlist") + 1] == "800"
     assert "bluray:/storage/disc" in command
     assert "-c" in command and "copy" in command
+
+
+def test_reference_remux_probes_long_enough_for_a_silent_opening_clip() -> None:
+    # Taffin 1988: the playlist opens with an 11 s clip without audio, so the
+    # DTS parameters arrived after FFmpeg's default window and the Matroska
+    # header was refused ("sample rate not set").  20 s was measured to work.
+    plan = ReferenceRemuxPlan(Path("/storage/disc"), "4", Path("reference.mkv"))
+    command = reference_remux_command(plan)
+
+    assert BLURAY_ANALYZE_DURATION_MICROSECONDS >= 6 * 20_000_000
+    probe = command.index("-analyzeduration")
+    assert command[probe + 1] == str(BLURAY_ANALYZE_DURATION_MICROSECONDS)
+    # An input option only applies to the input that follows it.
+    assert probe < command.index("-i")
 
 
 def test_reference_remux_converts_only_bluray_pcm_for_matroska() -> None:

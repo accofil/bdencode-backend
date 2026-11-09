@@ -151,6 +151,9 @@ def test_bd_plan_uses_x264_flac_pgs_and_shell_free_argv(tmp_path: Path) -> None:
     assert ("-playlist", "800") == video[
         video.index("-playlist") : video.index("-playlist") + 2
     ]
+    # The title is opened as a whole, so the probe must outlast an opening clip
+    # without audio (see BLURAY_ANALYZE_DURATION_MICROSECONDS).
+    assert video.index("-analyzeduration") < video.index("-i")
     assert "libx264" in video
     assert video[video.index("-level:v") + 1] == "4.1"
     x264_params = video[video.index("-x264-params") + 1]
