@@ -306,6 +306,24 @@ class DiscScan:
         return result
 
 
+# FFmpeg decides how long to probe a ``bluray:`` input in playback time, not
+# only in bytes.  A playlist can open with a clip that carries no audio (a
+# logo or warning of about 11 s on Taffin 1988): the audio parameters then
+# arrive after the default window has closed, FFmpeg sees a DTS stream with 0
+# channels and 0 Hz, and the Matroska muxer refuses the header.  Measured on
+# that disc: 10 s still fails, 20 s works, and ``-probesize`` alone does not
+# help.  120 s leaves a six-fold margin.  FFmpeg stops probing as soon as every
+# stream is known, so the larger window costs nothing on a normal disc
+# (0.13 s against 0.19 s on Taffin 1988).
+BLURAY_ANALYZE_DURATION_MICROSECONDS = 120_000_000
+
+
+def bluray_analyze_args() -> tuple[str, ...]:
+    """Input option of a ``bluray:`` playlist opened as a whole title."""
+
+    return ("-analyzeduration", str(BLURAY_ANALYZE_DURATION_MICROSECONDS))
+
+
 # The libbluray playlist helper reads every playlist of the disc; on a slow
 # HDD that can take several minutes.  It is tried twice before the scan falls
 # back to ffprobe's estimated durations.

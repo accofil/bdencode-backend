@@ -23,6 +23,7 @@ from .bluray import (
     StreamKind,
     TrackRole,
     VideoCodec,
+    bluray_analyze_args,
 )
 from .language import iso639_2_to_bcp47, normalize_iso639_2
 from .profiles import (
@@ -845,6 +846,7 @@ class EncodePlanner:
             # A Matroska remux is one title: the file itself is read.
             return ("-i", os.fspath(scan.source))
         return (
+            *bluray_analyze_args(),
             "-playlist",
             str(int(playlist.playlist_id)),
             "-angle",
