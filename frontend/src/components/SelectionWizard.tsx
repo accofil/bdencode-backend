@@ -86,6 +86,7 @@ import { FieldHelpButton } from "./EncoderHelp";
 import { languageLabel } from "./ReviewPanels";
 import { ProfileLibraryPanel } from "./ProfileLibraryPanel";
 import { QualityOptions } from "./QualityOptions";
+import { ReloadNotice, reloadOrigin } from "./ReloadNotice";
 import { Badge, Button, Card, Notice, ProgressBar } from "./ui";
 
 const GROUP_LABELS: Record<string, LocalText> = {
@@ -370,7 +371,9 @@ export function SelectionWizard({
 }) {
   const hostOrder = useImageHostOrder();
   const providerLabels = imageUploadProviderLabels(hostOrder);
-  const initial = normalizeStoredSelection(job.selection);
+  // A job loaded again with the earlier settings starts from that job's
+  // approved selection (the same source scans to the same playlists).
+  const initial = normalizeStoredSelection(job.selection ?? reloadOrigin(job)?.selection);
   const initialPlaylist = initial?.playlistId
     ? scan.playlists.find((item) => item.playlist_id === initial.playlistId)
     : undefined;
@@ -762,6 +765,7 @@ export function SelectionWizard({
 
   return (
     <div className="selection-wizard">
+      <ReloadNotice job={job} />
       <div className="selection-wizard__header">
         <div>
           <span className="eyebrow">{t("Scan elkészült", "Scan complete")}</span>

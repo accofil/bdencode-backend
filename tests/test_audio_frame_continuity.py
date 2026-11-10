@@ -321,3 +321,30 @@ def test_join_evidence_is_manifest_serializable() -> None:
     assert value["excused_join_discontinuities"] == 2
     assert value["join_slack_seconds"] == "0.02"
     assert value["passed"] is True
+
+
+def test_a_join_is_found_where_the_audio_starts_later_than_the_title() -> None:
+    """Taffin 1988: the audio starts 11 s into the title (a silent opening
+    clip), so the join at 14.2 s of the title is 3.2 s into the audio."""
+
+    source = parse_audio_frame_continuity(
+        _frame_document(_clip_track(jump_seconds="-0.012"))
+    )
+    title_join = (Decimal("14.2"),)
+
+    # Measured from the audio's first frame the join looks 11 s away.
+    assert not compare_audio_frame_continuity(
+        source, source, _eac3_policy(), join_seconds=title_join
+    ).passed
+
+    verdict = compare_audio_frame_continuity(
+        source,
+        source,
+        _eac3_policy(),
+        join_seconds=title_join,
+        source_title_offset_seconds=Decimal("11.0"),
+        encoded_title_offset_seconds=Decimal("11.0"),
+    )
+
+    assert verdict.passed
+    assert verdict.excused_join_discontinuities == 2

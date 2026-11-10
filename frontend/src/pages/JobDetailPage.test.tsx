@@ -24,6 +24,7 @@ vi.mock("../api/client", async (importOriginal) => {
       requestCancelJob: vi.fn(),
       retryJob: vi.fn(),
       restartJob: vi.fn(),
+      reloadJob: vi.fn(),
       purgeJob: vi.fn(),
       jobStorage: vi.fn(),
       jobLive: vi.fn(),
@@ -507,6 +508,21 @@ describe("JobDetailPage player and statistics", () => {
       "/jobs/job-1",
     );
   }
+
+  it("loads a finished job again as a new job, cleanly or with its settings", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.reloadJob).mockResolvedValue(makeJob({ id: "job-2", state: "QUEUED" }));
+    renderJob({ ...completed, selection: { playlist_id: "00001", tracks: [] } });
+
+    await user.click(await screen.findByText("Műveletek"));
+    await user.click(screen.getByRole("button", { name: /Újrakezdés új munkaként/ }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/A kész munka és a kiadása változatlan marad/)).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: /Tiszta lappal/ })).toBeEnabled();
+    await user.click(within(dialog).getByRole("button", { name: /Ugyanazokkal a beállításokkal/ }));
+
+    await waitFor(() => expect(api.reloadJob).toHaveBeenCalledWith("job-1", completed.version, "same"));
+  });
 
   it("offers the player tab and a statistics card for a completed job", async () => {
     const user = userEvent.setup();

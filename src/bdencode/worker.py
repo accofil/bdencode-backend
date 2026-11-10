@@ -6955,6 +6955,26 @@ class PipelineWorker:
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             raise ReviewRequired(f"{label} first packet time is missing or invalid") from exc
 
+    def _audio_first_packet(
+        self, paths: JobPaths, media_path: Path, ordinal: int, *, side: str
+    ) -> Decimal:
+        """Where an audio stream of a multi-stream MKV really starts.
+
+        Audio frames are not reordered, so the first packet is the earliest
+        presentation time.  A selected audio stream without packets cannot
+        be timed and stops the job.
+        """
+
+        first = self._probe_first_packet(
+            paths, media_path, f"a:{ordinal}", label=f"{side}-audio-{ordinal:02d}"
+        )
+        if first is None:
+            raise ReviewRequired(
+                f"{side} audio stream {ordinal} has no packets to time",
+                details={"audio_ordinal": ordinal},
+            )
+        return first
+
     def _mux(self, job: Job, paths: JobPaths) -> None:
         self._restore_base_mux(paths)
         scan, selection = self._load_prepared_scan_and_selection(job, paths)
@@ -7103,17 +7123,26 @@ class PipelineWorker:
             raise ReviewRequired(
                 "reference video start time is missing or ambiguous"
             ) from exc
-        # Audio is planned from stream start times (codec priming and
-        # container rounding live there).  Subtitles are not: their ffprobe
-        # start_time is the container's start in the reference but the first
-        # event in a sidecar, and planning on that difference moved every
-        # subtitle so that its first event began at 0:00 (3.11.2 and older).
+        # Audio is planned from where its first packet sits in the reference,
+        # and the sidecar side from the sidecar's own start time (codec
+        # priming and container rounding live there).  ffprobe's start_time of
+        # a stream in a multi-stream MKV is only right when the stream's first
+        # packet falls inside the probe window; otherwise it is the
+        # container's start.  Taffin 1988 opens with an 11 s clip without
+        # audio: the reference said 0.042 s for an audio stream whose first
+        # packet is at 11.053 s, and the plan moved the sound 11 s early
+        # (4.0.3 and older).  Subtitles are planned on their first packets
+        # below for the same reason (3.11.2 and older began them at 0:00).
         retained_reference_starts: list[Decimal] = []
         for _number, _item, stream, _output in extracted_audio:
             key = ("audio", audio_ordinals[stream.id])
             if key not in reference_starts_by_type:
                 raise ReviewRequired(f"reference start time is missing for {stream.id}")
-            retained_reference_starts.append(reference_starts_by_type[key])
+            retained_reference_starts.append(
+                self._audio_first_packet(
+                    paths, paths.reference, audio_ordinals[stream.id], side="reference"
+                )
+            )
         encoded_starts = self._probe_stream_starts(
             paths, paths.encoded_video, label="encoded-video"
         )
@@ -8248,20 +8277,28 @@ class PipelineWorker:
             )
             # A subtitle's start_time in a multi-stream MKV is the container's
             # start, not its first event: subtitles are checked at their first
-            # packet by the track QC instead (absolute_shift_ms).
+            # packet by the track QC instead (absolute_shift_ms).  An audio
+            # stream's start_time has the same flaw when its first packet lies
+            # past the probe window, so audio is checked at its first packet.
             timed_count = 1 + len(audio_policies)
+            timed_streams: list[Any] = []
+            audio_ordinal = 0
+            for stream in ffprobe_document.get("streams") or []:
+                if isinstance(stream, Mapping) and stream.get("codec_type") == "subtitle":
+                    continue
+                if isinstance(stream, Mapping) and stream.get("codec_type") == "audio":
+                    stream = {
+                        **stream,
+                        "start_time": str(
+                            self._audio_first_packet(
+                                paths, output, audio_ordinal, side="final"
+                            )
+                        ),
+                    }
+                    audio_ordinal += 1
+                timed_streams.append(stream)
             start_errors = validate_stream_start_times(
-                {
-                    **ffprobe_document,
-                    "streams": [
-                        stream
-                        for stream in ffprobe_document.get("streams") or []
-                        if not (
-                            isinstance(stream, Mapping)
-                            and stream.get("codec_type") == "subtitle"
-                        )
-                    ],
-                },
+                {**ffprobe_document, "streams": timed_streams},
                 expected_start_times=timeline_expected_starts[:timed_count],
             )
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -8462,6 +8499,29 @@ class PipelineWorker:
         audio_join_seconds = tuple(
             Decimal(str(moment)) for moment in _playlist_join_seconds(playlist)
         )
+        # The joins count from the title's first picture.  A discontinuity is
+        # placed on that timeline by where its file's video starts: the
+        # reference (and the sidecars, which keep its timestamps) and the
+        # final MKV each have their own.
+        try:
+            reference_title_start = parse_stream_start_times_by_type(
+                json.loads(
+                    (paths.analysis / "reference-stream-starts.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+            )[("video", 0)]
+            final_title_start = Decimal(
+                str(
+                    json.loads(paths.timeline_json.read_text(encoding="utf-8"))[
+                        "expected_start_seconds"
+                    ][0]
+                )
+            )
+        except (OSError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ReviewRequired(
+                "the video start of the reference or the final MKV is unknown"
+            ) from exc
         audio_inputs: dict[str, Any] = {
             "manifest_schema_version": 4,
             "audio_decode_policy_schema_version": AUDIO_DECODE_POLICY_SCHEMA_VERSION,
@@ -8691,17 +8751,28 @@ class PipelineWorker:
                     raise ReviewRequired(
                         f"decoded audio frame evidence is incomplete for {stream.id}"
                     ) from exc
+                source_offset = (
+                    source_frame_value.first_pts_seconds - reference_title_start
+                )
                 sidecar_continuity = compare_audio_frame_continuity(
                     source_frame_value,
                     sidecar_frame_value,
                     audio_policy,
                     join_seconds=audio_join_seconds,
+                    source_title_offset_seconds=source_offset,
+                    encoded_title_offset_seconds=(
+                        sidecar_frame_value.first_pts_seconds - reference_title_start
+                    ),
                 )
                 final_continuity = compare_audio_frame_continuity(
                     source_frame_value,
                     final_frame_value,
                     audio_policy,
                     join_seconds=audio_join_seconds,
+                    source_title_offset_seconds=source_offset,
+                    encoded_title_offset_seconds=(
+                        final_frame_value.first_pts_seconds - final_title_start
+                    ),
                 )
                 if not sidecar_continuity.passed or not final_continuity.passed:
                     raise ReviewRequired(

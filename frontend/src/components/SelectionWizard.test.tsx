@@ -916,4 +916,42 @@ describe("SelectionWizard", () => {
     await user.click(screen.getByRole("button", { name: "Tovább" }));
     expect(await screen.findByLabelText("Cél VMAF")).toHaveValue(92);
   });
+
+  it("starts a job loaded again with the same settings from the earlier selection, and notes it", async () => {
+    const user = userEvent.setup();
+    const job = makeJob({
+      state: "AWAITING_SELECTION",
+      selection: null,
+      settings: {
+        reload: {
+          from_job_id: "old-job",
+          from_name: "Mintafilm",
+          mode: "same",
+          selection: {
+            schema_version: 2,
+            playlist_id: "00001",
+            angle: 1,
+            video: {
+              detail_level: "beginner",
+              temporal_filter: "progressive",
+              crop: { left: 0, top: 0, right: 0, bottom: 0 },
+              settings: { crf: 17 },
+              auto_crf: { enabled: true, target_vmaf: 93 },
+            },
+            tracks: [],
+            output_name: "Mintafilm.1080p.BluRay.x264",
+            upload_images: false,
+          },
+          suggestions: [],
+          evaluation: null,
+        },
+      },
+    });
+    renderApp(<SelectionWizard job={job} scan={makeScan()} onComplete={vi.fn()} />);
+
+    expect(screen.getByText("Újrakezdés a korábbi beállításokkal")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Tovább" }));
+    await user.click(screen.getByRole("button", { name: "Tovább" }));
+    expect(await screen.findByLabelText("Cél VMAF")).toHaveValue(93);
+  });
 });

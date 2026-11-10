@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -288,7 +290,7 @@ def test_health_capabilities_and_job_flow(tmp_path):
     with make_client(tmp_path) as client:
         capabilities = client.get("/api/v1/capabilities")
         assert capabilities.status_code == 200
-        assert capabilities.json()["backend_version"] == "4.0.3"
+        assert capabilities.json()["backend_version"] == "4.1.0"
         assert capabilities.json()["constraints"]["max_active_jobs"] == 1
         assert capabilities.json()["output_video_codecs"] == ["x264", "x265"]
         assert capabilities.json()["audio_actions"] == [
@@ -940,3 +942,84 @@ def test_a_host_without_eac3to_cannot_validate_a_remux(tmp_path, monkeypatch):
 
         assert response.status_code in {400, 409, 422}
         assert "remux_unavailable" in response.text
+
+
+def _completed_job_with_selection(database: Database, client: TestClient) -> dict:
+    job = awaiting_selection_job(client)
+    database.set_selection(job["id"], {"playlist_id": "00001", "tracks": []})
+    with database._write() as connection:
+        connection.execute(
+            "UPDATE jobs SET state = 'COMPLETED', settings_json = ? WHERE id = ?",
+            (json.dumps({"purpose": "encode", "detail_level": "advanced"}), job["id"]),
+        )
+    return client.get(f"/api/v1/jobs/{job['id']}").json()
+
+
+def test_a_finished_job_loads_again_as_a_new_job_with_its_settings(tmp_path):
+    database = Database(tmp_path / "reload.sqlite3")
+    with TestClient(create_app(database)) as client:
+        finished = _completed_job_with_selection(database, client)
+
+        response = client.post(
+            f"/api/v1/jobs/{finished['id']}/reload",
+            json={"mode": "same", "expected_version": finished["version"]},
+        )
+        unchanged = client.get(f"/api/v1/jobs/{finished['id']}").json()
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["id"] != finished["id"]
+    assert body["state"] == "QUEUED"
+    assert body["source_path"] == finished["source_path"]
+    assert body["name"] == finished["name"]
+    assert body["selection"] is None
+    assert body["settings"]["detail_level"] == "advanced"
+    reload = body["settings"]["reload"]
+    assert reload["mode"] == "same"
+    assert reload["from_job_id"] == finished["id"]
+    assert reload["selection"]["playlist_id"] == "00001"
+    # No measurements to evaluate here: no suggestion, and none applied.
+    assert reload["suggestions"] == []
+    assert reload["evaluation"] is None
+    assert unchanged["state"] == "COMPLETED"
+    assert unchanged["version"] == finished["version"]
+
+
+def test_a_clean_reload_keeps_only_what_identifies_the_job(tmp_path):
+    database = Database(tmp_path / "reload-clean.sqlite3")
+    with TestClient(create_app(database)) as client:
+        finished = _completed_job_with_selection(database, client)
+
+        response = client.post(
+            f"/api/v1/jobs/{finished['id']}/reload", json={"mode": "clean"}
+        )
+
+    assert response.status_code == 201
+    settings = response.json()["settings"]
+    assert settings == {
+        "purpose": "encode",
+        "reload": {
+            "from_job_id": finished["id"],
+            "from_name": finished["name"],
+            "mode": "clean",
+        },
+    }
+
+
+def test_only_a_finished_job_can_be_loaded_again(tmp_path):
+    database = Database(tmp_path / "reload-state.sqlite3")
+    with TestClient(create_app(database)) as client:
+        job = awaiting_selection_job(client)
+        refused = client.post(f"/api/v1/jobs/{job['id']}/reload", json={"mode": "same"})
+        finished = _completed_job_with_selection(database, client)
+        stale = client.post(
+            f"/api/v1/jobs/{finished['id']}/reload",
+            json={"mode": "same", "expected_version": finished["version"] + 1},
+        )
+        unknown_mode = client.post(
+            f"/api/v1/jobs/{finished['id']}/reload", json={"mode": "tweak"}
+        )
+
+    assert refused.status_code == 409
+    assert stale.status_code == 409
+    assert unknown_mode.status_code == 422

@@ -702,6 +702,26 @@ class FakeRunner:
             path.write_bytes(data)
 
     @staticmethod
+    def _reported_audio_start(report_path: Path, media_name: str, ordinal: int) -> str:
+        """The start_time an earlier stream report gave this file's audio."""
+
+        analysis = report_path.parent
+        candidates = (
+            [analysis / "reference-stream-starts.json"]
+            if media_name == "reference.mkv"
+            else [analysis / "container" / "ffprobe-streams.json"]
+        )
+        for candidate in candidates:
+            try:
+                streams = json.loads(candidate.read_text(encoding="utf-8")).get("streams") or []
+            except (OSError, ValueError):
+                continue
+            audio = [item for item in streams if item.get("codec_type") == "audio"]
+            if ordinal < len(audio) and audio[ordinal].get("start_time") not in (None, "N/A"):
+                return str(audio[ordinal]["start_time"])
+        return "0.000000"
+
+    @staticmethod
     def sync_samples(delay_samples: int = 0) -> bytes:
         """Two seconds of reproducible noise at 48 kHz, optionally delayed."""
 
@@ -867,12 +887,19 @@ class FakeRunner:
                 and "-read_intervals" in command
             ):
                 # First-packet probe of a subtitle: the same absolute time in
-                # the reference and in its stream-copied sidecar.
+                # the reference and in its stream-copied sidecar.  An audio
+                # stream's first packet is where the file's own stream report
+                # put it, as on a real file whose audio starts inside the
+                # probe window.
+                spec = command[command.index("-select_streams") + 1]
+                pts = "12.000000"
+                if spec.startswith("a:"):
+                    pts = self._reported_audio_start(
+                        stdout_path, Path(command[-1]).name, int(spec[2:])
+                    )
                 self._write(
                     stdout_path,
-                    json.dumps(
-                        {"packets": [{"pts_time": "12.000000", "dts_time": "12.000000"}]}
-                    ),
+                    json.dumps({"packets": [{"pts_time": pts, "dts_time": pts}]}),
                 )
             elif command[0] == "ffprobe" and "packet=size" in command:
                 media_path = Path(command[-1])
@@ -3526,6 +3553,83 @@ def test_an_audio_track_out_of_sync_with_the_source_stops_the_job(context):
     assert av["tracks"][0]["status"] == "out_of_sync"
     assert Decimal(av["tracks"][0]["lag_ms"]) == 10
     assert not list((paths.work / "av-sync").glob("*.f32"))
+
+
+def test_audio_that_starts_after_a_silent_opening_clip_keeps_its_place(context):
+    """Taffin 1988: an 11 s clip without audio opens the playlist.
+
+    In the reference MKV ffprobe's start_time of the audio is the container's
+    start (0.040), because its first packet (11.053) lies past the probe
+    window.  Planning on start_time moved the sound 11 s early (4.0.3).
+    """
+
+    database, settings, scan, scanner, runner, worker = context
+    audio = MediaStream(
+        id="audio:4352",
+        index=1,
+        pid=4352,
+        kind=StreamKind.AUDIO,
+        codec="ac3",
+        channels=2,
+        channel_layout="stereo",
+        sample_rate=48000,
+    )
+    scanner.result = replace(
+        scan,
+        playlists=(
+            replace(scan.playlists[0], streams=(*scan.playlists[0].streams, audio)),
+        ),
+    )
+    real_run = runner.run
+
+    def run_with_late_audio(argv, **kwargs):
+        command = tuple(os.fspath(item) for item in argv)
+        real_run(argv, **kwargs)
+        stdout_path = kwargs.get("stdout_path")
+        if stdout_path is None or command[0] != "ffprobe":
+            return
+        media_name = Path(command[-1]).name
+        if "stream=index,codec_type,start_time" in command:
+            if media_name == "reference.mkv":
+                streams = [
+                    {"index": 0, "codec_type": "video", "start_time": "0.040000"},
+                    {"index": 1, "codec_type": "audio", "start_time": "0.040000"},
+                ]
+            elif media_name == "video-encoded.mkv":
+                streams = [{"index": 0, "codec_type": "video", "start_time": "0.000000"}]
+            else:
+                streams = [{"index": 0, "codec_type": "audio", "start_time": "11.053000"}]
+            runner._write(stdout_path, json.dumps({"streams": streams}))
+        elif "packet=pts_time,dts_time" in command and "-read_intervals" in command:
+            spec = command[command.index("-select_streams") + 1]
+            if spec == "a:0":
+                pts = "11.053000" if media_name == "reference.mkv" else "11.013000"
+                runner._write(
+                    stdout_path,
+                    json.dumps({"packets": [{"pts_time": pts, "dts_time": pts}]}),
+                )
+
+    runner.run = run_with_late_audio
+    job = _enqueue(database, scan.source)
+    claimed = JobQueue(database).claim_next()
+    assert claimed is not None
+    worker.process_one_stage(claimed)
+    ready = database.set_selection(
+        job.id,
+        _selection(
+            tracks=[{"stream_id": "audio:4352", "action": "copy", "language": "eng"}]
+        ),
+    )
+    paths = JobPaths.create(settings, job.id)
+
+    worker.process_job(ready)
+
+    plan = json.loads(paths.timeline_json.read_text(encoding="utf-8"))
+    assert plan["origin_seconds"] == "0.040000"
+    # The sound starts 11.013 s after the first picture, as on the disc: its
+    # sidecar (11.053) is only rebased by the 40 ms of the common zero.
+    assert Decimal(plan["expected_start_seconds"][1]) == Decimal("11.013")
+    assert Decimal(plan["track_sync_offsets_ms"][0]) == -40
 
 
 def test_audio_spectrum_pngs_are_registered_as_spectrogram_artifacts(context):

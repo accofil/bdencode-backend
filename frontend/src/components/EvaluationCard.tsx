@@ -13,7 +13,7 @@ const VERDICTS: Record<JobEvaluation["verdict"], { tone: "success" | "info" | "w
   weak: { tone: "danger", hu: "Gyenge", en: "Weak" },
 };
 
-const FIELD_LABELS: Record<string, [string, string]> = {
+export const FIELD_LABELS: Record<string, [string, string]> = {
   crf: ["CRF", "CRF"],
   aq_strength: ["AQ-erősség", "AQ strength"],
   aq_mode: ["AQ-mód", "AQ mode"],

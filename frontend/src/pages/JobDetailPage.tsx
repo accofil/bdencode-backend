@@ -183,6 +183,7 @@ export function JobDetailPage() {
   const [cancelOpen, setCancelOpen] = useState(false);
   const [retryOpen, setRetryOpen] = useState(false);
   const [restartOpen, setRestartOpen] = useState(false);
+  const [reloadOpen, setReloadOpen] = useState(false);
   const [purgeOpen, setPurgeOpen] = useState(false);
   const [cleanupOpen, setCleanupOpen] = useState(false);
   const [releaseDeleteTarget, setReleaseDeleteTarget] = useState<CompletedReleaseDeleteSnapshot | null>(null);
@@ -288,6 +289,15 @@ export function JobDetailPage() {
         replace: true,
         state: { retryStarted: true } satisfies JobDetailLocationState,
       });
+    },
+  });
+  const reloadJob = useMutation({
+    mutationFn: ({ expectedVersion, mode }: { expectedVersion: number; mode: "clean" | "same" }) =>
+      api.reloadJob(jobId, expectedVersion, mode),
+    onSuccess: (newJob) => {
+      setReloadOpen(false);
+      void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      navigate(`/jobs/${encodeURIComponent(newJob.id)}`, { state: { newlyCreated: true } });
     },
   });
   const purgeJob = useMutation({
@@ -418,6 +428,7 @@ export function JobDetailPage() {
                 <summary className="button button--secondary"><MoreHorizontal size={17} /><span>{t("Műveletek", "Actions")}</span></summary>
                 <div className="action-menu__popover" aria-label={t("Munka műveletei", "Job actions")}>
                   {retryableFailure && <button type="button" onClick={() => { operationMenuRef.current?.removeAttribute("open"); openRetryConfirmation(); }}><RotateCcw size={16} />{t("Folytatás a hibától", "Continue from the error")}</button>}
+                  {job.state === "COMPLETED" && <button type="button" onClick={() => { operationMenuRef.current?.removeAttribute("open"); reloadJob.reset(); setReloadOpen(true); }}><RotateCcw size={16} />{t("Újrakezdés új munkaként", "Start again as a new job")}</button>}
                   {allowedOperations.has("restart_cancelled") && <button type="button" onClick={() => { operationMenuRef.current?.removeAttribute("open"); restartJob.reset(); setRestartOpen(true); }}><RotateCcw size={16} />{t("Újraindítás", "Restart")}</button>}
                   {job.state === "UPLOAD_FAILED" && <button type="button" disabled={retryUpload.isPending} onClick={() => { operationMenuRef.current?.removeAttribute("open"); retryUpload.mutate(); }}><RefreshCw size={16} />{t("Feltöltés újra", "Retry upload")}</button>}
                   {allowedOperations.has("prepare_release") && <button type="button" onClick={() => { operationMenuRef.current?.removeAttribute("open"); setTab("release"); }}><PackageCheck size={16} />{t("Release előkészítése", "Prepare release")}</button>}
@@ -567,6 +578,25 @@ export function JobDetailPage() {
           {t("Az újraindítás az érvényes szakasz-checkpointokat és a már elkészült munkafájlokat újrahasználja. A worker az első hiányzó vagy érvénytelen szakasztól folytatja, a hibás szakaszt pedig szükség szerint újrafuttatja.", "The restart reuses the valid stage checkpoints and the finished work files. The worker continues from the first missing or invalid stage and reruns the failed stage as needed.")}
         </Notice>
         {retryJob.isError && <Notice tone="danger" title={t("A folytatás nem indítható", "Cannot continue")}>{retryJob.error instanceof ApiError ? retryJob.error.detail : retryJob.error.message}</Notice>}
+      </Modal>
+
+      <Modal
+        open={reloadOpen}
+        title={t("Újrakezded a kész munkát?", "Start the finished job again?")}
+        busy={reloadJob.isPending}
+        onClose={() => { if (!reloadJob.isPending) setReloadOpen(false); }}
+        footer={<>
+          <Button variant="ghost" disabled={reloadJob.isPending} onClick={() => setReloadOpen(false)}>{t("Mégse", "Cancel")}</Button>
+          <Button variant="secondary" icon={<RotateCcw size={17} />} disabled={reloadJob.isPending} loading={reloadJob.isPending && reloadJob.variables?.mode === "clean"} onClick={() => reloadJob.mutate({ expectedVersion: job.version, mode: "clean" })}>{t("Tiszta lappal", "With a clean slate")}</Button>
+          <Button icon={<Settings2 size={17} />} disabled={reloadJob.isPending || !job.selection} loading={reloadJob.isPending && reloadJob.variables?.mode === "same"} onClick={() => reloadJob.mutate({ expectedVersion: job.version, mode: "same" })}>{t("Ugyanazokkal a beállításokkal", "With the same settings")}</Button>
+        </>}
+      >
+        <Notice tone="info" title={t("Új munka készül ugyanabból a forrásból", "A new job is made from the same source")}>
+          <p>{t("A kész munka és a kiadása változatlan marad. Az új munka scannel indul, utána a beállítóvarázsló nyílik meg; a kódolás csak a jóváhagyás után kezdődik.", "The finished job and its release stay unchanged. The new job starts with a scan, then the setup wizard opens; encoding starts only after approval.")}</p>
+          <p><strong>{t("Tiszta lappal:", "With a clean slate:")}</strong>{t(" a varázsló az alapbeállításokkal indul, csak a forrás, a név, a lemez- és tartalomtípus, valamint a munka célja marad.", " the wizard starts from its defaults; only the source, the name, the disc and content type and the job type are kept.")}</p>
+          <p><strong>{t("Ugyanazokkal a beállításokkal:", "With the same settings:")}</strong>{t(" a varázsló a korábbi jóváhagyott beállításokkal van kitöltve. A korábbi encode értékelésének javaslatai egy megjegyzésben látszanak, de egyik sincs alkalmazva: te döntöd el, mit változtatsz.", " the wizard is filled in with the earlier approved settings. The suggestions of the earlier encode's evaluation are shown in a note, but none is applied: you decide what to change.")}</p>
+        </Notice>
+        {reloadJob.isError && <Notice tone="danger" title={t("Az új munka nem hozható létre", "The new job cannot be created")}>{reloadJob.error instanceof ApiError ? reloadJob.error.detail : reloadJob.error.message}</Notice>}
       </Modal>
 
       <Modal

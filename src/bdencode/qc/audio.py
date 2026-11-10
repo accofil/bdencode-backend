@@ -68,8 +68,11 @@ _MAX_RECORDED_AUDIO_DISCONTINUITIES = 1024
 # A multi-clip Blu-ray playlist is played as one stream; at a clip join the
 # sound of the next clip may start a little before or after the previous one
 # ended.  A gap or overlap is a join artefact when it lies this close to a
-# join of the playlist (the join times are the video's, the audio cursor
-# starts at its own first frame) and is no longer than the second limit.
+# join of the playlist and is no longer than the second limit.  The join
+# times are the video's (the title's); a discontinuity's position counts from
+# the audio's own first frame, so it is moved onto the title by where that
+# first frame sits (``*_title_offset_seconds``): 11 s on a playlist that
+# opens with a clip without audio (Taffin 1988), about zero otherwise.
 AUDIO_JOIN_WINDOW_SECONDS = Decimal("1.0")
 AUDIO_MAXIMUM_JOIN_DISCONTINUITY_SECONDS = Decimal("0.5")
 
@@ -957,6 +960,7 @@ def _split_join_discontinuities(
     *,
     window_seconds: Decimal,
     maximum_seconds: Decimal,
+    title_offset_seconds: Decimal = Decimal(0),
 ) -> tuple[int, tuple[AudioDiscontinuity, ...]]:
     """Count the discontinuities a clip join does not explain.
 
@@ -968,7 +972,7 @@ def _split_join_discontinuities(
     excused: list[AudioDiscontinuity] = []
     for item in evidence.discontinuities:
         if abs(item.delta_samples) <= maximum_samples and any(
-            abs(item.position_seconds - join) <= window_seconds
+            abs(item.position_seconds + title_offset_seconds - join) <= window_seconds
             for join in join_seconds
         ):
             excused.append(item)
@@ -986,6 +990,8 @@ def compare_audio_frame_continuity(
     maximum_join_discontinuity_seconds: Decimal = (
         AUDIO_MAXIMUM_JOIN_DISCONTINUITY_SECONDS
     ),
+    source_title_offset_seconds: Decimal = Decimal(0),
+    encoded_title_offset_seconds: Decimal = Decimal(0),
 ) -> AudioFrameContinuityVerdict:
     """Compare normalized decoded sample counts and endpoints under policy.
 
@@ -995,6 +1001,10 @@ def compare_audio_frame_continuity(
     discontinuities, because an encoder may close a join gap instead of
     keeping it.  The decoded total sample count keeps its codec tolerance:
     lost or invented sound still fails.
+
+    ``source_title_offset_seconds`` and ``encoded_title_offset_seconds`` are
+    where each side's first audio frame sits on the title's timeline (its
+    first packet minus the video's start in the same file).
     """
 
     joins = tuple(sorted(set(join_seconds)))
@@ -1003,12 +1013,14 @@ def compare_audio_frame_continuity(
         joins,
         window_seconds=join_window_seconds,
         maximum_seconds=maximum_join_discontinuity_seconds,
+        title_offset_seconds=source_title_offset_seconds,
     )
     encoded_unexcused, encoded_excused = _split_join_discontinuities(
         encoded,
         joins,
         window_seconds=join_window_seconds,
         maximum_seconds=maximum_join_discontinuity_seconds,
+        title_offset_seconds=encoded_title_offset_seconds,
     )
     join_slack_seconds = sum(
         (
