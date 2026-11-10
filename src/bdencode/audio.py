@@ -185,6 +185,14 @@ def effective_audio_policy(
     normalized = normalize_audio_action(action)
     if normalized == "omit":
         raise ValueError("omit does not produce an audio stream")
+    # A scan that read a stream's header too briefly reports 0 Hz and 0
+    # channels (FFmpeg's "unspecified"; Taffin 1988, 4.1.0 and older).  Zero is
+    # not a value to keep: it means unknown, and the checks then take the
+    # rate and the channels measured on the reference itself.
+    if source_sample_rate is not None and source_sample_rate <= 0:
+        source_sample_rate = None
+    if source_channels is not None and source_channels <= 0:
+        source_channels = None
     if normalized == "copy":
         return EffectiveAudioPolicy(
             normalized,
