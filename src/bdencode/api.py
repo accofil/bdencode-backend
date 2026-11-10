@@ -95,6 +95,7 @@ from .models import (
     JobCreate,
     JobList,
     JobProgressRequest,
+    JobReloadRequest,
     JobRestartRequest,
     JobRetryRequest,
     JobSelectionRequest,
@@ -1697,6 +1698,82 @@ def create_app(
             message=restart.message,
             expected_version=restart.expected_version,
             reconfigure=restart.reconfigure,
+        )
+
+    @application.post(
+        f"{API_PREFIX}/jobs/{{job_id}}/reload",
+        response_model=Job,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def reload_completed_job(job_id: str, request: JobReloadRequest) -> Job:
+        """Load a finished job again as a new job of the same source.
+
+        The finished job and its release stay as they are.  ``clean`` keeps
+        only what identifies the job (source, name, disc and content type,
+        job type); ``same`` also keeps its settings and puts its approved
+        selection and the evaluation's suggestions under ``settings.reload``,
+        where the wizard starts from the selection and lists the suggestions
+        without applying them.
+        """
+
+        previous = db.get_job(job_id)
+        if previous.state is not JobState.COMPLETED:
+            raise StateConflictError(
+                "only COMPLETED jobs can be loaded again", current=previous.state
+            )
+        if (
+            request.expected_version is not None
+            and previous.version != request.expected_version
+        ):
+            raise StateConflictError(
+                f"job version is {previous.version}, expected {request.expected_version}",
+                current=previous.state,
+            )
+        origin: dict[str, Any] = {
+            "from_job_id": previous.id,
+            "from_name": previous.name,
+            "mode": request.mode,
+        }
+        if request.mode == "clean":
+            kept = {
+                key: previous.settings[key]
+                for key in ("purpose",)
+                if key in previous.settings
+            }
+        else:
+            kept = {
+                key: value for key, value in previous.settings.items() if key != "reload"
+            }
+            suggestions: list[Any] = []
+            evaluation: dict[str, Any] | None = None
+            try:
+                document = _evaluation_document(job_id, refresh=False, use_ai=False)
+            except (HTTPException, ConfigurationError, OSError, ValueError):
+                document = None
+            if document is not None:
+                raw = document.get("suggestions")
+                suggestions = list(raw) if isinstance(raw, list) else []
+                evaluation = {
+                    key: document.get(key)
+                    for key in ("source", "model", "verdict", "summary", "created_at")
+                }
+            origin.update(
+                {
+                    "selection": previous.selection,
+                    "suggestions": suggestions,
+                    "evaluation": evaluation,
+                }
+            )
+        kept["reload"] = origin
+        return create_job(
+            JobCreate(
+                source_path=previous.source_path,
+                name=previous.name,
+                disc_type=previous.disc_type,
+                content_type=previous.content_type,
+                priority=previous.priority,
+                settings=kept,
+            )
         )
 
     def configured_settings() -> Settings:

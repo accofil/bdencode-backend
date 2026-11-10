@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
@@ -287,6 +287,15 @@ class JobTransitionRequest(StrictModel):
 
 class JobRetryRequest(StrictModel):
     message: str | None = Field(default=None, max_length=4000)
+    expected_version: int | None = Field(default=None, ge=1)
+
+
+class JobReloadRequest(StrictModel):
+    # Load a finished job again as a new job of the same source.  "clean"
+    # starts the wizard from its defaults; "same" prefills it with the old
+    # job's approved selection and shows the evaluation's suggestions as a
+    # note, without applying any of them.
+    mode: Literal["clean", "same"]
     expected_version: int | None = Field(default=None, ge=1)
 
 

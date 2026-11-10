@@ -166,6 +166,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ expected_version: expectedVersion }),
     }),
+  reloadJob: (id: string, expectedVersion: number, mode: "clean" | "same") =>
+    apiFetch<Job>(`/jobs/${encodeURIComponent(id)}/reload`, {
+      method: "POST",
+      body: JSON.stringify({ expected_version: expectedVersion, mode }),
+    }),
   restartJob: (id: string, expectedVersion: number, reconfigure = false) =>
     apiFetch<Job>(`/jobs/${encodeURIComponent(id)}/restart`, {
       method: "POST",
