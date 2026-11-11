@@ -325,6 +325,45 @@ def test_audio_probe_accepts_matching_full_track_packet_tail() -> None:
     assert verification.passed is True
 
 
+def test_audio_probe_starts_at_the_first_packet_not_the_container_start() -> None:
+    """Taffin 1988: the audio's first packet is at 11.011 s, but ffprobe's
+    start_time of a stream whose first packet lies past the probe window is
+    the container's start (0); taking it read as an 11 s delay."""
+
+    document = _packet_audio_probe_document(Decimal("100"))
+    for packet in document["packets"]:  # type: ignore[union-attr]
+        packet["pts_time"] = str(Decimal(packet["pts_time"]) + Decimal("11.011"))
+
+    probe = parse_audio_probe(document)
+
+    assert probe.start_time == Decimal("11.011")
+    assert probe.duration == Decimal("100.000")
+
+
+def test_join_overlaps_widen_only_the_duration_tolerance() -> None:
+    """A 512-sample overlap at a clip join makes the source timeline 10.7 ms
+    longer than the end-to-end encode (Taffin 1988: 10.3 ms measured)."""
+
+    source = parse_audio_probe(_packet_audio_probe_document(Decimal("100.0103")))
+    encode = parse_audio_probe(_packet_audio_probe_document(Decimal("100")))
+    policy = effective_audio_policy(
+        "copy", source_codec="ac3", source_channels=6, source_sample_rate=48_000
+    )
+
+    strict = verify_audio_output(source, encode, policy, decoded_pcm_sha256_match=True)
+    excused = verify_audio_output(
+        source,
+        encode,
+        policy,
+        decoded_pcm_sha256_match=True,
+        join_slack_seconds=Decimal(512) / Decimal(48_000),
+    )
+
+    assert strict.duration_within_tolerance is False
+    assert excused.duration_within_tolerance is True
+    assert excused.passed is True
+
+
 def test_audio_probe_missing_track_duration_evidence_fails_closed() -> None:
     missing = parse_audio_probe(
         {

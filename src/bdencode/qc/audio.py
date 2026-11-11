@@ -668,7 +668,12 @@ def verify_audio_output(
     policy: EffectiveAudioPolicy,
     *,
     decoded_pcm_sha256_match: bool | None,
+    join_slack_seconds: Decimal = Decimal(0),
 ) -> AudioVerification:
+    """``join_slack_seconds``: the size of the gaps and overlaps at clip joins
+    that the frame continuity check excused.  An encode lays the samples end
+    to end, so its length may differ from the source's timeline by that much;
+    the start and the sample count keep their own tolerances."""
     comparison = compare_audio_probes(source, encode)
     expected_codec = source.codec if policy.action == "copy" else policy.codec_name
     expected_sample_rate = (
@@ -728,7 +733,7 @@ def verify_audio_output(
     # one-sample start-time tolerance.
     duration_tolerance = (
         Decimal("0.001") if policy.pcm_match_required else tolerance * Decimal(2)
-    )
+    ) + max(join_slack_seconds, Decimal(0))
     duration_match = (
         comparison.duration_delta_seconds is not None
         and abs(comparison.duration_delta_seconds) <= duration_tolerance
@@ -1128,11 +1133,16 @@ def parse_audio_probe(document: str | bytes | Mapping[str, Any]) -> AudioProbe:
         raise ValueError("audio probe sample rate must be positive")
     stream_start = _decimal_or_none(item.get("start_time"))
     packet_duration, packet_start, packet_count = _packet_tail_duration(raw, item)
+    # The first packet is where the sound starts.  ffprobe's stream start_time
+    # in a multi-stream MKV is the container's start whenever the stream's
+    # first packet lies past its probe window: Taffin 1988's audio starts at
+    # 11.011 s but its start_time read 0, a false -11 s delay (4.1.1 and
+    # older).  start_time only stands in when no packets were read.
     start_time = (
-        stream_start
-        if stream_start is not None
-        else packet_start
+        packet_start
         if packet_start is not None
+        else stream_start
+        if stream_start is not None
         else Decimal(0)
     )
     stream_duration = _decimal_or_none(item.get("duration"))
