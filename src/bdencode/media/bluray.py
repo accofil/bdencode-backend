@@ -607,6 +607,9 @@ class BluRayScanner:
                 self.capabilities.ffprobe,
                 "-v",
                 "error",
+                # Without it a playlist that opens with a clip without audio
+                # scans its audio as 0 channels at 0 Hz.
+                *bluray_analyze_args(),
                 "-playlist",
                 str(int(playlist_id)),
                 "-show_streams",

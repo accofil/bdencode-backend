@@ -649,6 +649,9 @@ def test_scanner_is_source_guarded_capability_based_and_mockable(
     assert all(isinstance(call, tuple) for call in runner.calls)
     assert runner.calls[0][0] == "/usr/bin/ffprobe"
     assert "-playlist" in runner.calls[0]
+    # A playlist opening with a clip without audio must still scan its audio
+    # with channels and a sample rate (Taffin 1988 scanned 0 Hz).
+    assert runner.calls[0].index("-analyzeduration") < runner.calls[0].index("-playlist")
 
     outside = tmp_path / "outside"
     (outside / "BDMV" / "PLAYLIST").mkdir(parents=True)

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from bdencode.audio import audio_encode_args, effective_audio_policy, expected_audio_codec
 from bdencode.qc.audio import AudioProbe, verify_audio_output
 
@@ -77,3 +79,16 @@ def test_qc_still_wants_identical_samples_from_a_16_bit_source() -> None:
     source = _probe("dts")
     assert verify_audio_output(source, _probe("flac"), exact, decoded_pcm_sha256_match=True).passed
     assert not verify_audio_output(source, _probe("flac"), exact, decoded_pcm_sha256_match=False).passed
+
+
+@pytest.mark.parametrize("action", ["copy", "flac16", "flac"])
+def test_a_zero_rate_or_channel_count_from_the_scan_counts_as_unknown(action: str) -> None:
+    """FFmpeg reports 0 Hz and 0 channels for a stream it did not read long
+    enough; the checks must then use what the reference itself measures."""
+
+    policy = effective_audio_policy(
+        action, source_codec="dts", source_channels=0, source_sample_rate=0
+    )
+
+    assert policy.sample_rate is None
+    assert policy.channels is None
