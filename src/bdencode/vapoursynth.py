@@ -18,6 +18,31 @@ class SourceFilter(StrEnum):
     BESTSOURCE = "bestsource"
 
 
+# L-SMASH-Works can hand back a stale picture for the first seek of a new
+# source instance when that seek lands on or beside a keyframe; every later
+# seek is exact.  Measured on Taffin (1988, multi-clip AVC): a single-frame
+# read of keyframe 66334 returned the black opening picture (Y 16.0), while the
+# same frame read after any earlier request matched a linear decode (Y 111.98).
+# A frame read on its own therefore decodes from this many frames earlier and
+# keeps only the last; a sample script spends its first seek on a discarded
+# frame this far before its first window.
+LSMAS_FIRST_SEEK_PREROLL_FRAMES = 8
+LSMAS_SAMPLE_WARMUP_DISTANCE = 24
+
+
+def reference_frame_preroll(frame: int) -> tuple[int, str]:
+    """Return the vspipe start frame and the FFmpeg filter that keeps ``frame``.
+
+    vspipe decodes from up to ``LSMAS_FIRST_SEEK_PREROLL_FRAMES`` earlier, so
+    the instance's first seek never serves the requested picture.
+    """
+
+    if type(frame) is not int or frame < 0:
+        raise ValueError("the frame index must be a non-negative integer")
+    start = max(0, frame - LSMAS_FIRST_SEEK_PREROLL_FRAMES)
+    return start, f"select=eq(n\\,{frame - start})"
+
+
 class TemporalFilter(StrEnum):
     PROGRESSIVE = "progressive"
     IVTC_TFF = "ivtc_tff"
@@ -220,6 +245,16 @@ def render_reference_script(plan: ReferenceScriptPlan) -> str:
             f"src = core.resize.Spline36(src, width={plan.output_width}, height={plan.output_height})"
         )
     if plan.sample_windows:
+        first_start = plan.sample_windows[0][0]
+        if (
+            plan.source_filter is SourceFilter.LSMAS
+            and first_start >= LSMAS_SAMPLE_WARMUP_DISTANCE
+        ):
+            # Spend the unreliable first seek on a frame no window uses; the
+            # windows then read exact pictures (see the constant).
+            lines.append(
+                f"src.get_frame({first_start - LSMAS_SAMPLE_WARMUP_DISTANCE})"
+            )
         pieces = ", ".join(
             f"src[{start}:{start + count}]" for start, count in plan.sample_windows
         )
