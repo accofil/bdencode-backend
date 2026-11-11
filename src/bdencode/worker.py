@@ -8895,6 +8895,11 @@ class PipelineWorker:
                 encode_value,
                 audio_policy,
                 decoded_pcm_sha256_match=pcm_match,
+                join_slack_seconds=(
+                    final_continuity.join_slack_seconds
+                    if final_continuity is not None
+                    else Decimal(0)
+                ),
             )
             try:
                 source_signal = parse_audio_analysis(
