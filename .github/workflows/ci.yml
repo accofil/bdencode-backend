@@ -69,7 +69,8 @@ jobs:
       # Without the media tools every real-ffmpeg test is skipped, and those tests are
       # what guards the encoder pipe (colour conversion, 10-bit Y4M, muxing).
       # An Ubuntu mirror sometimes hangs `apt-get update` for good (seen three
-      # times in October 2026): bounded attempts instead of a stuck job.
+      # times in October 2026): bounded attempts instead of a stuck job, and
+      # from the second attempt on the main archive instead of the Azure mirror.
       - if: runner.os == 'Linux'
         timeout-minutes: 15
         run: |
@@ -77,6 +78,13 @@ jobs:
             if sudo timeout 180 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update; then break; fi
             echo "apt-get update attempt $attempt failed or hung; retrying" >&2
             [ "$attempt" = 3 ] && exit 1
+            # The runner's Azure mirror was unreachable for a whole afternoon
+            # (2026-11-11); fall back to the main Ubuntu archive.
+            if [ -f /etc/apt/apt-mirrors.txt ]; then
+              cat /etc/apt/apt-mirrors.txt >&2
+              echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+            fi
+            sudo find /etc/apt -name '*.list' -o -name '*.sources' | xargs -r sudo sed -i 's#http://azure.archive.ubuntu.com/ubuntu#http://archive.ubuntu.com/ubuntu#g'
             sleep 10
           done
           sudo apt-get install -y --no-install-recommends ffmpeg mkvtoolnix mediainfo
@@ -120,6 +128,13 @@ jobs:
             if sudo timeout 180 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update; then break; fi
             echo "apt-get update attempt $attempt failed or hung; retrying" >&2
             [ "$attempt" = 3 ] && exit 1
+            # The runner's Azure mirror was unreachable for a whole afternoon
+            # (2026-11-11); fall back to the main Ubuntu archive.
+            if [ -f /etc/apt/apt-mirrors.txt ]; then
+              cat /etc/apt/apt-mirrors.txt >&2
+              echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+            fi
+            sudo find /etc/apt -name '*.list' -o -name '*.sources' | xargs -r sudo sed -i 's#http://azure.archive.ubuntu.com/ubuntu#http://archive.ubuntu.com/ubuntu#g'
             sleep 10
           done
       - run: sudo apt-get install -y build-essential libbluray-dev pkg-config
