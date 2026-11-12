@@ -359,10 +359,12 @@ from .utils import (
     sha256_file as _uncached_sha256_file,
 )
 from .vapoursynth import (
+    LSMAS_FIRST_SEEK_PREROLL_FRAMES,
     Crop as VapourSynthCrop,
     ReferenceScriptPlan,
     SourceFilter,
     TemporalFilter,
+    reference_frame_preroll,
     render_reference_script,
     script_record,
 )
@@ -9260,13 +9262,14 @@ class PipelineWorker:
             color_matrix=color.matrix,
             color_range=color.range,
         )
+        start, keep = reference_frame_preroll(frame)
         return [
             [
                 "vspipe",
                 "--container",
                 "y4m",
                 "--start",
-                str(frame),
+                str(start),
                 "--end",
                 str(frame),
                 str(script),
@@ -9283,7 +9286,7 @@ class PipelineWorker:
                 "-i",
                 "pipe:0",
                 "-vf",
-                ",".join(filters),
+                ",".join((keep, *filters)),
                 "-frames:v",
                 "1",
                 "-fps_mode",
@@ -9343,13 +9346,14 @@ class PipelineWorker:
     def _reference_y4m_pipeline(
         script: Path, frame: int, output: Path
     ) -> list[list[str]]:
+        start, keep = reference_frame_preroll(frame)
         return [
             [
                 "vspipe",
                 "--container",
                 "y4m",
                 "--start",
-                str(frame),
+                str(start),
                 "--end",
                 str(frame),
                 str(script),
@@ -9365,6 +9369,8 @@ class PipelineWorker:
                 "yuv4mpegpipe",
                 "-i",
                 "pipe:0",
+                "-vf",
+                keep,
                 "-frames:v",
                 "1",
                 # The Y4M muxer rejects 10-bit pixel formats without this
@@ -10070,6 +10076,7 @@ class PipelineWorker:
                 "frame": pair.presentation_index,
                 "encoded_seek_pts_seconds": str(encoded_record.seek_pts_seconds),
                 "extraction": "accurate_timestamp_seek",
+                "reference_preroll_frames": LSMAS_FIRST_SEEK_PREROLL_FRAMES,
                 "hdr_native": True,
                 "visual_annotation": {
                     "schema_version": 1,
@@ -10304,6 +10311,7 @@ class PipelineWorker:
                 "presentation_index": pair.presentation_index,
                 "encoded_seek_pts_seconds": str(encoded_record.seek_pts_seconds),
                 "pixel_format": selection.settings.pixel_format,
+                "reference_preroll_frames": LSMAS_FIRST_SEEK_PREROLL_FRAMES,
             }
             yuv_marker = paths.stages / f"comparison-{label}-native-yuv.json"
             if not _valid_stage(yuv_marker, yuv_inputs, [reference_y4m, encoded_y4m]):
