@@ -1,7 +1,7 @@
 {
   "name": "bdencode-frontend",
   "private": true,
-  "version": "4.1.5",
+  "version": "4.1.6",
   "type": "module",
   "engines": {
     "node": ">=22.22.0"
