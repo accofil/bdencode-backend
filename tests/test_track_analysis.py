@@ -319,3 +319,89 @@ def test_text_subtitle_packets_are_captions_whatever_their_size() -> None:
     sizes = "\n".join(["38", "52", "61", "0"])
     assert count_events(sizes, event_min_bytes("subrip")) == 3
     assert count_events(sizes, event_min_bytes("hdmv_pgs_subtitle")) == 0
+
+
+# The Experts (1989), playlist 00004: an 11 s opening clip, then the feature
+# clip whose timestamps start at 600 s again.
+_EXPERTS_SEGMENTS = [
+    {"angle": 1, "clip_id": "00010", "in_time_seconds": 600.0, "out_time_seconds": 611.011, "relative_start_seconds": 0.0},
+    {"angle": 1, "clip_id": "00004", "in_time_seconds": 600.0, "out_time_seconds": 6201.095489, "relative_start_seconds": 11.011},
+    {"angle": 1, "clip_id": "00000", "in_time_seconds": 600.0, "out_time_seconds": 601.001, "relative_start_seconds": 5612.106489},
+]
+
+
+def _disc_with_clips(tmp_path: Path, *clip_ids: str) -> Path:
+    stream = tmp_path / "disc" / "BDMV" / "STREAM"
+    stream.mkdir(parents=True)
+    for clip_id in clip_ids:
+        (stream / f"{clip_id}.m2ts").write_bytes(b"")
+    return tmp_path / "disc"
+
+
+def test_a_window_is_placed_on_its_clip_s_own_clock(tmp_path: Path) -> None:
+    from bdencode.media.track_analysis import clip_window
+
+    disc = _disc_with_clips(tmp_path, "00010", "00004", "00000")
+    window = clip_window(disc, _EXPERTS_SEGMENTS, SampleWindow(1386.051, 30.0))
+    assert window is not None
+    assert window.clip == disc / "BDMV" / "STREAM" / "00004.m2ts"
+    assert abs(window.seek_pts_seconds - (600.0 + 1386.051 - 11.011)) < 1e-9
+    assert window.duration_seconds == 30.0
+
+    opening = clip_window(disc, _EXPERTS_SEGMENTS, SampleWindow(5.0, 30.0))
+    assert opening is not None and opening.clip.name == "00010.m2ts"
+    assert abs(opening.duration_seconds - 6.011) < 1e-9  # cut at the clip's end
+
+    assert clip_window(_disc_with_clips(tmp_path / "x"), _EXPERTS_SEGMENTS, SampleWindow(1386.0)) is None
+    other_angle = [dict(segment, angle=2) for segment in _EXPERTS_SEGMENTS]
+    assert clip_window(disc, other_angle, SampleWindow(1386.0)) is None
+
+
+def test_a_disc_window_is_read_from_its_clip_by_the_clip_s_stream_indexes(tmp_path: Path) -> None:
+    disc = _disc_with_clips(tmp_path, "00010", "00004", "00000")
+    playlist = {
+        "playlist_id": "00004",
+        "duration_seconds": 5613.107489,
+        "segments": _EXPERTS_SEGMENTS,
+        "streams": [
+            {"id": "audio:4352", "kind": "audio", "pid": 4352, "codec": "dts"},
+            {"id": "subtitle:4608", "kind": "subtitle", "pid": 4608, "codec": "hdmv_pgs_subtitle"},
+        ],
+    }
+    reads: list[list[str]] = []
+    clip_probes: list[str] = []
+
+    def run(argv: list[str], cwd: Path) -> str:
+        if argv[0] == "ffprobe" and "-playlist" in argv:
+            return json.dumps({"streams": [{"index": 1, "id": "0x1100"}, {"index": 2, "id": "0x1200"}]})
+        if argv[0] == "ffprobe" and argv[-1].endswith(".m2ts"):
+            clip_probes.append(argv[-1])
+            # The clip lists its streams in another order than the playlist.
+            return json.dumps({"streams": [{"index": 3, "id": "0x1100"}, {"index": 5, "id": "0x1200"}]})
+        if argv[0] == "ffmpeg":
+            reads.append(argv)
+            for item in argv:
+                if item.endswith(".wav"):
+                    _write_wav(Path(item))
+                elif item.endswith(".mks"):
+                    Path(item).write_bytes(b"mks")
+            return ""
+        return "9000\n20"
+
+    analyse_playlist(disc, playlist, tmp_path / "work", run=run, detect_language=None)
+
+    assert len(reads) == 6
+    assert clip_probes == [str(disc / "BDMV" / "STREAM" / "00004.m2ts")]  # probed once
+    for argv in reads:
+        assert "-playlist" not in argv
+        assert argv[argv.index("-seek_timestamp") + 1] == "1"
+        assert argv[argv.index("-i") + 1].endswith("00004.m2ts")
+        assert float(argv[argv.index("-ss") + 1]) >= 600.0
+        assert "0:3" in argv and "0:5" in argv
+
+
+def test_a_playlist_read_probes_long_enough_for_a_silent_opening_clip() -> None:
+    command = window_extract_command(
+        Path("/discs/Film"), 4, SampleWindow(1386.0), [StreamRef("audio:4352", 4352, 1)], [], Path("/w")
+    )
+    assert command.index("-analyzeduration") < command.index("-playlist")

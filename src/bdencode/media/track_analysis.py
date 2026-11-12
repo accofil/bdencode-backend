@@ -30,14 +30,16 @@ from __future__ import annotations
 import json
 import shutil
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from . import subtitle_language as sublang
+from .bluray import bluray_analyze_args
 from .inference import SampleWindow, sample_windows
 
-ANALYSIS_SCHEMA_VERSION = 2
+# 3 (4.1.5): disc windows are read from their clip file.
+ANALYSIS_SCHEMA_VERSION = 3
 WINDOW_COUNT = 6
 WINDOW_SECONDS = 30.0
 EVENT_MIN_BYTES = 512
@@ -71,14 +73,17 @@ def source_input_args(source: Path, playlist: int) -> list[str]:
 
     if source.is_file():
         return ["-i", str(source)]
-    return ["-playlist", str(playlist), "-i", f"bluray:{source.as_posix()}"]
+    return [
+        *bluray_analyze_args(),
+        "-playlist", str(playlist), "-i", f"bluray:{source.as_posix()}",
+    ]
 
 
 def probe_streams_command(disc_root: Path, playlist: int, *, ffprobe: str = "ffprobe") -> list[str]:
     if disc_root.is_file():
         return [ffprobe, "-v", "error", "-show_entries", "stream=index,id,codec_type", "-of", "json", str(disc_root)]
     return [
-        ffprobe, "-v", "error", "-playlist", str(playlist),
+        ffprobe, "-v", "error", *bluray_analyze_args(), "-playlist", str(playlist),
         "-show_entries", "stream=index,id,codec_type", "-of", "json",
         f"bluray:{disc_root.as_posix()}",
     ]
@@ -124,6 +129,79 @@ def window_extract_command(
         "-t", f"{window.duration_seconds:.3f}",
         *inputs[-2:],
     ]
+    return command + _window_outputs(audio, subtitles, out_dir)
+
+
+@dataclass(frozen=True, slots=True)
+class ClipWindow:
+    """A playlist window as a span of one clip file, on that clip's own clock."""
+
+    clip: Path
+    seek_pts_seconds: float
+    duration_seconds: float
+
+
+def clip_window(
+    disc_root: Path, segments: Sequence[Mapping[str, Any]], window: SampleWindow
+) -> ClipWindow | None:
+    """The clip that holds the window's start, or ``None`` to read the playlist.
+
+    libbluray joins the clips of a playlist without making their timestamps
+    continuous: The Experts (1989) opens with an 11 s clip at 600-611 s and its
+    feature clip starts at 600 s again, so a seek into the playlist found
+    nothing.  Inside one clip the timestamps are monotonic; the window is read
+    there, up to the clip's end.
+    """
+
+    for segment in segments:
+        try:
+            angle = int(segment.get("angle", 1))
+            relative_start = float(segment["relative_start_seconds"])
+            in_time = float(segment["in_time_seconds"])
+            out_time = float(segment["out_time_seconds"])
+            clip_id = str(segment["clip_id"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if angle != 1 or not (clip_id.isdigit() and len(clip_id) == 5):
+            continue
+        end = relative_start + (out_time - in_time)
+        if relative_start <= window.start_seconds < end:
+            clip = disc_root / "BDMV" / "STREAM" / f"{clip_id}.m2ts"
+            if not clip.is_file():
+                return None
+            return ClipWindow(
+                clip,
+                in_time + window.start_seconds - relative_start,
+                min(window.duration_seconds, end - window.start_seconds),
+            )
+    return None
+
+
+def clip_window_extract_command(
+    window: ClipWindow,
+    audio: Sequence[StreamRef],
+    subtitles: Sequence[StreamRef],
+    out_dir: Path,
+    *,
+    ffmpeg: str = "ffmpeg",
+) -> list[str]:
+    """One read of a window from its clip file (``-ss`` is the clip's own PTS)."""
+
+    command = [
+        ffmpeg, "-hide_banner", "-nostdin", "-v", "error", "-y",
+        "-err_detect", "ignore_err",
+        "-seek_timestamp", "1",
+        "-ss", f"{window.seek_pts_seconds:.3f}",
+        "-t", f"{window.duration_seconds:.3f}",
+        "-i", str(window.clip),
+    ]
+    return command + _window_outputs(audio, subtitles, out_dir)
+
+
+def _window_outputs(
+    audio: Sequence[StreamRef], subtitles: Sequence[StreamRef], out_dir: Path
+) -> list[str]:
+    command: list[str] = []
     for ref in audio:
         command += [
             "-map", f"0:{ref.input_index}", "-vn", "-sn", "-dn",
@@ -332,6 +410,36 @@ def analyse_playlist(
         return found
 
     audio, subtitles = refs("audio"), refs("subtitle")
+    segments = [
+        segment for segment in playlist.get("segments") or [] if isinstance(segment, Mapping)
+    ]
+    clip_indexes: dict[Path, dict[int, int]] = {}
+
+    def window_command(window: SampleWindow, out_dir: Path) -> tuple[list[str], float]:
+        clip = None if single_file else clip_window(disc_root, segments, window)
+        if clip is None:
+            command = window_extract_command(
+                disc_root, playlist_number, window, audio, subtitles, out_dir
+            )
+            return command, window.duration_seconds
+        if clip.clip not in clip_indexes:
+            clip_indexes[clip.clip] = parse_stream_indexes(
+                run(probe_streams_command(clip.clip, playlist_number), out_dir)
+            )
+        indexes_in_clip = clip_indexes[clip.clip]
+
+        def in_clip(found: Sequence[StreamRef]) -> list[StreamRef]:
+            return [
+                replace(ref, input_index=indexes_in_clip[ref.pid])
+                for ref in found
+                if ref.pid in indexes_in_clip
+            ]
+
+        command = clip_window_extract_command(
+            clip, in_clip(audio), in_clip(subtitles), out_dir
+        )
+        return command, clip.duration_seconds
+
     windows = analysis_windows(duration)
     samples: dict[int, list[tuple[Path, SampleWindow]]] = {ref.pid: [] for ref in audio}
     events: dict[str, int] = {ref.stream_id: 0 for ref in subtitles}
@@ -342,14 +450,15 @@ def analyse_playlist(
         out_dir = work_dir / f"window-{number:02d}"
         out_dir.mkdir(parents=True, exist_ok=True)
         try:
-            run(window_extract_command(disc_root, playlist_number, window, audio, subtitles, out_dir), out_dir)
+            command, read_seconds = window_command(window, out_dir)
+            run(command, out_dir)
         except Exception as exc:  # noqa: BLE001 - one unreadable window is skipped
             skipped.append({"window": number, "reason": type(exc).__name__})
             if on_window is not None:
                 on_window(number, len(windows))
             continue
         read_dirs.append(out_dir)
-        sampled += window.duration_seconds
+        sampled += read_seconds
         for ref in audio:
             wav = out_dir / f"audio-{ref.pid}.wav"
             if wav.is_file() and wav.stat().st_size > 44:
