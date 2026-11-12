@@ -357,8 +357,12 @@ def test_a_window_is_placed_on_its_clip_s_own_clock(tmp_path: Path) -> None:
     assert clip_window(disc, other_angle, SampleWindow(1386.0)) is None
 
 
-def test_a_disc_window_is_read_from_its_clip_by_the_clip_s_stream_indexes(tmp_path: Path) -> None:
-    disc = _disc_with_clips(tmp_path, "00010", "00004", "00000")
+def test_a_disc_window_is_read_from_its_clip_by_the_clip_s_stream_indexes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import bdencode.media.track_analysis as module
+
+    disc =_disc_with_clips(tmp_path, "00010", "00004", "00000")
     playlist = {
         "playlist_id": "00004",
         "duration_seconds": 5613.107489,
@@ -378,7 +382,7 @@ def test_a_disc_window_is_read_from_its_clip_by_the_clip_s_stream_indexes(tmp_pa
             clip_probes.append(argv[-1])
             # The clip lists its streams in another order than the playlist.
             return json.dumps({"streams": [{"index": 3, "id": "0x1100"}, {"index": 5, "id": "0x1200"}]})
-        if argv[0] == "ffmpeg":
+        if argv[0] == "ffmpeg" and any(item.endswith(".wav") for item in argv):
             reads.append(argv)
             for item in argv:
                 if item.endswith(".wav"):
@@ -388,6 +392,9 @@ def test_a_disc_window_is_read_from_its_clip_by_the_clip_s_stream_indexes(tmp_pa
             return ""
         return "9000\n20"
 
+    # Where tesseract is installed (the servers), PGS caption OCR adds its own
+    # ffmpeg calls; 4.1.5's server install failed on counting those as reads.
+    monkeypatch.setattr(module.shutil, "which", lambda name: None)
     analyse_playlist(disc, playlist, tmp_path / "work", run=run, detect_language=None)
 
     assert len(reads) == 6
