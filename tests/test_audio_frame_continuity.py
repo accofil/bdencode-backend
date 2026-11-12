@@ -77,7 +77,7 @@ def test_audio_frame_parser_builds_continuous_normalized_sample_cursor() -> None
     assert evidence.first_pts_seconds == Decimal("10.000")
     assert evidence.normalized_end_seconds == Decimal("0.128")
     assert evidence.total_samples == 6144
-    assert evidence.timestamp_tolerance_samples == 48
+    assert evidence.timestamp_tolerance_samples == 96
     assert evidence.discontinuity_frame_indexes == ()
 
 
@@ -348,3 +348,40 @@ def test_a_join_is_found_where_the_audio_starts_later_than_the_title() -> None:
 
     assert verdict.passed
     assert verdict.excused_join_discontinuities == 2
+
+
+# The first 40 DTS frame timestamps of Clementine (2019): an MKV remux whose
+# 1 ms timestamps scatter between -1.667 and +0.333 ms around the exact
+# 512-sample timeline.  Not a sample is missing (the decoded total matched).
+_CLEMENTINE_MS = (
+    0, 10, 21, 31, 42, 53, 63, 74, 85, 95, 106, 116, 127, 138, 148, 159, 171,
+    181, 192, 202, 213, 224, 234, 245, 256, 266, 277, 287, 298, 309, 319, 330,
+    341, 351, 362, 372, 383, 394, 404, 415,
+)
+
+
+def _ms_document(milliseconds: tuple[int, ...]) -> dict[str, object]:
+    document = _frame_document(
+        tuple(f"{value / 1000:.3f}" for value in milliseconds), samples_per_frame=512
+    )
+    document["streams"][0]["codec_name"] = "dts"  # type: ignore[index]
+    return document
+
+
+def test_one_tick_scatter_of_millisecond_timestamps_is_not_a_gap() -> None:
+    evidence = parse_audio_frame_continuity(_ms_document(_CLEMENTINE_MS))
+
+    assert evidence.timestamp_tolerance_samples == 96
+    assert evidence.continuous
+    assert evidence.gap_count == 0
+    assert evidence.overlap_count == 0
+
+
+def test_a_missing_frame_between_scattered_timestamps_is_still_a_gap() -> None:
+    # Frame 20 (213 ms) is lost: the next timestamp is 10.667 ms late.
+    missing = _CLEMENTINE_MS[:20] + _CLEMENTINE_MS[21:]
+    evidence = parse_audio_frame_continuity(_ms_document(missing))
+
+    assert not evidence.continuous
+    assert evidence.gap_count == 1
+    assert evidence.maximum_gap_samples > 400

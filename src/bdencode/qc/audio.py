@@ -60,6 +60,9 @@ class AudioComparison:
 
 
 AUDIO_FRAME_CONTINUITY_SCHEMA_VERSION = 1
+# A step between two container timestamps may be off by one tick each.
+AUDIO_TIMESTAMP_TOLERANCE_TICKS = 2
+
 _MAX_REPORTED_AUDIO_DISCONTINUITIES = 32
 # Every discontinuity up to this many keeps its position and size, so the
 # ones at a playlist's clip joins can be told apart from the rest.
@@ -90,7 +93,8 @@ class AudioFrameContinuity:
     """Whole-track decoded audio-frame sample-cursor evidence.
 
     Container timestamps can only prove continuity to their time-base
-    resolution.  ``timestamp_tolerance_samples`` records that uncertainty;
+    resolution: each may be off by one tick, a step between two of them by
+    two.  ``timestamp_tolerance_samples`` records that uncertainty;
     gaps and overlaps are counted only when they exceed it.  Total decoded
     samples and the normalized presentation endpoint remain independent gates,
     so matching endpoints cannot hide an internal gap followed by an overlap.
@@ -863,10 +867,18 @@ def parse_audio_frame_continuity(
         raise ValueError("audio frame stream sample rate must be positive")
     time_base_text = str(stream.get("time_base", ""))
     time_base_seconds = _parse_positive_time_base(time_base_text)
+    # Each timestamp may be off by up to one tick, so the step between two of
+    # them by up to two.  Measured on Clementine (2019, MKV remux, DTS-HD MA
+    # in a 1 ms time base): the 529 900 frame timestamps scatter between
+    # -1.667 and +0.333 ms around the exact sample timeline without drift, so
+    # consecutive steps differ by up to 1.333 ms (64 samples) although not a
+    # sample is missing.  A lost or added frame (512+ samples) stays far above.
     timestamp_tolerance_samples = int(
-        (time_base_seconds * Decimal(stream_sample_rate)).to_integral_value(
-            rounding=ROUND_CEILING
-        )
+        (
+            AUDIO_TIMESTAMP_TOLERANCE_TICKS
+            * time_base_seconds
+            * Decimal(stream_sample_rate)
+        ).to_integral_value(rounding=ROUND_CEILING)
     )
 
     first_pts: Decimal | None = None
