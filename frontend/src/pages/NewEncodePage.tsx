@@ -27,6 +27,7 @@ import { useNavigate } from "react-router";
 import { api, ApiError } from "../api/client";
 import type { ContentType, DetailLevel, DiscType, ImageUploadProvider, SourceEntry, UploadImageSet } from "../api/types";
 import { Badge, Button, Card, LoadingPanel, Notice, PageHeader } from "../components/ui";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { t, useLanguage } from "../i18n";
 import { imageUploadProviderLabels, UPLOAD_IMAGE_SET_LABELS, uploadImageSet, useImageHostOrder } from "../uploads";
 import { basename, contentLabel } from "../utils";
@@ -180,9 +181,13 @@ export function NewEncodePage() {
     }
   }, [draft]);
 
+  // The name filter also runs on the server, over the whole folder: a large
+  // folder is sent only up to a limit, and a file past it must still be found.
+  const serverFilter = useDebouncedValue(folderFilter.trim());
   const sources = useQuery({
-    queryKey: ["sources", browsePath ?? "root"],
-    queryFn: () => api.sources(browsePath),
+    queryKey: ["sources", browsePath ?? "root", serverFilter],
+    queryFn: () => (serverFilter ? api.sources(browsePath, serverFilter) : api.sources(browsePath)),
+    placeholderData: (previous) => previous,
   });
 
   const create = useMutation({
@@ -364,6 +369,15 @@ export function NewEncodePage() {
           {sources.isLoading ? <LoadingPanel label={t("Mappák beolvasása…", "Reading folders…")} /> : sources.isError ? (
             <Notice tone="danger" title={t("A tárhely nem olvasható", "The storage cannot be read")}>{sources.error instanceof Error ? sources.error.message : t("Ismeretlen kapcsolati hiba", "Unknown connection error")}</Notice>
           ) : (
+            <>
+            {sources.data?.truncated && (
+              <Notice tone="warning">
+                {t(
+                  `Ebben a mappában ${sources.data.total ?? "több"} elem van, ebből ${sources.data.entries.length} látszik. Írj be egy névrészletet a keresőbe, az a teljes mappában keres.`,
+                  `This folder has ${sources.data.total ?? "more"} entries and ${sources.data.entries.length} are shown. Type part of a name into the search: it searches the whole folder.`,
+                )}
+              </Notice>
+            )}
             <div className="folder-grid">
               {entries.map((entry) => {
                 const kind = sourceEntryKind(entry);
@@ -385,6 +399,7 @@ export function NewEncodePage() {
               })}
               {!entries.length && <div className="folder-empty"><FolderOpen size={25} /><span>{discsOnly ? t("Ebben a mappában nincs teljes lemez vagy további könyvtár. Kapcsold ki a „Csak teljes lemezek” szűrőt az MKV-fájlok megjelenítéséhez.", "This folder has no full disc or further subfolder. Turn off “Only full discs” to show MKV files.") : t("Ebben a mappában nincs további könyvtár vagy MKV-fájl.", "This folder has no further subfolders or MKV files.")}</span></div>}
             </div>
+            </>
           )}
 
           {draft.sourcePath && (

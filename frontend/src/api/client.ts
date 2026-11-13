@@ -132,10 +132,14 @@ export const api = {
   capabilities: () => apiFetch<CapabilitiesResponse>("/capabilities"),
   runtimeCapabilities: () =>
     apiFetch<RuntimeCapabilitiesResponse>("/runtime-capabilities"),
-  sources: (path?: string) =>
-    apiFetch<SourceBrowserResponse>(
-      `/sources${path ? `?path=${encodeURIComponent(path)}` : ""}`,
-    ),
+  /** One source folder; ``query`` keeps the names containing it, searched on the server. */
+  sources: (path?: string, query?: string) => {
+    const params = new URLSearchParams();
+    if (path) params.set("path", path);
+    if (query) params.set("q", query);
+    const search = params.toString();
+    return apiFetch<SourceBrowserResponse>(`/sources${search ? `?${search}` : ""}`);
+  },
   jobs: (states?: JobState[], limit = 100, offset = 0) => {
     const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
     states?.forEach((state) => params.append("state", state));

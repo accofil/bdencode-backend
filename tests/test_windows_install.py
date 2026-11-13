@@ -41,8 +41,12 @@ def test_windows_bootstrap_is_wsl2_scoped_and_non_destructive() -> None:
     assert "'--exec', '/bin/sleep', 'infinity'" in script
     assert "Register-ScheduledTask" in script
     assert "BDEncode WSL" in script
-    assert 'Join-Path $logDirectory "keepalive.ps1"' in script
-    assert "-WindowStyle Hidden -File" in script
+    # The keep-alive loop lives in the task itself: one machine's Task Scheduler
+    # could not run a -File script under %LOCALAPPDATA% (0xFFFD0000).
+    assert "-WindowStyle Hidden -EncodedCommand {0}" in script
+    assert "[Text.Encoding]::Unicode.GetBytes($keepAliveScript)" in script
+    assert "Remove-Item -LiteralPath $legacyKeepAliveScriptPath" in script
+    assert "-WindowStyle Hidden -File" not in script
     assert "HttpClientHandler" in script
     assert "UseProxy = $false" in script
     assert "http://127.0.0.1:$Port/encoder/api/v1/health" in script

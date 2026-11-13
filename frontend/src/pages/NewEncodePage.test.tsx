@@ -85,6 +85,28 @@ describe("NewEncodePage", () => {
     expect(screen.getByRole("button", { name: "torrents", pressed: true })).toBeInTheDocument();
   });
 
+  it("searches a large folder on the server and says when it is cut", async () => {
+    localStorage.setItem("bdencode:new-job-draft", JSON.stringify({ purpose: "fit" }));
+    const whale = "The.Last.Whale.Singer.2025.1080p.BluRay.DD5.1.x264-PENICILLIN.mkv";
+    vi.mocked(api.sources).mockImplementation(async (_path?: string, query?: string) => (
+      query
+        ? { roots: ["/storage"], path: "/storage", truncated: false, total: 1, entries: [
+          { name: whale, path: `/storage/${whale}`, is_bluray: false, kind: "mkv" },
+        ] }
+        : { roots: ["/storage"], path: "/storage", truncated: true, total: 2260, entries: [
+          { name: "A.Film.mkv", path: "/storage/A.Film.mkv", is_bluray: false, kind: "mkv" },
+        ] }
+    ));
+    renderApp(<NewEncodePage />, "/new");
+
+    expect(await screen.findByText(/Ebben a mappában 2260 elem van, ebből 1 látszik/)).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "Mappa keresése" }), { target: { value: "whale" } });
+
+    expect(await screen.findByText(whale)).toBeInTheDocument();
+    expect(api.sources).toHaveBeenLastCalledWith(undefined, "whale");
+    expect(screen.queryByText(/elem van, ebből/)).not.toBeInTheDocument();
+  });
+
   it("shows no root switcher for a single source root", async () => {
     renderApp(<NewEncodePage />, "/new");
     await screen.findAllByText("Blu-ray forrás");

@@ -148,3 +148,47 @@ def test_a_failing_media_tool_is_reported_without_leaking_its_output(
     response = client.get("/api/v1/analyze-mkv", params={"path": str(target)})
     assert response.status_code == 422
     assert "secret" not in response.text and "/home/user" not in response.text
+
+
+def _large_folder(root: Path, folders: int, files: int) -> None:
+    for number in range(folders):
+        (root / f"Folder {number:04d}").mkdir()
+    for number in range(files):
+        (root / f"Film {number:04d}.mkv").write_bytes(b"")
+    (root / "The.Last.Whale.Singer.2025.1080p.BluRay.DD5.1.x264-PENICILLIN.mkv").write_bytes(b"")
+
+
+def test_a_large_folder_is_listed_past_the_old_limit_of_1000(tmp_path: Path) -> None:
+    """canada2's aither folder (522 folders, 1737 MKVs) lost its later MKVs."""
+
+    client, settings, _ = _client(tmp_path)
+    root = settings.source_roots[0]
+    _large_folder(root, 522, 1737)
+
+    document = client.get("/api/v1/sources").json()
+
+    names = [item["name"] for item in document["entries"]]
+    assert len(names) == 522 + 1737 + 1
+    assert "The.Last.Whale.Singer.2025.1080p.BluRay.DD5.1.x264-PENICILLIN.mkv" in names
+    assert document["truncated"] is False
+    assert document["total"] == len(names)
+
+
+def test_the_name_filter_searches_the_whole_folder(tmp_path: Path, monkeypatch) -> None:
+    import bdencode.api as api_module
+
+    monkeypatch.setattr(api_module, "SOURCE_BROWSER_ENTRY_LIMIT", 100)
+    client, settings, _ = _client(tmp_path)
+    _large_folder(settings.source_roots[0], 50, 300)
+
+    everything = client.get("/api/v1/sources").json()
+    assert len(everything["entries"]) == 100
+    assert everything["truncated"] is True
+    assert everything["total"] == 351
+
+    found = client.get("/api/v1/sources", params={"q": "WHALE"}).json()
+    assert [item["name"] for item in found["entries"]] == [
+        "The.Last.Whale.Singer.2025.1080p.BluRay.DD5.1.x264-PENICILLIN.mkv"
+    ]
+    assert found["truncated"] is False
+    assert found["total"] == 1
