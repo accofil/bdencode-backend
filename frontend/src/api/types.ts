@@ -612,6 +612,10 @@ export interface SourceBrowserResponse {
   roots: string[];
   path: string | null;
   entries: SourceEntry[];
+  /** More entries matched than were sent (4.1.7; older servers omit it). */
+  truncated?: boolean;
+  /** Entries that matched, sent or not. */
+  total?: number;
 }
 
 export interface LanguageDecision {

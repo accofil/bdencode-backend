@@ -11,6 +11,7 @@ import type {
   Job,
 } from "../api/types";
 import { t } from "../i18n";
+import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { formatDuration } from "../utils";
 import { Badge, Button, Card, Notice } from "./ui";
 
@@ -45,14 +46,29 @@ export function ExternalSourcesCard({
 }) {
   const [path, setPath] = useState("");
   const [browsing, setBrowsing] = useState<string | null>(null);
+  const [browseFilter, setBrowseFilter] = useState("");
+  const serverFilter = useDebouncedValue(browseFilter.trim());
   const [subtitlePath, setSubtitlePath] = useState("");
   const [subtitleLanguage, setSubtitleLanguage] = useState("hun");
   const probe = useMutation({ mutationFn: (location: string) => api.probeExternalSource(location) });
   const folders = useQuery({
-    queryKey: ["external-browse", browsing],
-    queryFn: () => api.sources(browsing || undefined),
+    queryKey: ["external-browse", browsing, serverFilter],
+    queryFn: () => (serverFilter ? api.sources(browsing || undefined, serverFilter) : api.sources(browsing || undefined)),
     enabled: browsing !== null,
+    placeholderData: (previous) => previous,
   });
+
+  function openFolder(location: string) {
+    setBrowsing(location);
+    setBrowseFilter("");
+  }
+
+  function choose(location: string) {
+    setPath(location);
+    setBrowsing(null);
+    setBrowseFilter("");
+    probe.mutate(location);
+  }
   const info: ExternalProbe | undefined = probe.data;
   const current = value.find((item) => item.path === info?.path);
 
@@ -113,20 +129,39 @@ export function ExternalSourcesCard({
       </label>
       <div className="release-actions">
         <Button variant="secondary" icon={<Search size={15} />} loading={probe.isPending} disabled={!available || !path.trim()} onClick={() => probe.mutate(path.trim())}>{t("Beolvasás", "Read")}</Button>
-        <Button variant="ghost" icon={<FolderOpen size={15} />} disabled={!available} onClick={() => setBrowsing(browsing === null ? "" : null)}>{t("Tallózás", "Browse")}</Button>
+        <Button variant="ghost" icon={<FolderOpen size={15} />} disabled={!available} onClick={() => { setBrowsing(browsing === null ? "" : null); setBrowseFilter(""); }}>{t("Tallózás", "Browse")}</Button>
       </div>
       {browsing !== null && folders.data && (
         <div className="external-browser">
           <div className="external-browser__roots">
-            {folders.data.roots.map((root) => <Button key={root} variant="ghost" onClick={() => setBrowsing(root)}>{root}</Button>)}
+            {folders.data.roots.map((root) => <Button key={root} variant="ghost" onClick={() => openFolder(root)}>{root}</Button>)}
           </div>
+          <label className="search-field search-field--small">
+            <Search size={16} aria-hidden="true" />
+            <input
+              aria-label={t("Keresés a mappában", "Search this folder")}
+              value={browseFilter}
+              onChange={(event) => setBrowseFilter(event.target.value)}
+              placeholder={t("Név keresése a mappában…", "Search names in this folder…")}
+            />
+          </label>
+          {folders.data.truncated && (
+            <Notice tone="warning">
+              {t(
+                `Ebben a mappában ${folders.data.total ?? "több"} elem van, ebből ${folders.data.entries.length} látszik. Írj be egy névrészletet.`,
+                `This folder has ${folders.data.total ?? "more"} entries and ${folders.data.entries.length} are shown. Type part of a name.`,
+              )}
+            </Notice>
+          )}
           <ul>
             {folders.data.entries.map((entry) => (
               <li key={entry.path}>
-                <button type="button" onClick={() => setBrowsing(entry.path)}>{entry.name}</button>
-                <Button variant="ghost" onClick={() => { setPath(entry.path); setBrowsing(null); probe.mutate(entry.path); }}>{t("Ezt választom", "Choose")}</Button>
+                {/* A file cannot be opened as a folder: its name chooses it. */}
+                <button type="button" onClick={() => (entry.kind === "mkv" ? choose(entry.path) : openFolder(entry.path))}>{entry.name}</button>
+                <Button variant="ghost" onClick={() => choose(entry.path)}>{t("Ezt választom", "Choose")}</Button>
               </li>
             ))}
+            {!folders.data.entries.length && <li className="muted">{t("Nincs találat ebben a mappában.", "Nothing found in this folder.")}</li>}
           </ul>
         </div>
       )}

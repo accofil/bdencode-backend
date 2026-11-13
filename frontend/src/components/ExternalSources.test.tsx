@@ -145,6 +145,28 @@ describe("ExternalSourcesCard", () => {
     expect(value).toEqual([]);
   });
 
+  it("finds a file of a large folder by name and chooses an MKV by its name", async () => {
+    const web = "/q/HUN-FULCRUM/fulcrum-tlws.2025.1080p.web.mkv";
+    mocked.sources.mockImplementation(async (_path?: string, query?: string) => (
+      query
+        ? { roots: ["/q"], path: "/q", truncated: false, total: 1, entries: [{ name: "fulcrum-tlws.2025.1080p.web.mkv", path: web, is_bluray: false, kind: "mkv" }] }
+        : { roots: ["/q"], path: "/q", truncated: true, total: 2260, entries: [{ name: "A", path: "/q/A", is_bluray: false, kind: "folder" }] }
+    ));
+    mocked.probeExternalSource.mockResolvedValue({
+      kind: "file", path: web, fps: "25", duration_seconds: 6000, width: 1920, height: 1080, tracks: [], subtitles: [],
+    } as never);
+    wrap(<ExternalSourcesCard value={[]} onChange={() => undefined} available />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Tallózás" }));
+    expect(await screen.findByText(/2260 elem van, ebből 1 látszik/)).toBeTruthy();
+    fireEvent.change(screen.getByRole("textbox", { name: "Keresés a mappában" }), { target: { value: "fulcrum" } });
+    fireEvent.click(await screen.findByRole("button", { name: "fulcrum-tlws.2025.1080p.web.mkv" }));
+
+    await waitFor(() => expect(mocked.probeExternalSource).toHaveBeenCalledWith(web));
+    expect(mocked.sources).toHaveBeenCalledWith(undefined, "fulcrum");
+    expect(mocked.sources).not.toHaveBeenCalledWith(web);
+  });
+
   it("says so when this host lacks a tool", () => {
     wrap(<ExternalSourcesCard value={[]} onChange={() => undefined} available={false} />);
     expect(screen.getByText(/hiányzik az ehhez szükséges eszköz/)).toBeTruthy();

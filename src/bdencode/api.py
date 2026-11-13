@@ -144,6 +144,10 @@ from .doctor import (
 
 # How long the installed-tool probe of the System page stays valid.
 TOOL_SNAPSHOT_TTL_SECONDS = 600
+# One source folder lists at most this many entries.  The aither folder of
+# canada2 held 2259 (522 folders, 1737 MKV files); the old limit of 1000
+# silently left out every MKV file after the first 478.
+SOURCE_BROWSER_ENTRY_LIMIT = 5000
 from .media.profiles import (
     DetailLevel,
     VideoEncoder,
@@ -1089,9 +1093,21 @@ def create_app(
         )
 
     @application.get(f"{API_PREFIX}/sources")
-    def browse_sources(path: str | None = None) -> dict[str, object]:
+    def browse_sources(
+        path: str | None = None,
+        q: Annotated[str | None, Query(max_length=200)] = None,
+    ) -> dict[str, object]:
+        """One folder of the source storage: folders, discs and MKV files.
+
+        ``q`` keeps the names that contain it (case-insensitive) and is
+        applied to the whole folder before the entry limit, so a file deep in
+        the alphabet of a large folder can still be found.  ``truncated`` says
+        that more entries matched than were returned.
+        """
+
         if settings is None:
-            return {"roots": [], "path": None, "entries": []}
+            return {"roots": [], "path": None, "entries": [], "truncated": False, "total": 0}
+        needle = (q or "").strip().casefold()
         selected = (
             settings.source_roots[0]
             if path is None
@@ -1108,7 +1124,10 @@ def create_app(
             )
         except OSError as exc:
             raise ConfigurationError("source directory cannot be read") from exc
+        total = 0
         for item in children:
+            if needle and needle not in item.name.casefold():
+                continue
             if item.is_symlink():
                 try:
                     settings.authorize_source(item)
@@ -1121,6 +1140,9 @@ def create_app(
                 is_bluray, kind = False, "mkv"
             else:
                 continue
+            total += 1
+            if len(entries) >= SOURCE_BROWSER_ENTRY_LIMIT:
+                continue
             entries.append(
                 {
                     "name": item.name,
@@ -1129,12 +1151,12 @@ def create_app(
                     "kind": kind,
                 }
             )
-            if len(entries) >= 1000:
-                break
         return {
             "roots": [str(root) for root in settings.source_roots],
             "path": str(selected),
             "entries": entries,
+            "truncated": total > len(entries),
+            "total": total,
         }
 
     @application.get(f"{API_PREFIX}/analyze-mkv")

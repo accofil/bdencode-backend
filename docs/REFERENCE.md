@@ -227,7 +227,7 @@ Az asztalon két parancsikon jelenhet meg:
 | Tartalom | Hely |
 |---|---|
 | Telepítési napló | `%LOCALAPPDATA%\BDEncode\install.log` |
-| WSL-életben tartó szkript | `%LOCALAPPDATA%\BDEncode\keepalive.ps1` |
+| WSL-életben tartó feladat | „BDEncode WSL” ütemezett feladat (a parancs magában a feladatban van) |
 | Debian WSL adatai | `%LOCALAPPDATA%\BDEncodeWSL\Debian` |
 | Weboldal | `http://localhost:8787/encoder/` |
 | WSL-en belüli munkaterület | `/home/<linux-felhasznalo>/encode` |

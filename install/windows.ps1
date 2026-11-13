@@ -395,7 +395,10 @@ Remove-Item -LiteralPath $legacyKeepAlivePath -Force -ErrorAction SilentlyContin
 
 $taskName = "BDEncode WSL"
 $taskUser = "$env:USERDOMAIN\$env:USERNAME"
-$keepAliveScriptPath = Join-Path $logDirectory "keepalive.ps1"
+# Az életben tartó ciklus magában a feladatban van (-EncodedCommand): a feladatütemező
+# által indított PowerShell egy gépen (2026-11-13) a %LOCALAPPDATA% alatti szkriptet
+# -File-lal nem futtatta (eredmény 0xFFFD0000), a -Command és -EncodedCommand ott is működik.
+$legacyKeepAliveScriptPath = Join-Path $logDirectory "keepalive.ps1"
 $safeDistroLiteral = $DistroName.Replace("'", "''")
 $safeUserLiteral = $LinuxUser.Replace("'", "''")
 $keepAliveScriptTemplate = @'
@@ -415,8 +418,9 @@ while ($true) {
 }
 '@
 $keepAliveScript = $keepAliveScriptTemplate.Replace("@DISTRO@", $safeDistroLiteral).Replace("@LINUX_USER@", $safeUserLiteral)
-[IO.File]::WriteAllText($keepAliveScriptPath, $keepAliveScript, [Text.UTF8Encoding]::new($true))
-$taskArguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $keepAliveScriptPath
+Remove-Item -LiteralPath $legacyKeepAliveScriptPath -Force -ErrorAction SilentlyContinue
+$encodedKeepAlive = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($keepAliveScript))
+$taskArguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand {0}' -f $encodedKeepAlive
 $taskAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument $taskArguments
 $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
 $taskPrincipal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel Limited
