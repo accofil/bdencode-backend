@@ -500,5 +500,8 @@ def test_a_single_clip_title_stays_on_the_strict_md5(tmp_path: Path, monkeypatch
 
     assert result.state is JobState.NEEDS_REVIEW
     assert "decodes differently from the disc" in (result.status_message or "")
+    # 4.3.2: a failed QC keeps no checkpoint, so a retry measures again.
+    stages = settings.data_root / "jobs" / result.id / ".stages"
+    assert stages.is_dir() and not (stages / "remux-qc.json").exists()
     assert not any("framemd5" in command for command in runner.commands)
     assert _demux(runner)[2] == r"S:\BDMV\PLAYLIST\00001.mpls"
