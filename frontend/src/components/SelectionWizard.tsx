@@ -978,6 +978,16 @@ export function SelectionWizard({
           value={externalSources}
           onChange={setExternalSources}
           available={capabilities.data?.constraints.external_sources?.available ?? false}
+          titleAudio={playlist.streams
+            .filter((stream) => stream.kind === "audio")
+            .map((stream) => ({
+              id: stream.id,
+              label: [
+                stream.language?.iso639_2t ?? "?",
+                `${stream.codec_profile || stream.codec} ${channelLayout(stream.channels) || ""}`.trim(),
+                stream.title,
+              ].filter(Boolean).join(" · "),
+            }))}
         />
       )}
 

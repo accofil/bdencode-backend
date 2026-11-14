@@ -9,13 +9,15 @@ from typing import Any, Mapping
 from .render import PITCH_KEEP, PITCH_RESTORE
 
 SOURCE_KEYS = {"id", "path", "tracks", "subtitles", "approved_map_sha256"}
-TRACK_KEYS = {"stream", "language", "name", "default", "position", "pitch"}
+TRACK_KEYS = {"stream", "language", "name", "default", "position", "pitch", "fill_from"}
 SUBTITLE_KEYS = {"path", "language", "name", "default", "forced"}
 
 _ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,15}$")
 _STREAM = re.compile(r"^(a:\d{1,2}|#0x[0-9a-f]{1,4})$")
 _LANGUAGE = re.compile(r"^[a-z]{2,3}(-[A-Za-z0-9]+)*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+# One of the title's own audio streams, by its scan id (audio:4352, audio:1).
+_TITLE_AUDIO = re.compile(r"^audio:[A-Za-z0-9._:-]{1,48}$")
 
 
 class ExternalSpecError(ValueError):
@@ -30,6 +32,9 @@ class ExternalTrack:
     default: bool = False
     position: int = 0
     pitch: str = PITCH_RESTORE
+    # The title's own audio stream that fills the parts the source lacks;
+    # None leaves them silent.
+    fill_from: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +106,9 @@ def parse_track(raw: Any) -> ExternalTrack:
     pitch = raw.get("pitch", PITCH_RESTORE)
     if pitch not in {PITCH_RESTORE, PITCH_KEEP}:
         raise ExternalSpecError("external track pitch must be restore or keep")
+    fill_from = raw.get("fill_from")
+    if fill_from is not None and not (isinstance(fill_from, str) and _TITLE_AUDIO.fullmatch(fill_from)):
+        raise ExternalSpecError("external track fill_from must name one of the title's audio streams")
     return ExternalTrack(
         stream=stream,
         language=_language(raw, "an external track"),
@@ -108,6 +116,7 @@ def parse_track(raw: Any) -> ExternalTrack:
         default=_flag(raw, "default", "external track"),
         position=position,
         pitch=pitch,
+        fill_from=fill_from,
     )
 
 

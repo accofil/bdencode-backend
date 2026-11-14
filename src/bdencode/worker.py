@@ -4661,8 +4661,11 @@ class PipelineWorker:
                 return False
             if review.get("map_sha256") != source.approved_map_sha256:
                 return False
-            done = [(item.get("stream"), item.get("pitch")) for item in review.get("tracks") or []]
-            if done != [(track.stream, track.pitch) for track in source.tracks]:
+            done = [
+                (item.get("stream"), item.get("pitch"), item.get("fill_from"))
+                for item in review.get("tracks") or []
+            ]
+            if done != [(track.stream, track.pitch, track.fill_from) for track in source.tracks]:
                 return False
             if len(review.get("subtitles") or []) != len(source.subtitles):
                 return False
@@ -10992,9 +10995,15 @@ class PipelineWorker:
                     stderr_path=paths.logs / "external-title-signature.log",
                 )
             _write_stage(marker, inputs, [title_signature])
+        # The title's own audio, by scan id: (ordinal in the reference, codec,
+        # sample rate), for a fill of the parts an external source lacks.
+        title_audio = {
+            stream.id: (ordinal, stream.codec, stream.sample_rate)
+            for ordinal, stream in enumerate(playlist.audio_streams)
+        }
         reviews = [
             self._fit_external_source(
-                paths, source, target_fps, title_signature, reference_sha256
+                paths, source, target_fps, title_signature, reference_sha256, title_audio
             )
             for source in selection.external_sources
         ]
@@ -11107,6 +11116,7 @@ class PipelineWorker:
         target_fps: Fraction,
         title_signature: Path,
         reference_sha256: str,
+        title_audio: Mapping[str, tuple[int, str, int | None]] | None = None,
     ) -> dict[str, Any]:
         directory = _ensure_contained_directory(
             self._external_root(paths) / source.id,
@@ -11177,6 +11187,7 @@ class PipelineWorker:
             self._render_external_track(
                 paths, source, index, track, info, input_args, directory,
                 document, map_sha256, target_fps, donor_fps, video_start,
+                title_audio or {},
             )
             for index, track in enumerate(source.tracks)
         ]
@@ -11215,6 +11226,7 @@ class PipelineWorker:
         target_fps: Fraction,
         donor_fps: Fraction,
         video_start: float,
+        title_audio: Mapping[str, tuple[int, str, int | None]] | None = None,
     ) -> dict[str, Any]:
         details = next((item for item in info.tracks if item.stream == track.stream), None)
         if details is None:
@@ -11245,6 +11257,35 @@ class PipelineWorker:
                 round(((audio_start - video_start) - int(first["offset"]) / float(target_fps)) * 1000)
             )
             copy = sync_ms <= 200
+        fill_argv: list[str] | None = None
+        fill_path = directory / f"{stem}.fill.f32"
+        fill_offset_samples = 0
+        if track.fill_from is not None:
+            found = (title_audio or {}).get(track.fill_from)
+            if found is None:
+                raise ReviewRequired(
+                    f"the title has no audio stream {track.fill_from} to fill from",
+                    details={"code": "external_source_invalid", "source": source.id},
+                )
+            fill_ordinal, fill_codec, fill_rate = found
+            reference_input = ["-i", str(paths.reference)]
+            fill_argv = external_render.stretch_command(
+                reference_input, f"a:{fill_ordinal}", fill_codec, details.channels,
+                Fraction(1), external_render.PITCH_RESTORE,
+                fill_rate or external_render.SAMPLE_RATE, fill_path,
+            )
+            title_video_start = self._external_first_time(
+                paths, reference_input, "v:0", directory / "title-video-start.json"
+            )
+            fill_start = self._external_first_time(
+                paths, reference_input, f"a:{fill_ordinal}", directory / f"{stem}-fill-start.json"
+            )
+            fill_offset_samples = int(
+                round((fill_start - title_video_start) * external_render.SAMPLE_RATE)
+            )
+            # A copy keeps the source as it is, gaps and all.
+            if int(document.get("unmatched_frames") or 0) > 0:
+                copy = False
         dialnorm = None
         if not copy and details.codec in {"ac3", "eac3"}:
             sample = directory / f"{stem}.first.ac3"
@@ -11287,6 +11328,11 @@ class PipelineWorker:
             "output": str(directory / f"{stem}.final.f32"),
             "priming_samples": encoding.priming_samples if encoding else 0,
             "correct_length": track.pitch == external_render.PITCH_KEEP and ratio != 1,
+            "fill": (
+                {"path": str(fill_path), "offset_samples": fill_offset_samples}
+                if fill_argv is not None
+                else None
+            ),
         }
         inputs = {
             "schema_version": 1,
@@ -11297,6 +11343,13 @@ class PipelineWorker:
             "encoding": asdict(encoding) if encoding else None,
             "stretch": [str(item) for item in stretch_argv],
         }
+        if fill_argv is not None:
+            # Absent without a fill, so an unfilled fit keeps its checkpoint.
+            inputs["fill"] = {
+                "from": track.fill_from,
+                "decode": [str(item) for item in fill_argv],
+                "offset_samples": fill_offset_samples,
+            }
         marker = paths.stages / f"external-{source.id}-{stem}.json"
         report_path = directory / f"{stem}.json"
         if not _valid_stage(marker, inputs, [output, report_path]):
@@ -11333,15 +11386,24 @@ class PipelineWorker:
                         )
                         spec["expected_stretched_samples"] = exact.stat().st_size // (4 * details.channels)
                         exact.unlink(missing_ok=True)
+                    if fill_argv is not None:
+                        self._runner(paths).run(
+                            fill_argv,
+                            cwd=directory,
+                            stderr_path=paths.logs / f"external-{source.id}-{stem}-fill.log",
+                        )
                     spec_path = directory / f"{stem}.spec.json"
                     atomic_write_json(spec_path, spec)
                     assembled = directory / f"{stem}.assemble.json"
-                    self._runner(paths).run(
-                        [sys.executable, "-m", "bdencode.external", "assemble", str(spec_path)],
-                        cwd=directory,
-                        stdout_path=assembled,
-                        stderr_path=paths.logs / f"external-{source.id}-{stem}-assemble.log",
-                    )
+                    try:
+                        self._runner(paths).run(
+                            [sys.executable, "-m", "bdencode.external", "assemble", str(spec_path)],
+                            cwd=directory,
+                            stdout_path=assembled,
+                            stderr_path=paths.logs / f"external-{source.id}-{stem}-assemble.log",
+                        )
+                    finally:
+                        fill_path.unlink(missing_ok=True)
                     silence = json.loads(assembled.read_text(encoding="utf-8"))
                     scale = float(silence.get("scale", 1.0))
                     self._runner(paths).run(
@@ -11368,6 +11430,9 @@ class PipelineWorker:
                         "scale": scale,
                         "stretched_samples": actual,
                         "silent_samples": silence.get("silent_samples", 0),
+                        "fill_from": track.fill_from,
+                        "filled_samples": silence.get("filled_samples", 0),
+                        "fill_gaps": silence.get("fill_gaps", []),
                         "file": output.name,
                     },
                 )
@@ -13348,6 +13413,14 @@ class PipelineWorker:
                 encoding = report.get("encoding")
                 how = "not re-encoded" if report.get("copy") else f"{encoding['codec']} {encoding['bit_rate'] // 1000} kbps"
                 lines.append(f"Track: {report['language']}, {report['codec']} {report['channels']} ch, {how}, pitch {report['pitch']}")
+                gaps = report.get("fill_gaps") or []
+                if report.get("fill_from") and gaps:
+                    gains = [float(item["gain_db"]) for item in gaps]
+                    lines.append(
+                        f"Parts not in the source: {len(gaps)}, "
+                        f"{int(report.get('filled_samples') or 0) / 48000:.1f} s, filled from the title's "
+                        f"own {report['fill_from']} at matched level ({min(gains):+.1f} to {max(gains):+.1f} dB)"
+                    )
             for report in review["subtitles"]:
                 lines.append(
                     f"Subtitle: {report['language']}, {report['kept']} cues, "

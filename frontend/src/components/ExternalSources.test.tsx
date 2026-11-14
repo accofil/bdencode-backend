@@ -145,6 +145,37 @@ describe("ExternalSourcesCard", () => {
     expect(value).toEqual([]);
   });
 
+  it("lets the parts the source lacks be filled from one of the film's own tracks", async () => {
+    mocked.probeExternalSource.mockResolvedValue({
+      kind: "file",
+      path: "/web.mkv",
+      fps: "24",
+      duration_seconds: 5470,
+      width: 1920,
+      height: 1080,
+      tracks: [{ stream: "a:0", codec: "aac", channels: 2, sample_rate: 48000, bit_rate: null, language: "hun", title: "AAC 2.0" }],
+      support: { available: true, missing: [], dvd_missing: [] },
+    });
+    let value: ExternalSourceSelection[] = [];
+    const onChange = vi.fn((next: ExternalSourceSelection[]) => { value = next; view.rerender(tree()); });
+    const client = new QueryClient();
+    const titleAudio = [{ id: "audio:1", label: "eng · E-AC-3 5.1 · Original Mix" }];
+    const tree = () => <QueryClientProvider client={client}><ExternalSourcesCard value={value} onChange={onChange} available titleAudio={titleAudio} /></QueryClientProvider>;
+    const view = render(tree());
+    fireEvent.change(screen.getByLabelText(/A forrás helye/), { target: { value: "/web.mkv" } });
+    fireEvent.click(screen.getByRole("button", { name: "Beolvasás" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: /AAC 2 csatorna/ }));
+    expect(value[0].tracks[0].fill_from).toBeNull();
+
+    const fill = screen.getByRole("combobox", { name: /A forrásból hiányzó részek/ });
+    expect(screen.getByRole("option", { name: "Csend" })).toBeTruthy();
+    fireEvent.change(fill, { target: { value: "audio:1" } });
+    expect(value[0].tracks[0]).toMatchObject({ stream: "a:0", fill_from: "audio:1" });
+    expect(value[0].approved_map_sha256).toBeNull();
+    fireEvent.change(screen.getByRole("combobox", { name: /A forrásból hiányzó részek/ }), { target: { value: "" } });
+    expect(value[0].tracks[0].fill_from).toBeNull();
+  });
+
   it("finds a file of a large folder by name and chooses an MKV by its name", async () => {
     const web = "/q/HUN-FULCRUM/fulcrum-tlws.2025.1080p.web.mkv";
     mocked.sources.mockImplementation(async (_path?: string, query?: string) => (

@@ -990,6 +990,8 @@ export interface ExternalTrackSelection {
   default?: boolean;
   position: number;
   pitch: "restore" | "keep";
+  /** The title's own audio stream filling the parts the source lacks (4.2); null leaves them silent. */
+  fill_from?: string | null;
 }
 
 export interface ExternalSubtitleSelection {
@@ -1054,6 +1056,10 @@ export interface ExternalReview {
     copy: boolean;
     encoding: { codec: string; bit_rate: number; dialnorm: number | null } | null;
     silent_samples: number;
+    /** 4.2: the title's own stream that filled the parts the source lacks. */
+    fill_from?: string | null;
+    filled_samples?: number;
+    fill_gaps?: { start_seconds: number; seconds: number; gain_db: number; level_from: "sides" | "whole_track" }[];
     file: string;
   }[];
   subtitles: { file: string; language: string; kept: number; dropped: number; clipped: number }[];

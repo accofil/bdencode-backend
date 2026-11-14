@@ -133,6 +133,113 @@ def test_assembly_survives_a_source_ending_early_or_starting_late(tmp_path: Path
     assert result[1_600:].max() == 0
 
 
+def _tone(np, count: int, amplitude: float, period: int = 96) -> "object":
+    return (amplitude * np.sin(2 * np.pi * np.arange(count) / period)).astype(np.float32)
+
+
+def test_a_gap_can_be_filled_from_the_titles_own_sound_at_the_sources_level(tmp_path: Path) -> None:
+    """The Last Whale Singer: the WEB-DL's credits lacked 11.3 s in nine places."""
+
+    np = pytest.importorskip("numpy")
+    rate = render.SAMPLE_RATE
+    donor = tmp_path / "in.f32"
+    donor.write_bytes(_tone(np, 20 * rate, 0.4).tobytes())
+    title = tmp_path / "title.f32"
+    # The title's own track: the same music 6 dB quieter, starting 1 s late.
+    title.write_bytes(_tone(np, 20 * rate, 0.2).tobytes())
+    output = tmp_path / "out.f32"
+    report = render.assemble(
+        donor,
+        output,
+        channels=1,
+        total_samples=12 * rate,
+        pieces=[render.Piece(0, 5 * rate, 0), render.Piece(6 * rate, 12 * rate, 5 * rate)],
+        fill=render.Fill(title, offset_samples=rate),
+    )
+    result = np.fromfile(output, dtype=np.float32)
+    assert len(result) == 12 * rate
+    assert report["silent_samples"] == 0
+    assert report["filled_samples"] == rate
+    [gap] = report["fill_gaps"]
+    assert gap["start_seconds"] == 5.0 and gap["seconds"] == 1.0
+    assert gap["level_from"] == "sides"
+    assert abs(gap["gain_db"] - 6.0) < 0.2
+    middle = result[5 * rate + 2_000 : 6 * rate - 2_000]
+    # The gap now sounds at the fitted level instead of silence...
+    assert abs(float(np.sqrt((middle**2).mean())) - 0.4 / 2**0.5) < 0.02
+    # ...and the crossover is smooth: no step at either edge.
+    assert float(np.abs(np.diff(result[5 * rate - 1_500 : 5 * rate + 1_500])).max()) < 0.05
+    # Away from the gap the fitted sound is untouched.
+    assert result[2 * rate] == pytest.approx(float(_tone(np, 3 * rate, 0.4)[2 * rate]))
+
+
+def test_a_gap_between_silent_sides_takes_the_whole_tracks_level(tmp_path: Path) -> None:
+    np = pytest.importorskip("numpy")
+    rate = render.SAMPLE_RATE
+    donor_samples = _tone(np, 30 * rate, 0.4)
+    donor_samples[8 * rate : 12 * rate] = 0  # a quiet passage around the gap
+    donor = tmp_path / "in.f32"
+    donor.write_bytes(donor_samples.tobytes())
+    title = tmp_path / "title.f32"
+    title.write_bytes(_tone(np, 30 * rate, 0.1).tobytes())
+    output = tmp_path / "out.f32"
+    report = render.assemble(
+        donor,
+        output,
+        channels=1,
+        total_samples=21 * rate,
+        pieces=[render.Piece(0, 10 * rate, 0), render.Piece(11 * rate, 21 * rate, 10 * rate)],
+        fill=render.Fill(title),
+    )
+    [gap] = report["fill_gaps"]
+    assert gap["level_from"] == "whole_track"
+    assert abs(gap["gain_db"] - 12.0) < 0.2  # 0.4 / 0.1, inside the +-12 dB limit
+
+
+def test_without_a_fill_the_gaps_stay_silent_and_report_no_fill(tmp_path: Path) -> None:
+    np = pytest.importorskip("numpy")
+    donor = tmp_path / "in.f32"
+    donor.write_bytes(np.ones(4_000, dtype=np.float32).tobytes())
+    output = tmp_path / "out.f32"
+    report = render.assemble(
+        donor, output, channels=1, total_samples=3_000,
+        pieces=[render.Piece(0, 1_000, 0), render.Piece(2_000, 3_000, 1_000)],
+    )
+    assert "fill_gaps" not in report and report["silent_samples"] == 1_000
+
+
+def test_a_changed_fill_means_the_fit_is_rendered_again(tmp_path: Path) -> None:
+    import json
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from bdencode.worker import PipelineWorker
+
+    directory = tmp_path / "work" / "external" / "e1"
+    directory.mkdir(parents=True)
+    (directory / "review.json").write_text(
+        json.dumps({"map_sha256": "a" * 64, "tracks": [{"stream": "a:0", "pitch": "restore"}], "subtitles": []}),
+        encoding="utf-8",
+    )
+    source = spec.parse_external_sources(
+        [{**GOOD, "approved_map_sha256": "a" * 64, "subtitles": [], "tracks": [{"stream": "a:0", "language": "hun"}]}]
+    )[0]
+    paths = SimpleNamespace(work=tmp_path / "work")
+    assert PipelineWorker._external_fit_is_current(None, paths, SimpleNamespace(external_sources=(source,)))  # type: ignore[arg-type]
+    filled = replace(source, tracks=(replace(source.tracks[0], fill_from="audio:4352"),))
+    assert not PipelineWorker._external_fit_is_current(None, paths, SimpleNamespace(external_sources=(filled,)))  # type: ignore[arg-type]
+
+
+def test_a_fill_names_one_of_the_titles_audio_streams() -> None:
+    track = {"stream": "a:0", "language": "hun", "fill_from": "audio:4352"}
+    parsed = spec.parse_external_sources([{**GOOD, "tracks": [track]}])
+    assert parsed[0].tracks[0].fill_from == "audio:4352"
+    assert spec.parse_external_sources([GOOD])[0].tracks[0].fill_from is None
+    for broken in ("4352", "audio:", "audio:1; rm -rf", 7):
+        with pytest.raises(spec.ExternalSpecError):
+            spec.parse_external_sources([{**GOOD, "tracks": [{**track, "fill_from": broken}]}])
+
+
 SRT = """1
 00:00:04,000 --> 00:00:06,000
 Before the title has it
