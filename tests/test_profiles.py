@@ -741,3 +741,47 @@ def test_ncore_x265_below_uhd_stays_at_level_5_1_with_two_lookahead_slices() -> 
     )
     params = effective.private_params()
     assert (params["level-idc"], params["lookahead-slices"], params["vbv-maxrate"]) == ("5.1", 2, 160_000)
+
+
+def test_extra_switches_reach_the_encoder_after_the_fields() -> None:
+    """4.3: switches with no field of their own, in x264/x265-params syntax."""
+
+    settings = recommended_profile(
+        VideoEncoder.X264,
+        detail_level="advanced",
+        overrides={"extra_params": "deadzone-inter=21:deadzone-intra=11", "subme": 11},
+    )
+    params = settings.private_params()
+    assert params["deadzone-inter"] == "21" and params["deadzone-intra"] == "11"
+    assert params["subme"] == 11
+    assert settings.to_dict()["extra_params"] == "deadzone-inter=21:deadzone-intra=11"
+    x265 = recommended_profile(VideoEncoder.X265, overrides={"extra_params": "selective-sao=2"})
+    assert x265.private_params()["selective-sao"] == "2"
+
+
+def test_no_extra_switches_keep_the_recorded_settings_unchanged() -> None:
+    assert "extra_params" not in recommended_profile(VideoEncoder.X264).to_dict()
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    (
+        ("ref=6", "has its own setting"),
+        ("crf=16", "has its own setting"),
+        ("stats=/tmp/x.log", "names a file"),
+        ("colorprim=bt2020", "names a file or reshapes the pipe"),
+        ("deadzone-inter", "is not key=value"),
+        ("aq-motion=1 ;rm", "is not key=value"),
+        ("a=1:a=2", "twice"),
+    ),
+)
+def test_extra_switches_that_would_clash_or_escape_are_refused(value: str, reason: str) -> None:
+    with pytest.raises(ValueError, match=reason):
+        recommended_profile(VideoEncoder.X264, overrides={"extra_params": value})
+
+
+def test_subme_and_the_extra_switches_are_offered_from_the_advanced_level() -> None:
+    for encoder in (VideoEncoder.X264, VideoEncoder.X265):
+        names = {item["name"] for item in profile_schema(encoder, "advanced")}
+        assert {"subme", "extra_params"} <= names
+    assert "subme" not in {item["name"] for item in profile_schema(VideoEncoder.X264, "beginner")}

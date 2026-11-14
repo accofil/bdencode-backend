@@ -117,6 +117,11 @@ DTSHD_EN = AudioOutput("DTSHDMA", 6, language="en")
         ("Housemaid.2025.2160p.UHD.BluRay.REMUX.DV.HDR.HEVC.TrueHD.7.1.Atmos-TAG", remux_facts(TRUEHD_ATMOS_EN, AudioOutput("DD", 6, language="en"), codec="HEVC", resolution="2160p", uhd=True, dynamic=HDR_DV)),
         ("Mother.and.Son.2022.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1", remux_facts(AudioOutput("DTSHDMA", 6, language="fr"))),
         ("McCabe.and.Mrs.Miller.1971.2160p.UHD.BluRay.REMUX.HEVC.FLAC.1.0-TAG", remux_facts(AudioOutput("FLAC", 1, language="en"), codec="HEVC", resolution="2160p", uhd=True)),
+        # The Hungarian remux standard: the audio before the codec, HUN after it.
+        ("The.Quiet.2005.1080p.BluRay.REMUX.DTS-HD.MA.5.1.AVC-TAG", remux_facts(DTSHD_EN)),
+        ("The.Quiet.2005.1080p.BluRay.REMUX.DTS-HD.MA.5.1.AVC.HUN-TAG", remux_facts(DTSHD_EN, AudioOutput("DD", 6, language="hu"))),
+        ("Az.Ugyved.1990.1080p.BluRay.REMUX.DTS-HD.MA.2.0.MPEG2.HUN-TAG", remux_facts(AudioOutput("DTSHDMA", 2, language="de"), AudioOutput("DD", 2, language="hu"), codec="MPEG-2")),
+        ("Housemaid.2025.2160p.UHD.BluRay.REMUX.DV.HDR.TrueHD.7.1.Atmos.HEVC-TAG", remux_facts(TRUEHD_ATMOS_EN, codec="HEVC", resolution="2160p", uhd=True, dynamic=HDR_DV)),
     ),
 )
 def test_truthful_remux_names_pass(name: str, plan: ReleaseFacts) -> None:
@@ -128,8 +133,10 @@ def test_truthful_remux_names_pass(name: str, plan: ReleaseFacts) -> None:
     (
         ("The.Quiet.2005.1080p.BluRay.DTS-HD.MA.5.1.x264-TAG", remux_facts(DTSHD_EN), "clean remux name"),
         ("The.Quiet.2005.1080p.BluRay.REMUX.HEVC.DTS-HD.MA.5.1-TAG", remux_facts(DTSHD_EN), "untouched video is AVC"),
-        ("The.Quiet.2005.1080p.BluRay.REMUX.DTS-HD.MA.5.1.AVC-TAG", remux_facts(DTSHD_EN), "before the video codec"),
-        ("The.Quiet.2005.1080p.BluRay.REMUX.AVC-TAG", remux_facts(DTSHD_EN), "default audio track's codec"),
+        ("The.Quiet.2005.1080p.BluRay.REMUX.AVC-TAG", remux_facts(DTSHD_EN), "original-language audio's codec"),
+        ("The.Quiet.2005.1080p.BluRay.REMUX.DTS-HD.MA.5.1.AVC.HUN-TAG", remux_facts(DTSHD_EN), "advertises HUN"),
+        ("The.Quiet.2005.1080p.BluRay.REMUX.DTS-HD.MA.5.1.HEVC-TAG", remux_facts(DTSHD_EN), "untouched video is AVC"),
+        ("Housemaid.2025.2160p.UHD.BluRay.REMUX.HDR.TrueHD.7.1.Atmos.HEVC-TAG", remux_facts(TRUEHD_ATMOS_EN, codec="HEVC", resolution="2160p", uhd=True, dynamic=HDR_DV), "must say DV"),
         ("The.Quiet.2005.1080p.BluRay.REMUX.AVC.DTS-HD.MA-TAG", remux_facts(DTSHD_EN), "channels"),
         ("The.Quiet.2005.1080p.BluRay.REMUX.AVC.DD.5.1-TAG", remux_facts(DTSHD_EN, AudioOutput("DD", 6, language="en")), "default audio track is DTS-HD MA"),
         ("Housemaid.2025.2160p.UHD.BluRay.REMUX.HDR.HEVC.TrueHD.7.1.Atmos-TAG", remux_facts(TRUEHD_ATMOS_EN, codec="HEVC", resolution="2160p", uhd=True, dynamic=HDR_DV), "must say DV"),

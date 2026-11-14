@@ -15,6 +15,10 @@ import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { formatDuration } from "../utils";
 import { Badge, Button, Card, Notice } from "./ui";
 
+function isFile(kind: string | undefined): boolean {
+  return kind === "mkv" || kind === "file" || kind === "subtitle";
+}
+
 function errorText(error: unknown): string {
   return error instanceof ApiError ? error.detail : error instanceof Error ? error.message : String(error);
 }
@@ -54,14 +58,16 @@ export function ExternalSourcesCard({
 }) {
   const [path, setPath] = useState("");
   const [browsing, setBrowsing] = useState<string | null>(null);
+  // What the open browser picks: the source itself or an SRT subtitle.
+  const [browseFor, setBrowseFor] = useState<"source" | "subtitle">("source");
   const [browseFilter, setBrowseFilter] = useState("");
   const serverFilter = useDebouncedValue(browseFilter.trim());
   const [subtitlePath, setSubtitlePath] = useState("");
   const [subtitleLanguage, setSubtitleLanguage] = useState("hun");
   const probe = useMutation({ mutationFn: (location: string) => api.probeExternalSource(location) });
   const folders = useQuery({
-    queryKey: ["external-browse", browsing, serverFilter],
-    queryFn: () => (serverFilter ? api.sources(browsing || undefined, serverFilter) : api.sources(browsing || undefined)),
+    queryKey: ["external-browse", browseFor, browsing, serverFilter],
+    queryFn: () => api.sources(browsing || undefined, serverFilter || undefined, browseFor === "subtitle" ? "subtitle" : "external"),
     enabled: browsing !== null,
     placeholderData: (previous) => previous,
   });
@@ -72,10 +78,21 @@ export function ExternalSourcesCard({
   }
 
   function choose(location: string) {
-    setPath(location);
     setBrowsing(null);
     setBrowseFilter("");
+    if (browseFor === "subtitle") {
+      setSubtitlePath(location);
+      return;
+    }
+    setPath(location);
     probe.mutate(location);
+  }
+
+  function toggleBrowser(target: "source" | "subtitle") {
+    const open = browsing !== null && browseFor === target;
+    setBrowseFor(target);
+    setBrowsing(open ? null : "");
+    setBrowseFilter("");
   }
   const info: ExternalProbe | undefined = probe.data;
   const current = value.find((item) => item.path === info?.path);
@@ -119,27 +136,7 @@ export function ExternalSourcesCard({
     setSubtitlePath("");
   }
 
-  return (
-    <Card className="external-card">
-      <div className="section-heading">
-        <div>
-          <span className="section-heading__icon"><FileAudio size={18} /></span>
-          <div>
-            <h3>{t("Hang vagy felirat más forrásból", "Audio or subtitles from another source")}</h3>
-            <p>{t("Például PAL DVD magyar szinkronja. A program a két kép összehasonlításából illeszti a sávot, akár eltérő sebesség és eltérő vágás esetén is. Kódolás előtt meghallgathatod és jóvá kell hagynod.", "For example a PAL DVD's dub. The track is fitted by comparing the two pictures, even with another speed and another cut. You can listen to it and must approve it before the encode.")}</p>
-          </div>
-        </div>
-      </div>
-      {!available && <Notice tone="warning">{t("Ezen a szerveren hiányzik az ehhez szükséges eszköz (lásd a Rendszer oldalt).", "A tool this needs is missing on this server (see the System page).")}</Notice>}
-      <label className="field">
-        {t("A forrás helye: videófájl, DVD-mappa vagy DVD-képfájlt tartalmazó mappa", "Where the source is: a video file, a DVD folder or a folder with a DVD image")}
-        <input value={path} disabled={!available} onChange={(event) => setPath(event.target.value)} spellCheck={false} />
-      </label>
-      <div className="release-actions">
-        <Button variant="secondary" icon={<Search size={15} />} loading={probe.isPending} disabled={!available || !path.trim()} onClick={() => probe.mutate(path.trim())}>{t("Beolvasás", "Read")}</Button>
-        <Button variant="ghost" icon={<FolderOpen size={15} />} disabled={!available} onClick={() => { setBrowsing(browsing === null ? "" : null); setBrowseFilter(""); }}>{t("Tallózás", "Browse")}</Button>
-      </div>
-      {browsing !== null && folders.data && (
+  const browser = browsing !== null && folders.data && (
         <div className="external-browser">
           <div className="external-browser__roots">
             {folders.data.roots.map((root) => <Button key={root} variant="ghost" onClick={() => openFolder(root)}>{root}</Button>)}
@@ -165,14 +162,38 @@ export function ExternalSourcesCard({
             {folders.data.entries.map((entry) => (
               <li key={entry.path}>
                 {/* A file cannot be opened as a folder: its name chooses it. */}
-                <button type="button" onClick={() => (entry.kind === "mkv" ? choose(entry.path) : openFolder(entry.path))}>{entry.name}</button>
-                <Button variant="ghost" onClick={() => choose(entry.path)}>{t("Ezt választom", "Choose")}</Button>
+                <button type="button" onClick={() => (isFile(entry.kind) ? choose(entry.path) : openFolder(entry.path))}>{entry.name}</button>
+                {(browseFor === "source" || isFile(entry.kind)) && (
+                  <Button variant="ghost" onClick={() => choose(entry.path)}>{t("Ezt választom", "Choose")}</Button>
+                )}
               </li>
             ))}
             {!folders.data.entries.length && <li className="muted">{t("Nincs találat ebben a mappában.", "Nothing found in this folder.")}</li>}
           </ul>
         </div>
-      )}
+      );
+
+  return (
+    <Card className="external-card">
+      <div className="section-heading">
+        <div>
+          <span className="section-heading__icon"><FileAudio size={18} /></span>
+          <div>
+            <h3>{t("Hang vagy felirat más forrásból", "Audio or subtitles from another source")}</h3>
+            <p>{t("Például PAL DVD magyar szinkronja. A program a két kép összehasonlításából illeszti a sávot, akár eltérő sebesség és eltérő vágás esetén is. Kódolás előtt meghallgathatod és jóvá kell hagynod.", "For example a PAL DVD's dub. The track is fitted by comparing the two pictures, even with another speed and another cut. You can listen to it and must approve it before the encode.")}</p>
+          </div>
+        </div>
+      </div>
+      {!available && <Notice tone="warning">{t("Ezen a szerveren hiányzik az ehhez szükséges eszköz (lásd a Rendszer oldalt).", "A tool this needs is missing on this server (see the System page).")}</Notice>}
+      <label className="field">
+        {t("A forrás helye: videófájl, DVD-mappa vagy DVD-képfájlt tartalmazó mappa", "Where the source is: a video file, a DVD folder or a folder with a DVD image")}
+        <input value={path} disabled={!available} onChange={(event) => setPath(event.target.value)} spellCheck={false} />
+      </label>
+      <div className="release-actions">
+        <Button variant="secondary" icon={<Search size={15} />} loading={probe.isPending} disabled={!available || !path.trim()} onClick={() => probe.mutate(path.trim())}>{t("Beolvasás", "Read")}</Button>
+        <Button variant="ghost" icon={<FolderOpen size={15} />} disabled={!available} onClick={() => toggleBrowser("source")}>{t("Tallózás", "Browse")}</Button>
+      </div>
+      {browseFor === "source" && browser}
       {probe.isError && <Notice tone="danger">{errorText(probe.error)}</Notice>}
       {info && (
         <div className="external-tracks">
@@ -223,12 +244,14 @@ export function ExternalSourcesCard({
             <label className="field">{t("SRT-felirat ehhez a forráshoz (teljes útvonal)", "SRT subtitle for this source (full path)")}
               <input value={subtitlePath} spellCheck={false} onChange={(event) => setSubtitlePath(event.target.value)} />
             </label>
+            <Button variant="ghost" icon={<FolderOpen size={15} />} onClick={() => toggleBrowser("subtitle")}>{t("SRT tallózása", "Browse for an SRT")}</Button>
             <label className="field">{t("Nyelv", "Language")}
               <select value={subtitleLanguage} onChange={(event) => setSubtitleLanguage(event.target.value)}>
                 {LANGUAGE_CHOICES.map(([code, label]) => <option key={code} value={code}>{label}</option>)}
               </select>
             </label>
           </div>
+          {browseFor === "subtitle" && browser}
           <Button variant="ghost" disabled={!subtitlePath.trim()} onClick={addSubtitle}>{t("Felirat hozzáadása", "Add the subtitle")}</Button>
         </div>
       )}

@@ -192,3 +192,22 @@ def test_the_name_filter_searches_the_whole_folder(tmp_path: Path, monkeypatch) 
     ]
     assert found["truncated"] is False
     assert found["total"] == 1
+
+
+def test_the_external_browser_lists_its_own_files(tmp_path: Path) -> None:
+    client, settings, _ = _client(tmp_path)
+    root = settings.source_roots[0]
+    (root / "DVD").mkdir()
+    for name in ("film.mkv", "dub.mp4", "old.avi", "disc.iso", "hun.srt", "notes.txt"):
+        (root / name).write_bytes(b"")
+
+    def listed(**params: str) -> list[tuple[str, str]]:
+        document = client.get("/api/v1/sources", params=params).json()
+        return [(item["name"], item["kind"]) for item in document["entries"]]
+
+    assert listed() == [("DVD", "folder"), ("film.mkv", "mkv")]
+    assert listed(files="external") == [
+        ("DVD", "folder"), ("disc.iso", "file"), ("dub.mp4", "file"), ("film.mkv", "mkv"), ("old.avi", "file"),
+    ]
+    assert listed(files="subtitle") == [("DVD", "folder"), ("hun.srt", "subtitle")]
+    assert client.get("/api/v1/sources", params={"files": "other"}).status_code == 422

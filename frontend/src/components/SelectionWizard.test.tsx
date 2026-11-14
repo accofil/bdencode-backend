@@ -227,6 +227,33 @@ describe("SelectionWizard", () => {
     expect(screen.getByText(/szöveges felirat \(nem PGS\)/)).toBeInTheDocument();
   });
 
+  it("builds the name from the file by the chosen rules, and keeps a name the operator typed", async () => {
+    const user = userEvent.setup();
+    const job = makeJob({ state: "AWAITING_SELECTION", settings: { detail_level: "beginner" } });
+    renderApp(<SelectionWizard job={job} scan={makeScan()} onComplete={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Tovább" }));
+    await user.click(screen.getByRole("button", { name: "Tovább" }));
+    await user.click(screen.getByRole("button", { name: "Tovább" }));
+
+    const name = screen.getByLabelText(/^Kimeneti fájlnév/) as HTMLInputElement;
+    expect(name.value).toBe("Mintafilm.1080p.BluRay.DD5.1.x264");
+    await user.type(screen.getByLabelText("Release-tag"), "TAG");
+    expect(name.value).toBe("Mintafilm.1080p.BluRay.DD5.1.x264-TAG");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Névsablon" }), "hungarian");
+    expect(name.value).toBe("Mintafilm.1080p.BluRay.DD5.1.x264-TAG");
+
+    await user.clear(name);
+    await user.type(name, "Mintafilm.2020.My.Own.Name");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Névsablon" }), "aither");
+    expect(name.value).toBe("Mintafilm.2020.My.Own.Name");
+
+    await user.click(screen.getByRole("button", { name: /Név újra összerakása \(Aither\)/ }));
+    expect(name.value).toBe("Mintafilm.2020.My.Own.Name.1080p.BluRay.DD5.1.x264-TAG");
+    // The tag and the scheme are remembered by the browser; leave none behind.
+    window.localStorage.removeItem("bdencode.release-tag");
+    window.localStorage.removeItem("bdencode.naming-style");
+  });
+
   it("walks through playlist, tracks and video before server validation and save", async () => {
     const user = userEvent.setup();
     const onComplete = vi.fn();
@@ -263,7 +290,7 @@ describe("SelectionWizard", () => {
       "job-1",
       expect.objectContaining({
         playlist_id: "00001",
-        output_name: "Mintafilm.1080p.BluRay.x264",
+        output_name: "Mintafilm.1080p.BluRay.DDP5.1.x264",
         video: expect.objectContaining({
           detail_level: "beginner",
           settings: expect.objectContaining({ crf: 18 }),
@@ -337,7 +364,7 @@ describe("SelectionWizard", () => {
     await user.type(screen.getByLabelText("IMDb ID"), "tt0123456");
     await user.clear(screen.getByRole("textbox", { name: "Release-tag" }));
     await user.type(screen.getByRole("textbox", { name: "Release-tag" }), "TAG");
-    await user.click(screen.getByRole("button", { name: /Név javaslata/ }));
+    await user.click(screen.getByRole("button", { name: /Név (újra )?összerakása/ }));
     expect(screen.getByDisplayValue("Spiritual.Love.1987.1080p.BluRay.REMUX.AVC.TrueHD.5.1-TAG")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Terv ellenőrzése" }));
@@ -389,7 +416,7 @@ describe("SelectionWizard", () => {
     await user.click(screen.getByRole("button", { name: "Tovább" }));
     await user.clear(screen.getByRole("textbox", { name: "Release-tag" }));
     await user.type(screen.getByRole("textbox", { name: "Release-tag" }), "TAG");
-    await user.click(screen.getByRole("button", { name: /Név javaslata/ }));
+    await user.click(screen.getByRole("button", { name: /Név (újra )?összerakása/ }));
     expect(screen.getByDisplayValue("Housemaid.2025.2160p.UHD.BluRay.REMUX.DV.HDR.HEVC.TrueHD.7.1.Atmos-TAG")).toBeInTheDocument();
   });
 
@@ -442,7 +469,7 @@ describe("SelectionWizard", () => {
     expect(screen.getByRole("button", { name: "Ask for an AI suggestion" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Next" }));
-    expect(screen.getByRole("button", { name: /Suggest name/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Build the name/ })).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Image host" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Check plan" })).toBeInTheDocument();
   });
@@ -469,7 +496,7 @@ describe("SelectionWizard", () => {
     await user.click(screen.getByRole("button", { name: "Tovább" }));
     await user.click(screen.getByRole("button", { name: "Tovább" }));
     await user.type(screen.getByLabelText("Release-tag"), "TAG");
-    await user.click(screen.getByRole("button", { name: "Név javaslata (magyar szabvány)" }));
+    await user.click(screen.getByRole("button", { name: /Név (újra )?összerakása \(nCore\)/ }));
     expect(screen.getByDisplayValue("Mintafilm.1080p.BluRay.DDP5.1.x264.HUN-TAG")).toBeInTheDocument();
     expect(window.localStorage.getItem("bdencode.release-tag")).toBe("TAG");
 

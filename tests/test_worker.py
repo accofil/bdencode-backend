@@ -2280,16 +2280,20 @@ def test_final_subtitle_payload_integrity_is_fail_closed(context, failure_mode):
         "Movie.2026.DTS-HD.MA.1080p.BluRay.x264",
     ),
 )
-def test_release_name_policy_rejects_source_tags_and_false_codec_claims(
+def test_release_name_policy_advises_on_source_tags_and_false_codec_claims(
     context, output_name
 ):
+    """4.3: the release-name rules advise; the operator's name is kept."""
+
     _database, _settings, scan, _scanner, _runner, _worker = context
     job = _enqueue(_database, scan.source).model_copy(
         update={"selection": _selection(output_name=output_name)}
     )
 
-    with pytest.raises(ReviewRequired, match="output_name"):
-        parse_selection(job, scan)
+    parsed = parse_selection(job, scan)
+
+    assert parsed.output_name == output_name
+    assert parsed.name_warnings and all("output_name" in item for item in parsed.name_warnings)
 
 
 def test_parse_selection_reads_the_tracker_profile(context) -> None:

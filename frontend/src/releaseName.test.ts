@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MediaStream, Playlist, TrackSelection, VideoProperties } from "./api/types";
 import {
+  buildFitName,
   buildReleaseName,
   buildRemuxName,
   plannedDynamicRange,
@@ -161,5 +162,57 @@ describe("buildRemuxName", () => {
     expect(remuxReleaseAudio([track], playlist)[0].codec).toBe("FLAC");
     expect(remuxResolution({ ...video, field_order: "tt", frame_rate: "30000/1001" })).toBe("1080i");
     expect(remuxResolution({ ...video, field_order: "tt", frame_rate: "25/1" })).toBe("1080p");
+  });
+});
+
+
+describe("Hungarian remux names and fitted releases", () => {
+  const video1080 = { height: 1080, field_order: "progressive", frame_rate: "24000/1001" } as VideoProperties;
+
+  it("writes the Hungarian remux standard: the original audio before the codec, HUN after it", () => {
+    const name = buildRemuxName({
+      base: "Az.Ugyved.1990",
+      uhd: false,
+      video: video1080,
+      videoCodec: "mpeg2video",
+      audio: [audio("DTSHDMA", 2, "de"), audio("DD", 2, "hu")],
+      dynamicRange: ["SDR"],
+      tag: "TAG",
+      style: "hungarian",
+    });
+    expect(name).toBe("Az.Ugyved.1990.1080p.BluRay.REMUX.DTS-HD.MA.2.0.MPEG2.HUN-TAG");
+    expect(buildRemuxName({
+      base: "Az.Ugyved.1990", uhd: false, video: video1080, videoCodec: "mpeg2video",
+      audio: [audio("DTSHDMA", 2, "de")], dynamicRange: ["SDR"], tag: "TAG",
+    })).toBe("Az.Ugyved.1990.GERMAN.1080p.BluRay.REMUX.MPEG-2.DTS-HD.MA.2.0-TAG");
+  });
+
+  it("keeps a fitted encode's kind and adds HUN for the fitted Hungarian dub", () => {
+    const input = {
+      sourceName: "The.Last.Whale.Singer.2025.1080p.BluRay.DD5.1.x264-PENICILLIN.mkv",
+      audio: [audio("DDP", 6, "en")],
+      externalLanguages: ["hun"],
+      video: video1080,
+      videoCodec: "h264",
+      uhd: false,
+      dynamicRange: ["SDR"],
+      tag: "TAG",
+    };
+    expect(buildFitName({ ...input, style: "hungarian" })).toBe("The.Last.Whale.Singer.2025.1080p.BluRay.DDP5.1.x264.HUN-TAG");
+    expect(buildFitName({ ...input, style: "aither" })).toBe("The.Last.Whale.Singer.2025.1080p.BluRay.DDP5.1.x264-TAG");
+  });
+
+  it("names a fitted remux by the remux scheme", () => {
+    expect(buildFitName({
+      sourceName: "Film.2020.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-GRP.mkv",
+      style: "hungarian",
+      audio: [audio("DTSHDMA", 6, "en")],
+      externalLanguages: ["hun"],
+      video: video1080,
+      videoCodec: "h264",
+      uhd: false,
+      dynamicRange: ["SDR"],
+      tag: "TAG",
+    })).toBe("Film.2020.1080p.BluRay.REMUX.DTS-HD.MA.5.1.AVC.HUN-TAG");
   });
 });

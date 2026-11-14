@@ -72,7 +72,10 @@ import {
   namingStyle,
   plannedDynamicRange,
   releaseAudio,
+  buildFitName,
+  rememberedNamingStyle,
   rememberedReleaseTag,
+  rememberNamingStyle,
   rememberReleaseTag,
   remuxDynamicRange,
   remuxReleaseAudio,
@@ -80,7 +83,7 @@ import {
   titleBaseOf,
   TRACKER_PROFILE_LABELS,
 } from "../releaseName";
-import type { TrackerProfile } from "../releaseName";
+import type { NamingStyle, TrackerProfile } from "../releaseName";
 import { aitherEncodeAudio, arrangeForTracker, plannedOrder } from "../trackerArrangement";
 import { FieldHelpButton } from "./EncoderHelp";
 import { languageLabel } from "./ReviewPanels";
@@ -100,6 +103,7 @@ const GROUP_LABELS: Record<string, LocalText> = {
   bitstream: { hu: "Bitstream", en: "Bitstream" },
   x264: { hu: "x264-specifikus", en: "x264-specific" },
   x265: { hu: "x265-specifikus", en: "x265-specific" },
+  custom: { hu: "Egyéb kapcsolók", en: "Other switches" },
 };
 
 function groupLabel(group: string): string {
@@ -441,6 +445,13 @@ export function SelectionWizard({
   const [trackerProfile, setTrackerProfile] = useState<TrackerProfile>(initial?.trackerProfile ?? "none");
   const [arrangementNotes, setArrangementNotes] = useState<string[]>([]);
   const [releaseTag, setReleaseTag] = useState(() => rememberedReleaseTag());
+  // Which rules the name is built by: chosen here, defaulting to the tracker
+  // profile's; the rules only suggest, the name stays the operator's (4.3).
+  const [nameStyle, setNameStyle] = useState<NamingStyle>(
+    () => rememberedNamingStyle() ?? namingStyle(initial?.trackerProfile ?? "none"),
+  );
+  // A name typed by the operator, or kept from a saved selection, is not rebuilt.
+  const [nameEdited, setNameEdited] = useState(Boolean(initial?.outputName));
   const [aiQualityPriority, setAiQualityPriority] = useState<AIQualityPriority>("balanced");
   const [aiTargetSize, setAiTargetSize] = useState("");
   const [aiGenre, setAiGenre] = useState("");
@@ -630,6 +641,7 @@ export function SelectionWizard({
 
   function chooseTrackerProfile(profile: TrackerProfile) {
     setTrackerProfile(profile);
+    if (profile !== "none") setNameStyle(namingStyle(profile));
     setValidation(null);
     if (untouched || !playlist) {
       setArrangementNotes([]);
@@ -648,33 +660,59 @@ export function SelectionWizard({
     setValidation(null);
   }
 
-  function suggestReleaseName() {
-    if (!playlist) return;
-    const tag = sanitizeReleaseTag(releaseTag);
-    rememberReleaseTag(tag);
-    setReleaseTag(tag);
+  /** The name the chosen rules build from the file's data, or null before a playlist. */
+  function composeName(tag: string): string | null {
+    if (!playlist) return null;
+    const base = titleBaseOf(outputName || job.name || basename(scan.source));
+    if (fitMode) {
+      return buildFitName({
+        sourceName: basename(scan.source),
+        style: nameStyle,
+        audio: releaseAudio(tracks, playlist),
+        externalLanguages: externalSources.flatMap((source) => source.tracks.map((track) => track.language)),
+        video: videoStream?.video,
+        videoCodec: videoStream?.codec ?? "h264",
+        uhd: scan.disc_kind === "uhd",
+        dynamicRange: remuxDynamicRange(videoStream?.video),
+        tag,
+      });
+    }
     if (remuxMode) {
-      setOutputName(buildRemuxName({
-        base: titleBaseOf(outputName || job.name || basename(scan.source)),
+      return buildRemuxName({
+        base,
         uhd: scan.disc_kind === "uhd",
         video: videoStream?.video,
         videoCodec: videoStream?.codec ?? "h264",
         audio: remuxReleaseAudio(tracks, playlist),
         dynamicRange: remuxDynamicRange(videoStream?.video),
         tag,
-      }));
-      setValidation(null);
-      return;
+        style: nameStyle,
+      });
     }
-    setOutputName(buildReleaseName({
-      base: titleBaseOf(outputName || job.name || basename(scan.source)),
+    return buildReleaseName({
+      base,
       encoder,
-      style: namingStyle(trackerProfile),
+      style: nameStyle,
       audio: releaseAudio(tracks, playlist),
       dynamicRange: plannedDynamicRange(encoder, videoStream?.video, dynamicHdr, temporalFilter),
       tag,
-    }));
+    });
+  }
+
+  function suggestReleaseName() {
+    const tag = sanitizeReleaseTag(releaseTag);
+    rememberReleaseTag(tag);
+    setReleaseTag(tag);
+    const next = composeName(tag);
+    if (!next) return;
+    setOutputName(next);
+    setNameEdited(false);
     setValidation(null);
+  }
+
+  function chooseNameStyle(style: NamingStyle) {
+    setNameStyle(style);
+    rememberNamingStyle(style);
   }
 
   function updateTrack(streamId: string, update: Partial<TrackSelection>) {
@@ -730,6 +768,17 @@ export function SelectionWizard({
     playlist?.track_analysis,
   ));
   const videoStream = playlist?.streams.find((stream) => stream.kind === "video");
+
+  useEffect(() => {
+    if (nameEdited) return;
+    const next = composeName(sanitizeReleaseTag(releaseTag));
+    if (next && next !== outputName) {
+      setOutputName(next);
+      setValidation(null);
+    }
+    // composeName reads exactly these inputs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nameEdited, nameStyle, releaseTag, tracks, playlist, remuxMode, fitMode, dynamicHdr, temporalFilter, externalSources, encoder]);
   const missingColorFields = missingSourceColorFields(videoStream?.video);
   const colorApiIssue = validate.error instanceof ApiError
     ? sourceColorIssueFromPayload(validate.error.payload)
@@ -1219,7 +1268,7 @@ export function SelectionWizard({
 
             <label className="field">
               <span>{t("Kimeneti fájlnév", "Output file name")}</span>
-              <div className="input-suffix"><input ref={outputNameInput} value={outputName} onChange={(event) => { setOutputName(event.target.value); setValidation(null); }} /><span>.mkv</span></div>
+              <div className="input-suffix"><input ref={outputNameInput} value={outputName} onChange={(event) => { setOutputName(event.target.value); setNameEdited(true); setValidation(null); }} /><span>.mkv</span></div>
             </label>
             <div className="release-name-tools">
               <label className="field">
@@ -1227,8 +1276,19 @@ export function SelectionWizard({
                 <input aria-label={t("Release-tag", "Release tag")} maxLength={32} value={releaseTag} placeholder={t("pl. TAG", "e.g. TAG")} onChange={(event) => setReleaseTag(event.target.value)} />
                 <small>{t("A böngésző megjegyzi. Aither-névben „-TAG”, magyar névben „HUN-TAG” alakban jelenik meg.", "The browser remembers it. It appears as “-TAG” in an Aither name and as “HUN-TAG” in a Hungarian name.")}</small>
               </label>
-              <Button variant="secondary" icon={<Tag size={17} />} onClick={suggestReleaseName} disabled={fitMode}>
-                {t("Név javaslata", "Suggest name")} ({remuxMode ? "Aither remux" : namingStyle(trackerProfile) === "hungarian" ? t("magyar szabvány", "Hungarian standard") : "Aither"})
+              <label className="field">
+                <span>{t("Névsablon", "Naming rules")}</span>
+                <select aria-label={t("Névsablon", "Naming rules")} value={nameStyle} onChange={(event) => chooseNameStyle(event.target.value as NamingStyle)}>
+                  <option value="aither">Aither</option>
+                  <option value="hungarian">{t("nCore (magyar szabvány)", "nCore (Hungarian standard)")}</option>
+                </select>
+                <small>{t(
+                  "Alapértelmezés a tracker-profil szerint. A név ezek alapján a fájladatokból áll össze; átírhatod, a szabályok csak javaslatok.",
+                  "Defaults to the tracker profile's. The name is built from the file's data by these rules; you may change it, the rules only suggest.",
+                )}</small>
+              </label>
+              <Button variant="secondary" icon={<Tag size={17} />} onClick={suggestReleaseName}>
+                {nameEdited ? t("Név újra összerakása", "Build the name again") : t("Név összerakása", "Build the name")} ({nameStyle === "hungarian" ? "nCore" : "Aither"}{remuxMode || (fitMode && /\.REMUX\./i.test(basename(scan.source))) ? " remux" : ""})
               </Button>
             </div>
             {remuxMode && !fitMode && (

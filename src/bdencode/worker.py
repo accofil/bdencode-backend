@@ -962,6 +962,9 @@ class ParsedSelection:
     mode: str = "encode"
     remux: RemuxOptions | None = None
     external_sources: tuple[external_spec.ExternalSource, ...] = ()
+    # Where the name strays from the release-name rules: shown as advice,
+    # never a stop (4.2.1); the operator may name a release their own way.
+    name_warnings: tuple[str, ...] = ()
 
     @property
     def dub_may_be_default(self) -> bool:
@@ -2709,17 +2712,19 @@ def parse_selection(
             f"dynamic HDR retention is not possible: {exc}",
             details={"code": f"dynamic_hdr_{exc.code}"},
         ) from exc
-    _validate_release_name(
-        output_name,
-        facts=release_facts(
-            encoder=encoder,
-            playlist=playlist,
-            tracks=tracks,
-            settings=settings,
-            dynamic_plan=dynamic_plan,
+    return replace(
+        parsed,
+        name_warnings=_release_name_warnings(
+            output_name,
+            facts=release_facts(
+                encoder=encoder,
+                playlist=playlist,
+                tracks=tracks,
+                settings=settings,
+                dynamic_plan=dynamic_plan,
+            ),
         ),
     )
-    return parsed
 
 
 def parse_fit_selection(job: Job, scan: DiscScan) -> ParsedSelection:
@@ -3001,11 +3006,12 @@ def parse_remux_selection(job: Job, scan: DiscScan) -> ParsedSelection:
     upload_image_set = str(raw.get("upload_image_set", "all")).lower()
     if upload_image_set not in UPLOAD_IMAGE_SETS:
         raise ReviewRequired("upload_image_set must be all, sdr or native")
-    _validate_release_name(
+    name_warnings = _release_name_warnings(
         output_name,
         facts=remux_release_facts(scan=scan, playlist=playlist, tracks=tracks),
     )
     return ParsedSelection(
+        name_warnings=name_warnings,
         external_sources=_parse_external_sources(raw),
         playlist_id=playlist_id,
         angle=1,
@@ -3262,12 +3268,12 @@ def _planner_crop(value: VapourSynthCrop) -> PlannerCrop:
     return PlannerCrop(value.left, value.top, value.right, value.bottom)
 
 
-def _validate_release_name(output_name: str, *, facts: ReleaseFacts) -> None:
-    """Reject inherited source metadata and every claim the plan does not back."""
+def _release_name_warnings(output_name: str, *, facts: ReleaseFacts) -> tuple[str, ...]:
+    """Where the name strays from the release-name rules: inherited source
+    metadata, or a claim the plan does not back.  Advice only: the name's
+    safety as a file name is checked separately (``_SAFE_OUTPUT_RE``)."""
 
-    problems = release_name_problems(output_name, facts)
-    if problems:
-        raise ReviewRequired(problems[0], details={"problems": problems})
+    return tuple(release_name_problems(output_name, facts))
 
 
 def _track_name(item: TrackSelection, stream: MediaStream) -> str:
@@ -12002,12 +12008,21 @@ class PipelineWorker:
             for _item, stream in retained
             if stream.kind is StreamKind.AUDIO
         }
-        _validate_release_name(
+        name_warnings = _release_name_warnings(
             selection.output_name,
             facts=remux_release_facts(
                 scan=scan, playlist=playlist, tracks=selection.tracks, atmos=atmos
             ),
         )
+        if name_warnings:
+            self.database.add_event(
+                EventCreate(
+                    job_id=job.id,
+                    kind="worker.release-name-advice",
+                    message="the output name strays from the release-name rules; kept as chosen: "
+                    + "; ".join(name_warnings),
+                )
+            )
         video_stream = playlist.video_streams[0]
         uhd = scan.disc_kind is DiscKind.UHD
         video_props = video_stream.video

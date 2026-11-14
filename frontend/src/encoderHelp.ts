@@ -1382,6 +1382,19 @@ export const ENCODER_HELP: EncoderHelpData[] = [
       en: "A bitstream in Annex B (start code) format; BDEncode's processing chain requires it.",
     },
   },
+  {
+    field: "extra_params",
+    title: { hu: "Egyéb kapcsolók", en: "Other switches" },
+    encoders: ["x264", "x265"],
+    what: {
+      hu: "Olyan x264/x265 kapcsolók, amelyeknek nincs saját mezője, kulcs=érték:kulcs=érték alakban (mint az -x264-params / -x265-params). Például x264: deadzone-inter=21:deadzone-intra=11, x265: selective-sao=2:aq-motion=1.",
+      en: "x264/x265 switches with no field of their own, as key=value:key=value (like -x264-params / -x265-params). For example x264: deadzone-inter=21:deadzone-intra=11, x265: selective-sao=2:aq-motion=1.",
+    },
+    effect: {
+      hu: "A kapcsolók a mezők értékei után kerülnek a kódolóhoz. Nem adható meg itt az, aminek saját mezője van (azt ott állítsd), és az sem, ami fájlt ír vagy olvas, vagy a feldolgozási láncot változtatja (például stats, qpfile, pass, input-res, színtér). Egy elírt vagy ismeretlen kapcsoló a kódolás indulásakor hibát ad.",
+      en: "The switches reach the encoder after the fields' values. A switch with its own field cannot be given here (set it there), nor one that reads or writes a file or changes the processing chain (for example stats, qpfile, pass, input-res, colour space). A misspelt or unknown switch fails the encode as it starts.",
+    },
+  },
 ];
 
 /** The wizard's setting groups, in the order the help page shows them. */
@@ -1393,6 +1406,7 @@ export const HELP_GROUPS: HelpGroup[] = [
   { id: "transform", title: { hu: "Transzformáció és kvantálás", en: "Transform and quantization" }, fields: ["trellis", "fast_pskip", "dct_decimate", "chroma_qp_offset", "cbqpoffs", "crqpoffs", "rd", "rdoq_level", "tu_intra_depth", "tu_inter_depth", "limit_tu", "rect", "amp", "early_skip", "rskip"] },
   { id: "filter", title: { hu: "Képszűrés", en: "Filtering" }, fields: ["deblock_alpha", "deblock_beta", "sao", "limit_sao", "strong_intra_smoothing"] },
   { id: "format", title: { hu: "Formátum, szín és bitstream", en: "Format, colour and bitstream" }, fields: ["profile", "level", "bit_depth", "pixel_format", "color", "hdr10", "aud", "repeat_headers", "hrd", "high_tier", "annexb"] },
+  { id: "custom", title: { hu: "Egyéb kapcsolók", en: "Other switches" }, fields: ["extra_params"] },
 ];
 
 const HELP_BY_FIELD = new Map(ENCODER_HELP.map((entry) => [entry.field, entry]));
