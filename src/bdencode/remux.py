@@ -1050,7 +1050,12 @@ def stream_probe_command(path: object, *, ffprobe: str = "ffprobe") -> list[str]
 
 
 def decoded_md5_command(
-    path: object, stream: str, *, input_args: Sequence[str] = (), ffmpeg: str = "ffmpeg"
+    path: object,
+    stream: str,
+    *,
+    input_args: Sequence[str] = (),
+    ffmpeg: str = "ffmpeg",
+    end_sample: int | None = None,
 ) -> list[str]:
     """MD5 of one stream's decoded content (``v:0``, ``a:2``).
 
@@ -1064,7 +1069,10 @@ def decoded_md5_command(
         raise RemuxError("only video and audio decode to content", code="remux_decode")
     # A multi-clip title's audio timestamps step back at the joins, and -xerror
     # stops on that; only the samples count here, so they are numbered afresh.
-    codec = ["-af", "asetpts=N/SR/TB", "-c:a", "pcm_s32le"] if kind == "a" else []
+    # ``end_sample`` hashes only the first samples (an audio track's part
+    # that the reference also has).
+    trim = f",atrim=end_sample={int(end_sample)}" if end_sample is not None else ""
+    codec = ["-af", f"asetpts=N/SR/TB{trim}", "-c:a", "pcm_s32le"] if kind == "a" else []
     return [
         ffmpeg,
         "-hide_banner",
@@ -1085,6 +1093,73 @@ def decoded_md5_command(
 
 
 _MD5_LINE = re.compile(r"^MD5=(?P<digest>[0-9a-f]{32})\s*$", re.MULTILINE)
+
+# eac3to writes a clip's audio to the clip's end, libbluray (the reference)
+# stops at the playlist's out point: the remux's track may run on for a moment
+# after the picture, as digital silence.  Up to this much is accepted when every
+# sample before it equals the disc's.
+SILENT_TAIL_MAX_SECONDS = 2
+# volumedetect reports all-zero samples as -91.0 dB; a 16-bit LSB is -90.3 dB.
+SILENT_TAIL_MAX_DB = -90.0
+
+
+def audio_level_command(
+    path: object, stream: str, *, start_sample: int | None = None, ffmpeg: str = "ffmpeg"
+) -> list[str]:
+    """Decode one audio stream (from ``start_sample``) and report its sample
+    count and peak with volumedetect (on the standard error, at info level)."""
+
+    trim = f",atrim=start_sample={int(start_sample)}" if start_sample is not None else ""
+    return [
+        ffmpeg, "-hide_banner", "-nostdin", "-v", "info",
+        "-i", str(path),
+        "-map", f"0:{stream}",
+        "-af", f"asetpts=N/SR/TB{trim},volumedetect",
+        "-f", "null", "-",
+    ]
+
+
+_VOLUMEDETECT_SAMPLES = re.compile(r"n_samples:\s*(?P<count>\d+)")
+_VOLUMEDETECT_MAX = re.compile(r"max_volume:\s*(?P<db>-?(?:\d+(?:\.\d+)?|inf))\s*dB")
+
+
+def parse_audio_level(text: str) -> tuple[int, float | None]:
+    """(samples over all channels, peak in dB or None when nothing was decoded)."""
+
+    counts = _VOLUMEDETECT_SAMPLES.findall(text)
+    peaks = _VOLUMEDETECT_MAX.findall(text)
+    count = int(counts[-1]) if counts else 0
+    peak = float(peaks[-1]) if peaks and peaks[-1] not in {"-inf", "inf"} else None
+    return count, peak
+
+
+def judge_silent_tail(
+    *,
+    reference_md5: str,
+    shared_md5: str,
+    tail_samples: int,
+    tail_peak_db: float | None,
+    sample_rate: int,
+) -> tuple[bool, str]:
+    """Whether a track that hashes differently is the disc's sound plus digital
+    silence after the reference's end, and how the report says it."""
+
+    if shared_md5 != reference_md5:
+        return False, "decodes differently from the disc"
+    seconds = tail_samples / sample_rate if sample_rate else 0.0
+    if tail_samples <= 0:
+        return False, "decodes differently from the disc (no extra samples to explain it)"
+    if seconds > SILENT_TAIL_MAX_SECONDS:
+        return False, f"equals the disc's but runs on {seconds:.3f} s after it"
+    if tail_peak_db is not None and tail_peak_db > SILENT_TAIL_MAX_DB:
+        return False, (
+            f"equals the disc's but runs on {seconds:.3f} s after it with sound "
+            f"(peak {tail_peak_db:.1f} dB)"
+        )
+    return True, (
+        f"every decoded sample equals the disc's; then {seconds * 1000:.0f} ms of digital "
+        "silence past the playlist's end (eac3to keeps the clip's audio to its end)"
+    )
 
 
 def parse_md5(text: str) -> str:
