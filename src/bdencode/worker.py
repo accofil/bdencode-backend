@@ -12727,7 +12727,9 @@ class PipelineWorker:
             paths.work / "remux-qc", root=paths.work, description="remux QC directory"
         )
         inputs = {
-            "schema_version": 1,
+            # 2 (4.3.2): a failed verdict is no longer kept, so a retry measures
+            # again; checkpoints written by 1 may hold a failed one.
+            "schema_version": 2,
             "mux_sha256": mux_digest,
             "reference_sha256": reference_sha256,
             "layout_sha256": layout_digest,
@@ -12754,7 +12756,10 @@ class PipelineWorker:
                     output.name, f"{selection.output_name}.mkv"
                 ),
             )
-            _write_stage(marker, inputs, outputs)
+            # Only a passed QC is a checkpoint: a failure must be measured again
+            # on a retry, by whatever the retry runs (a fixed release included).
+            if report.get("status") != "failed":
+                _write_stage(marker, inputs, outputs)
         report = json.loads(report_path.read_text(encoding="utf-8"))
         failures = [item for item in report["checks"] if item["status"] == "failed"]
         if failures:
