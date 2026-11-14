@@ -35,14 +35,22 @@ function languageOf(value: string | null | undefined): string {
 }
 
 /** External tracks of a job: chosen in the wizard, fitted before anything is encoded. */
+export interface TitleAudioChoice {
+  id: string;
+  label: string;
+}
+
 export function ExternalSourcesCard({
   value,
   onChange,
   available,
+  titleAudio = [],
 }: {
   value: ExternalSourceSelection[];
   onChange: (next: ExternalSourceSelection[]) => void;
   available: boolean;
+  /** The title's own audio tracks, offered to fill what the source lacks. */
+  titleAudio?: TitleAudioChoice[];
 }) {
   const [path, setPath] = useState("");
   const [browsing, setBrowsing] = useState<string | null>(null);
@@ -86,7 +94,7 @@ export function ExternalSourcesCard({
     const chosen = entry.tracks.find((item) => item.stream === stream);
     const tracks: ExternalTrackSelection[] = chosen
       ? entry.tracks.filter((item) => item.stream !== stream)
-      : [...entry.tracks, { stream, language: languageOf(language), position: 0, default: false, pitch: "restore" }];
+      : [...entry.tracks, { stream, language: languageOf(language), position: 0, default: false, pitch: "restore", fill_from: null }];
     update({ ...entry, tracks, approved_map_sha256: null }, entry.id);
   }
 
@@ -192,6 +200,20 @@ export function ExternalSourcesCard({
                       <input type="checkbox" checked={Boolean(chosen.default)} onChange={(event) => changeTrack(track.stream, { default: event.target.checked })} />
                       <span>{t("Alapértelmezett hangsáv", "Default audio track")}</span>
                     </label>
+                    {titleAudio.length > 0 && (
+                      <label className="field">{t("A forrásból hiányzó részek", "Parts the source lacks")}
+                        <select value={chosen.fill_from ?? ""} onChange={(event) => changeTrack(track.stream, { fill_from: event.target.value || null })}>
+                          <option value="">{t("Csend", "Silence")}</option>
+                          {titleAudio.map((item) => (
+                            <option key={item.id} value={item.id}>{t(`Pótlás a film hangjából: ${item.label}`, `Fill from the film's own sound: ${item.label}`)}</option>
+                          ))}
+                        </select>
+                        <small className="muted">{t(
+                          "A pótlás a film saját sávja, ugyanannyi csatornára keverve, a kiesés két oldalához igazított hangerővel, áttűnéssel. Zenénél (stáblista) jó, beszédnél a másik nyelv hallatszana.",
+                          "The fill is the film's own track, mixed to the same channel count, at the level of the two sides of each gap, with a crossfade. Good for music (credits); in speech the other language would be heard.",
+                        )}</small>
+                      </label>
+                    )}
                   </div>
                 )}
               </div>
@@ -312,6 +334,7 @@ function ReviewSource({ job, item }: { job: Job; item: ExternalReviewItem }) {
     return segment.target_start > end ? [{ from: end, to: segment.target_start }] : [];
   });
   const speed = review.fps !== review.target_fps && map.mode === "frame-locked";
+  const allFilled = review.tracks.length > 0 && review.tracks.every((report) => Boolean(report.fill_from));
   return (
     <div className="external-review">
       <dl className="summary-list">
@@ -322,7 +345,11 @@ function ReviewSource({ job, item }: { job: Job; item: ExternalReviewItem }) {
         <div><dt>{t("A forrásban nem szereplő rész", "Not in the source")}</dt><dd>{((map.unmatched_frames / fps)).toFixed(1)} {t("mp", "s")}</dd></div>
       </dl>
       <FitTimeline segments={map.segments} frames={map.target_frames} />
-      {missing.length > 0 && <Notice tone="warning" title={t("A külső sáv itt néma lesz", "The external track is silent here")}>{missing.map((part) => <span key={part.from} className="player-track">{clock(part.from / fps)} – {clock(part.to / fps)}</span>)}<p>{t("A HU szabályok a hiányos hangsávot nukeolhatják (incomplete.audio), ezt mérlegeld.", "The HU rules can nuke an incomplete track (incomplete.audio); weigh this.")}</p></Notice>}
+      {missing.length > 0 && (allFilled ? (
+        <Notice tone="info" title={t("Itt a film saját hangja szól (pótlás)", "The film's own sound plays here (fill)")}>{missing.map((part) => <span key={part.from} className="player-track">{clock(part.from / fps)} – {clock(part.to / fps)}</span>)}<p>{t("Hallgasd meg ezeket a helyeket: a pótlás a másik keverésből jön.", "Listen to these places: the fill comes from the other mix.")}</p></Notice>
+      ) : (
+        <Notice tone="warning" title={t("A külső sáv itt néma lesz", "The external track is silent here")}>{missing.map((part) => <span key={part.from} className="player-track">{clock(part.from / fps)} – {clock(part.to / fps)}</span>)}<p>{t("A HU szabályok a hiányos hangsávot nukeolhatják (incomplete.audio), ezt mérlegeld.", "The HU rules can nuke an incomplete track (incomplete.audio); weigh this.")}</p></Notice>
+      ))}
       {review.tracks.map((report, index) => {
         const chosen = selection.tracks.find((entry) => entry.stream === report.stream);
         return (
@@ -331,6 +358,17 @@ function ReviewSource({ job, item }: { job: Job; item: ExternalReviewItem }) {
               <strong>{report.language} · {report.codec.toUpperCase()} {report.channels} {t("csatorna", "channels")}</strong>
               {report.copy ? <Badge tone="success">{t("újrakódolás nélkül", "not re-encoded")}</Badge> : <Badge tone="info">{report.encoding?.codec.toUpperCase()} {Math.round((report.encoding?.bit_rate ?? 0) / 1000)} kbps</Badge>}
             </div>
+            {report.fill_from && (report.fill_gaps?.length ?? 0) > 0 && (() => {
+              const gains = (report.fill_gaps ?? []).map((gap) => gap.gain_db);
+              const seconds = (report.filled_samples ?? 0) / 48000;
+              const range = `${Math.min(...gains).toFixed(1)} … ${Math.max(...gains).toFixed(1)} dB`;
+              return (
+                <p className="muted">{t(
+                  `Hiányzó részek pótolva a film hangjából (${report.fill_from}): ${report.fill_gaps?.length} rész, ${seconds.toFixed(1)} mp, szintillesztés ${range}.`,
+                  `Missing parts filled from the film's own sound (${report.fill_from}): ${report.fill_gaps?.length} parts, ${seconds.toFixed(1)} s, level matched ${range}.`,
+                )}</p>
+              );
+            })()}
             {speed && (
               <label className="field">{t("Hangmagasság", "Pitch")}
                 <select value={chosen?.pitch ?? "restore"} disabled={pitch.isPending} onChange={(event) => pitch.mutate({ stream: report.stream, pitch: event.target.value as "restore" | "keep" })}>

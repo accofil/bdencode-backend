@@ -15,7 +15,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from .frame_map import build_frame_map
-from .render import assemble, plan_pieces
+from .render import Fill, assemble, plan_pieces
 from .verify import (
     expected_window,
     final_window_command,
@@ -57,6 +57,11 @@ def _assemble(arguments: list[str]) -> int:
         pieces=pieces,
         priming_samples=int(spec["priming_samples"]),
         scale=scale,
+        fill=(
+            Fill(Path(spec["fill"]["path"]), int(spec["fill"]["offset_samples"]))
+            if spec.get("fill")
+            else None
+        ),
     )
     report["scale"] = scale
     print(json.dumps(report))
