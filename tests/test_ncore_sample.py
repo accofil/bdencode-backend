@@ -41,3 +41,15 @@ def test_the_package_may_hold_only_its_own_sample(tmp_path: Path) -> None:
     (sample / "other.mkv").write_bytes(b"x")
     with pytest.raises(ReviewRequired, match="only the release's own sample"):
         _validate_completed_members(tmp_path, "Movie", allow_legacy=False)
+
+
+def test_an_empty_sample_folder_left_by_an_interrupted_attempt_is_accepted(tmp_path: Path) -> None:
+    """canada2: a failed sample move left an empty Sample folder, and the
+    retry stopped on it before the sample step could fill it."""
+
+    (tmp_path / "Movie.mkv").write_bytes(b"x")
+    (tmp_path / "Sample").mkdir()
+    _validate_completed_members(tmp_path, "Movie", allow_legacy=False)
+    (tmp_path / "Sample" / "other.mkv").write_bytes(b"x")
+    with pytest.raises(ReviewRequired, match="only the release's own sample"):
+        _validate_completed_members(tmp_path, "Movie", allow_legacy=False)
