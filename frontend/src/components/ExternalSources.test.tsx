@@ -194,8 +194,31 @@ describe("ExternalSourcesCard", () => {
     fireEvent.click(await screen.findByRole("button", { name: "fulcrum-tlws.2025.1080p.web.mkv" }));
 
     await waitFor(() => expect(mocked.probeExternalSource).toHaveBeenCalledWith(web));
-    expect(mocked.sources).toHaveBeenCalledWith(undefined, "fulcrum");
+    expect(mocked.sources).toHaveBeenCalledWith(undefined, "fulcrum", "external");
     expect(mocked.sources).not.toHaveBeenCalledWith(web);
+  });
+
+  it("browses for the SRT of a source among subtitle files only", async () => {
+    mocked.probeExternalSource.mockResolvedValue({
+      kind: "file", path: "/web.mkv", fps: "24", duration_seconds: 5470, width: 1920, height: 1080,
+      tracks: [], support: { available: true, missing: [], dvd_missing: [] },
+    } as never);
+    mocked.sources.mockImplementation(async (_path?: string, _query?: string, files?: string) => ({
+      roots: ["/q"], path: "/q", truncated: false, total: 2,
+      entries: files === "subtitle"
+        ? [{ name: "Subs", path: "/q/Subs", is_bluray: false, kind: "folder" }, { name: "hun.srt", path: "/q/hun.srt", is_bluray: false, kind: "subtitle" }]
+        : [],
+    }));
+    wrap(<ExternalSourcesCard value={[]} onChange={() => undefined} available />);
+    fireEvent.change(screen.getByLabelText(/A forrás helye/), { target: { value: "/web.mkv" } });
+    fireEvent.click(screen.getByRole("button", { name: "Beolvasás" }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "SRT tallózása" }));
+    fireEvent.click(await screen.findByRole("button", { name: "hun.srt" }));
+
+    expect((screen.getByLabelText(/SRT-felirat ehhez a forráshoz/) as HTMLInputElement).value).toBe("/q/hun.srt");
+    expect(mocked.sources).toHaveBeenCalledWith(undefined, undefined, "subtitle");
+    expect(mocked.probeExternalSource).toHaveBeenCalledTimes(1);
   });
 
   it("says so when this host lacks a tool", () => {

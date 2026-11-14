@@ -50,6 +50,7 @@ import type {
   SelectionPayload,
   SelectionValidation,
   SourceBrowserResponse,
+  SourceFiles,
   ExternalProbe,
   ExternalReviewItem,
   StatisticsResponse,
@@ -132,11 +133,13 @@ export const api = {
   capabilities: () => apiFetch<CapabilitiesResponse>("/capabilities"),
   runtimeCapabilities: () =>
     apiFetch<RuntimeCapabilitiesResponse>("/runtime-capabilities"),
-  /** One source folder; ``query`` keeps the names containing it, searched on the server. */
-  sources: (path?: string, query?: string) => {
+  /** One source folder; ``query`` keeps the names containing it, searched on the server;
+   * ``files`` picks the files beside the folders (disc-remux MKVs by default). */
+  sources: (path?: string, query?: string, files?: SourceFiles) => {
     const params = new URLSearchParams();
     if (path) params.set("path", path);
     if (query) params.set("q", query);
+    if (files) params.set("files", files);
     const search = params.toString();
     return apiFetch<SourceBrowserResponse>(`/sources${search ? `?${search}` : ""}`);
   },

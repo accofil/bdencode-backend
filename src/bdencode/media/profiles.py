@@ -756,6 +756,10 @@ class EncoderSettings:
     lookahead_slices: int | None = None  # x265
     hrd: bool | None = None  # x265
     high_tier: bool | None = None  # x265
+    # Encoder switches with no field of their own (4.3), x264/x265-params
+    # syntax: "key=value:key=value".  A switch that has a field, or that names
+    # a file or reshapes the pipe, is refused (see EXTRA_PARAMS_REFUSED).
+    extra_params: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.encoder, str):
@@ -765,6 +769,9 @@ class EncoderSettings:
         if isinstance(self.tune, str):
             object.__setattr__(self, "tune", Tune(self.tune))
         self.validate()
+        if self.extra_params is not None and not isinstance(self.extra_params, str):
+            raise ValueError("extra_params must be text")
+        self.extra_private_params()
 
     def validate(self) -> None:
         integer_fields = (
@@ -1020,8 +1027,46 @@ class EncoderSettings:
         return self.chroma_qp_offset - self.x264_psy_chroma_qp_adjustment()
 
     def private_params(self) -> dict[str, str | int | float]:
-        """Return deterministic libx264/libx265 private options."""
+        """Return deterministic libx264/libx265 private options: every field's,
+        then the operator's extra switches."""
 
+        params = self._builtin_private_params()
+        params.update(self.extra_private_params(params))
+        return params
+
+    def extra_private_params(
+        self, builtin: Mapping[str, object] | None = None
+    ) -> dict[str, str]:
+        """The operator's extra switches, checked; ``ValueError`` explains a refusal."""
+
+        text = (self.extra_params or "").strip()
+        if not text:
+            return {}
+        if len(text) > EXTRA_PARAMS_MAX_LENGTH:
+            raise ValueError(f"extra_params is longer than {EXTRA_PARAMS_MAX_LENGTH} characters")
+        own = set(builtin if builtin is not None else self._builtin_private_params())
+        result: dict[str, str] = {}
+        for item in text.split(":"):
+            key, separator, value = item.strip().partition("=")
+            key = key.strip().lower()
+            value = value.strip()
+            if not separator or not _EXTRA_KEY.fullmatch(key) or not _EXTRA_VALUE.fullmatch(value):
+                raise ValueError(
+                    f"extra_params item '{item.strip()}' is not key=value "
+                    "(letters, digits, '-' in the key; letters, digits, . , / + _ - in the value)"
+                )
+            if key in EXTRA_PARAMS_REFUSED:
+                raise ValueError(f"extra_params cannot set '{key}': it names a file or reshapes the pipe")
+            if key in own or key in _EXTRA_PARAMS_GENERIC:
+                raise ValueError(f"extra_params cannot set '{key}': it has its own setting")
+            if key in result:
+                raise ValueError(f"extra_params sets '{key}' twice")
+            result[key] = value
+        if len(result) > EXTRA_PARAMS_MAX_ITEMS:
+            raise ValueError(f"extra_params holds more than {EXTRA_PARAMS_MAX_ITEMS} switches")
+        return result
+
+    def _builtin_private_params(self) -> dict[str, str | int | float]:
         common: dict[str, str | int | float] = {
             "keyint": self.keyint,
             "min-keyint": self.min_keyint,
@@ -1273,7 +1318,29 @@ OPTIONAL_TOOL_FIELDS = (
     "pbratio",
     *_OPTIONAL_BOOLEAN_TOOLS,
     *_OPTIONAL_INTEGER_TOOLS,
+    "extra_params",
 )
+
+EXTRA_PARAMS_MAX_LENGTH = 600
+EXTRA_PARAMS_MAX_ITEMS = 30
+_EXTRA_KEY = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
+_EXTRA_VALUE = re.compile(r"[A-Za-z0-9.,/+_-]{1,64}")
+# Set through FFmpeg's own options or by the pipeline, never by hand.
+_EXTRA_PARAMS_GENERIC = frozenset({
+    "crf", "qp", "bitrate", "preset", "tune", "profile", "level", "level-idc",
+    "input-depth", "output-depth", "input-csp", "input-res", "fps", "frames", "seek",
+})
+# Switches that read or write files, or change what the pipe carries.
+EXTRA_PARAMS_REFUSED = frozenset({
+    "pass", "stats", "slow-firstpass", "qpfile", "zonefile", "zones", "dump-yuv", "csv",
+    "csv-log-level", "recon", "analysis-save", "analysis-load", "analysis-reuse-file",
+    "analysis-reuse-level", "dolby-vision-rpu", "dolby-vision-profile", "dhdr10-info",
+    "dhdr10-opt", "master-display", "max-cll", "hdr10", "hdr10-opt", "hdr10plus-opt",
+    "chunk-start", "chunk-end", "pools", "numa-pools", "frame-threads", "threads",
+    "log-level", "log", "psnr", "ssim", "tcfile-in", "tcfile-out", "timebase",
+    "interlaced", "tff", "bff", "fake-interlaced", "pulldown", "sar", "overscan",
+    "videoformat", "range", "colorprim", "transfer", "colormatrix", "chromaloc",
+})
 
 
 def source_adapted_settings(
@@ -1585,7 +1652,7 @@ _FIELD_SPECS: tuple[FieldSpec, ...] = (
         "me", "motion", DetailLevel.PRO, True, "umh", "enum", choices=tuple(sorted(_ME))
     ),
     FieldSpec("merange", "motion", DetailLevel.PRO, True, 24, "integer", 4, 32768),
-    FieldSpec("subme", "motion", DetailLevel.PRO, True, 10, "integer", 0, 11),
+    FieldSpec("subme", "motion", DetailLevel.ADVANCED, True, 10, "integer", 0, 11),
     FieldSpec("trellis", "x264", DetailLevel.PRO, True, 2, "integer", 0, 2),
     FieldSpec(
         "partitions",
@@ -1691,6 +1758,19 @@ _FIELD_SPECS: tuple[FieldSpec, ...] = (
     FieldSpec("lookahead_slices", "x265", DetailLevel.PRO, False, None, "integer", 0, 16, optional=True),
     FieldSpec("hrd", "x265", DetailLevel.PRO, False, None, "boolean", optional=True),
     FieldSpec("high_tier", "x265", DetailLevel.PRO, False, None, "boolean", optional=True),
+    FieldSpec(
+        "extra_params",
+        "custom",
+        DetailLevel.ADVANCED,
+        False,
+        None,
+        "string",
+        description=(
+            "Encoder switches with no field of their own, as key=value:key=value "
+            "(x264-params / x265-params syntax)."
+        ),
+        optional=True,
+    ),
 )
 
 

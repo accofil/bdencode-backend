@@ -290,7 +290,7 @@ def test_health_capabilities_and_job_flow(tmp_path):
     with make_client(tmp_path) as client:
         capabilities = client.get("/api/v1/capabilities")
         assert capabilities.status_code == 200
-        assert capabilities.json()["backend_version"] == "4.2.0"
+        assert capabilities.json()["backend_version"] == "4.3.0"
         assert capabilities.json()["constraints"]["max_active_jobs"] == 1
         assert capabilities.json()["output_video_codecs"] == ["x264", "x265"]
         assert capabilities.json()["audio_actions"] == [
@@ -917,12 +917,14 @@ def test_a_remux_selection_validates_without_encoder_settings(tmp_path, monkeypa
 
         wrong = _remux_selection()
         wrong["output_name"] = "Film.2020.1080p.BluRay.DTS-HD.MA.5.1.x264-TAG"
-        rejected = client.post(
+        advised = client.post(
             f"/api/v1/jobs/{job['id']}/selection/validate",
             json={"selection": wrong, "expected_version": job["version"]},
         )
-        assert rejected.status_code in {400, 422}
-        assert "clean remux name" in rejected.text
+        # 4.2.1: a name off the rules is advice, not a refusal.
+        assert advised.status_code == 200, advised.text
+        warnings = advised.json()["advisory_warnings"]
+        assert any("clean remux name" in item for item in warnings)
 
 
 def test_a_host_without_eac3to_cannot_validate_a_remux(tmp_path, monkeypatch):

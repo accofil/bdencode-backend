@@ -8,6 +8,15 @@ Hungarian release rules (encoding-hun, the standard nCore points to)::
 
     Title.Year.2160p.UHD.BluRay[.DV.HDR].TrueHD.7.1[.Atmos].x265[.HUN]-TAG
 
+Remuxes: Aither puts the audio after the video codec, the Hungarian standard
+(``series-and-movies-remux.md``) before it, with language tags after::
+
+    Title.Year.1080p.BluRay.REMUX[.HDR].AVC.DTS-HD.MA.5.1-TAG          (Aither)
+    Title.Year.1080p.BluRay.REMUX.DTS-HD.MA.5.1.AVC[.HUN]-TAG         (Hungarian)
+
+Since 4.3 every problem found here is advice: the operator may name a release
+their own way.
+
 Between the source and the video codec only allowlisted technical tokens may
 appear, in any order; three-letter language tags may follow the codec.  Every
 token a name advertises must be true of the planned output, so a name can
@@ -58,6 +67,8 @@ class ReleaseName:
     group: str | None
     # A remux name's tokens after the video codec (the audio part).
     tail: tuple[str, ...] = ()
+    # "aither" or "hungarian": which remux scheme the name follows.
+    style: str = "aither"
 
 
 _GROUP = r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}"
@@ -94,6 +105,16 @@ REMUX_NAME_PATTERN = re.compile(
     r"(?P<tail>(?:\.[^.]+)*)$",
     re.IGNORECASE,
 )
+# The Hungarian remux scheme: the audio before the video codec, language tags after.
+HUNGARIAN_REMUX_NAME_PATTERN = re.compile(
+    r"^(?P<title>.+?)\.(?P<resolution>480[ip]|576[ip]|720p|1080[ip]|2160p)"
+    r"\.(?P<source>BluRay|UHD\.BluRay)\.REMUX"
+    r"(?P<middle>(?:\.[^.]+)*?)\.(?P<codec>AVC|HEVC|VC-?1|MPEG-?2|AV1)"
+    rf"(?P<languages>(?:\.{_LANGUAGE_TAG})*)$",
+    re.IGNORECASE,
+)
+# The Hungarian tags name the same codecs without hyphens.
+_REMUX_CODEC_NAMES = {"VC1": "VC-1", "MPEG2": "MPEG-2"}
 _GROUP_RE = re.compile(_GROUP)
 
 # Order matters: the first alternative that ends on a token boundary wins.
@@ -242,7 +263,24 @@ def parse_remux_name(name: str) -> ReleaseName | None:
         last, _, group = last.partition("-")
         if not last or not _GROUP_RE.fullmatch(group):
             return None
-    match = REMUX_NAME_PATTERN.fullmatch(f"{head}{dot}{last}")
+    body = f"{head}{dot}{last}"
+    hungarian = HUNGARIAN_REMUX_NAME_PATTERN.fullmatch(body)
+    if hungarian is not None:
+        middle = _split_tokens(hungarian.group("middle"))
+        if middle is not None:
+            codec = hungarian.group("codec").upper()
+            return ReleaseName(
+                title=hungarian.group("title"),
+                resolution=hungarian.group("resolution"),
+                source=hungarian.group("source"),
+                tokens=tuple(middle),
+                codec=_REMUX_CODEC_NAMES.get(codec.replace("-", ""), codec),
+                languages=tuple(item for item in hungarian.group("languages").split(".") if item),
+                group=group,
+                tail=(),
+                style="hungarian",
+            )
+    match = REMUX_NAME_PATTERN.fullmatch(body)
     if match is None:
         return None
     middle = _split_tokens(match.group("middle"))
@@ -298,8 +336,11 @@ def _token_kind(text: str) -> str | None:
 
 
 def _remux_problems(parsed: ReleaseName, facts: ReleaseFacts) -> list[str]:
-    """Aither's remux scheme on top of the shared truthfulness checks."""
+    """The remux scheme the name follows (Aither or Hungarian) on top of the
+    shared truthfulness checks."""
 
+    if parsed.style == "hungarian":
+        return _hungarian_remux_problems(parsed, facts)
     problems: list[str] = []
     if facts.video_codec and parsed.codec.upper() != facts.video_codec.upper():
         problems.append(
@@ -356,6 +397,39 @@ def _remux_problems(parsed: ReleaseName, facts: ReleaseFacts) -> list[str]:
         _token_kind(text) == "atmos" for text in parsed.tail
     ):
         problems.append("output_name must say Atmos: the default audio track carries Atmos")
+    return problems
+
+
+def _hungarian_remux_problems(parsed: ReleaseName, facts: ReleaseFacts) -> list[str]:
+    """The Hungarian remux scheme: everything stated sits before the codec."""
+
+    problems: list[str] = []
+    if facts.video_codec and parsed.codec.upper() != facts.video_codec.upper():
+        problems.append(
+            f"output_name says {parsed.codec} but the untouched video is {facts.video_codec}"
+        )
+    if facts.resolution and parsed.resolution.lower() != facts.resolution.lower():
+        problems.append(f"output_name says {parsed.resolution} but the video is {facts.resolution}")
+    if (parsed.source.upper() == "UHD.BLURAY") != facts.uhd:
+        problems.append(
+            "output_name must say UHD.BluRay for an UHD disc"
+            if facts.uhd
+            else "output_name says UHD.BluRay but the source is a Blu-ray"
+        )
+    if not _audio_claims(parsed.tokens):
+        problems.append("output_name must name the original-language audio's codec and channels")
+    stated = {_token_kind(text) for text in parsed.tokens}
+    dynamic = facts.dynamic_range
+    if "DV" in dynamic and "dv" not in stated:
+        problems.append("output_name must say DV: the video keeps its Dolby Vision")
+    if "HDR10+" in dynamic and "hdr10plus" not in stated:
+        problems.append("output_name must say HDR10Plus: the video keeps its HDR10+ metadata")
+    elif "HDR" in dynamic and not stated & {"hdr", "hdr10plus"}:
+        problems.append("output_name must say HDR: the video is HDR10")
+    if "HLG" in dynamic and "hlg" not in stated:
+        problems.append("output_name must say HLG")
+    if any(item.atmos for item in facts.audio if not item.commentary) and "atmos" not in stated:
+        problems.append("output_name must say Atmos: an audio track carries Atmos")
     return problems
 
 

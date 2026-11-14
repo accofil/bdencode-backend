@@ -208,9 +208,13 @@ export interface RemuxNameInput {
   /** Any of SDR, HDR, HDR10+, DV, HLG. */
   dynamicRange: string[];
   tag?: string;
+  /** Aither (default) or the Hungarian standard nCore points to. */
+  style?: NamingStyle;
 }
 
 const REMUX_VIDEO_CODECS: Record<string, string> = { h264: "AVC", hevc: "HEVC", vc1: "VC-1", mpeg2video: "MPEG-2" };
+// The Hungarian standard's video codec tags (series-and-movies-remux.md 2.8).
+const HUNGARIAN_REMUX_VIDEO_CODECS: Record<string, string> = { h264: "AVC", hevc: "HEVC", vc1: "VC1", mpeg2video: "MPEG2", av1: "AV1" };
 
 /** The remux's planned audio: untouched copies, Blu-ray LPCM as FLAC. */
 export function remuxReleaseAudio(tracks: TrackSelection[], playlist: Playlist): ReleaseAudio[] {
@@ -242,6 +246,7 @@ export function remuxResolution(video: VideoProperties | null | undefined): stri
 /** Aither's remux scheme, as the backend checks it:
  * Title.Year.1080p.BluRay.REMUX[.HDR].AVC.DTS-HD.MA.5.1[.Atmos]-TAG */
 export function buildRemuxName(input: RemuxNameInput): string {
+  if (input.style === "hungarian") return buildHungarianRemuxName(input);
   const tag = input.tag ? sanitizeReleaseTag(input.tag) : "";
   const spoken = input.audio.filter((item) => !item.commentary);
   const main = spoken[0] ?? input.audio[0];
@@ -261,6 +266,88 @@ export function buildRemuxName(input: RemuxNameInput): string {
   const audio = audioToken(main);
   if (audio) parts.push(audio);
   return `${parts.join(".")}${tag ? `-${tag}` : ""}`;
+}
+
+/** The Hungarian remux standard (encoding-hun series-and-movies-remux.md 2.5.2):
+ * Title.Year.1080p.BluRay.REMUX[.HDR].DTS-HD.MA.5.1.AVC[.HUN]-TAG; the audio
+ * is the original language's, HUN marks a Hungarian track beside it. */
+function buildHungarianRemuxName(input: RemuxNameInput): string {
+  const tag = input.tag ? sanitizeReleaseTag(input.tag) : "";
+  const spoken = input.audio.filter((item) => !item.commentary);
+  const original = spoken.find((item) => item.language !== "hu") ?? spoken[0] ?? input.audio[0];
+  const languageSuffix = new RegExp(`\\.(?:${[...new Set(Object.values(LANGUAGE_NAMES))].join("|")})$`, "i");
+  const base = input.base.replace(languageSuffix, "") || input.base;
+  const parts = [
+    base,
+    remuxResolution(input.video),
+    input.uhd ? "UHD.BluRay" : "BluRay",
+    "REMUX",
+    ...dynamicTokens(input.dynamicRange, "hungarian"),
+  ];
+  const audio = audioToken(original);
+  if (audio) parts.push(audio);
+  parts.push(HUNGARIAN_REMUX_VIDEO_CODECS[input.videoCodec.toLowerCase()] ?? "AVC");
+  const hungarian = spoken.filter((item) => item.language === "hu").length;
+  if (hungarian > 0 && original?.language !== "hu") parts.push(hungarian > 1 ? `${hungarian}xHUN` : "HUN");
+  return `${parts.join(".")}${tag ? `-${tag}` : ""}`;
+}
+
+export interface FitNameInput {
+  /** The finished file the tracks are fitted into (its name tells encode or remux). */
+  sourceName: string;
+  style: NamingStyle;
+  /** The file's own retained audio, in output order. */
+  audio: ReleaseAudio[];
+  /** The fitted external tracks' languages (ISO 639-2, as chosen in the wizard). */
+  externalLanguages: string[];
+  video: VideoProperties | null | undefined;
+  videoCodec: string;
+  uhd: boolean;
+  dynamicRange: string[];
+  tag?: string;
+}
+
+/** A fitted release keeps its file's kind (encode or remux) and adds the fitted
+ * languages: HUN in a Hungarian name, nothing new in an Aither one beyond what
+ * its own audio rules say. */
+export function buildFitName(input: FitNameInput): string {
+  const base = titleBaseOf(input.sourceName);
+  const fitted: ReleaseAudio[] = input.externalLanguages.map((language) => ({
+    codec: "DD",
+    channels: null,
+    atmos: false,
+    language: ISO639_2_TO_BCP47[language.toLowerCase()] ?? language.toLowerCase(),
+    commentary: false,
+  }));
+  const audio = [...input.audio, ...fitted];
+  if (/\.REMUX\./i.test(input.sourceName)) {
+    return buildRemuxName({
+      base, uhd: input.uhd, video: input.video, videoCodec: input.videoCodec,
+      audio, dynamicRange: input.dynamicRange, tag: input.tag, style: input.style,
+    });
+  }
+  const encoder = /x265|hevc|h\.?265/i.test(input.sourceName) || input.videoCodec.toLowerCase() === "hevc" ? "x265" : "x264";
+  return buildReleaseName({ base, encoder, style: input.style, audio, dynamicRange: input.dynamicRange, tag: input.tag });
+}
+
+const NAMING_STYLE_KEY = "bdencode.naming-style";
+
+/** The naming style the operator chose last, if any. */
+export function rememberedNamingStyle(): NamingStyle | null {
+  try {
+    const value = window.localStorage.getItem(NAMING_STYLE_KEY);
+    return value === "aither" || value === "hungarian" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export function rememberNamingStyle(style: NamingStyle): void {
+  try {
+    window.localStorage.setItem(NAMING_STYLE_KEY, style);
+  } catch {
+    // Storage may be unavailable; the choice still holds for this page.
+  }
 }
 
 /** The title part of an existing name: everything before the resolution, or a cleaned title. */

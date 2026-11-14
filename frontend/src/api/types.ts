@@ -604,9 +604,13 @@ export interface SourceEntry {
   name: string;
   path: string;
   is_bluray: boolean;
-  /** "mkv": a disc-remux Matroska file (3.10); older servers send only is_bluray. */
-  kind?: "bluray" | "mkv" | "folder";
+  /** "mkv": a disc-remux Matroska file (3.10); older servers send only is_bluray.
+   * "file" and "subtitle" appear only in the external-source browser (4.2.1). */
+  kind?: "bluray" | "mkv" | "folder" | "file" | "subtitle";
 }
+
+/** Which files a source listing shows beside the folders. */
+export type SourceFiles = "mkv" | "external" | "subtitle";
 
 export interface SourceBrowserResponse {
   roots: string[];

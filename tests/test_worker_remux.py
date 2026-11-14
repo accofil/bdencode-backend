@@ -655,15 +655,18 @@ def test_eac3to_and_scan_disagreement_stops_at_prepare(remux_context) -> None:
     assert "eac3to and the scan disagree" in (result.status_message or "")
 
 
-def test_an_atmos_track_needs_atmos_in_the_name(remux_context) -> None:
-    _database, _settings, _scan, runner, worker = remux_context
+def test_a_name_without_atmos_is_advice_not_a_stop(remux_context) -> None:
+    """4.2.1: the release-name rules are suggestions; the name is kept as chosen."""
+
+    database, _settings, _scan, runner, worker = remux_context
     runner.listing = LISTING.replace("TrueHD/AC3, English", "TrueHD/AC3 (Atmos), English")
     ready = _select(remux_context)
 
     result = worker.process_job(ready)
 
-    assert result.state is JobState.NEEDS_REVIEW
-    assert "must say Atmos" in (result.status_message or "")
+    assert "must say Atmos" not in (result.status_message or "")
+    advice = [item for item in database.list_events(job_id=ready.id) if item.kind == "worker.release-name-advice"]
+    assert advice and "must say Atmos" in advice[0].message
 
 
 def _job(scan: DiscScan, selection: dict[str, Any]):
@@ -684,8 +687,6 @@ def _job(scan: DiscScan, selection: dict[str, Any]):
             "keeps pcm_bluray audio as flac",
         ),
         (lambda value: value["tracks"][0].update(action="ac3"), "keeps truehd audio as copy"),
-        (lambda value: value.update(output_name="Movie.2026.1080p.BluRay.TrueHD.5.1.x264-TAG"), "clean remux name"),
-        (lambda value: value.update(output_name="Movie.2026.1080p.BluRay.REMUX.AVC.FLAC.2.0-TAG"), "default audio track is TrueHD"),
         (lambda value: value.update(video={"crop": {}}), "unknown remux selection field"),
         (lambda value: value.update(angle=2), "angle must be 1"),
         (lambda value: value["remux"].update(imdb="123"), "remux.imdb"),
@@ -698,6 +699,33 @@ def test_remux_selection_is_validated(tmp_path: Path, change, message: str) -> N
     change(selection)
 
     with pytest.raises(ReviewRequired, match=message):
+        parse_selection(_job(scan, selection), scan)
+
+
+@pytest.mark.parametrize(
+    ("name", "advice"),
+    (
+        ("Movie.2026.1080p.BluRay.TrueHD.5.1.x264-TAG", "clean remux name"),
+        ("Movie.2026.1080p.BluRay.REMUX.AVC.FLAC.2.0-TAG", "default audio track is TrueHD"),
+        ("Movie 2026 my own name", "clean remux name"),
+    ),
+)
+def test_a_name_off_the_rules_parses_with_advice(tmp_path: Path, name: str, advice: str) -> None:
+    scan = _remux_scan(tmp_path)
+    selection = _remux_selection()
+    selection["output_name"] = name
+
+    parsed = parse_selection(_job(scan, selection), scan)
+
+    assert parsed.output_name == name
+    assert any(advice in item for item in parsed.name_warnings)
+
+
+def test_an_unsafe_file_name_is_still_refused(tmp_path: Path) -> None:
+    scan = _remux_scan(tmp_path)
+    selection = _remux_selection()
+    selection["output_name"] = "../escape"
+    with pytest.raises(ReviewRequired):
         parse_selection(_job(scan, selection), scan)
 
 

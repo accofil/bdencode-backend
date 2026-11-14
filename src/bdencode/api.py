@@ -69,6 +69,7 @@ from .upload_settings import (
     upload_status,
     validate_upload_key,
 )
+from .external import source as external_source
 from .external.source import external_support
 from .db import (
     Database,
@@ -148,6 +149,9 @@ TOOL_SNAPSHOT_TTL_SECONDS = 600
 # canada2 held 2259 (522 folders, 1737 MKV files); the old limit of 1000
 # silently left out every MKV file after the first 478.
 SOURCE_BROWSER_ENTRY_LIMIT = 5000
+# What the external-source browser offers beside folders: every video file the
+# fitting reads, and DVD images.
+EXTERNAL_BROWSE_SUFFIXES = frozenset({*external_source.FILE_SUFFIXES, ".iso"})
 from .media.profiles import (
     DetailLevel,
     VideoEncoder,
@@ -1096,13 +1100,16 @@ def create_app(
     def browse_sources(
         path: str | None = None,
         q: Annotated[str | None, Query(max_length=200)] = None,
+        files: Literal["mkv", "external", "subtitle"] = "mkv",
     ) -> dict[str, object]:
         """One folder of the source storage: folders, discs and MKV files.
 
         ``q`` keeps the names that contain it (case-insensitive) and is
         applied to the whole folder before the entry limit, so a file deep in
         the alphabet of a large folder can still be found.  ``truncated`` says
-        that more entries matched than were returned.
+        that more entries matched than were returned.  ``files`` says which
+        files are listed beside the folders: disc-remux MKVs (the default), an
+        external source's video files and DVD images, or SRT subtitles.
         """
 
         if settings is None:
@@ -1136,8 +1143,14 @@ def create_app(
             if item.is_dir():
                 is_bluray = (item / "BDMV" / "PLAYLIST").is_dir()
                 kind = "bluray" if is_bluray else "folder"
-            elif item.is_file() and is_mkv_source(item):
+            elif not item.is_file():
+                continue
+            elif files == "mkv" and is_mkv_source(item):
                 is_bluray, kind = False, "mkv"
+            elif files == "external" and item.suffix.casefold() in EXTERNAL_BROWSE_SUFFIXES:
+                is_bluray, kind = False, "mkv" if is_mkv_source(item) else "file"
+            elif files == "subtitle" and item.suffix.casefold() in external_source.SUBTITLE_SUFFIXES:
+                is_bluray, kind = False, "subtitle"
             else:
                 continue
             total += 1
@@ -1492,6 +1505,11 @@ def create_app(
         except (KeyError, TypeError, ValueError) as exc:
             raise ConfigurationError(f"stored scan result is invalid: {exc}") from exc
 
+        # The release-name rules are advice (4.2.1): the name is kept as typed.
+        name_advice = [
+            t(f"Névjavaslat (nem kötelező): {item}", f"Name suggestion (optional): {item}")
+            for item in selection.name_warnings
+        ]
         if selection.is_fit:
             return SelectionValidationResponse(
                 valid=True,
@@ -1514,7 +1532,7 @@ def create_app(
                         external=selection.external_sources,
                     )
                 ],
-                advisory_warnings=[],
+                advisory_warnings=name_advice,
             )
         if selection.is_remux:
             support = remux_support()
@@ -1550,7 +1568,7 @@ def create_app(
                         external=selection.external_sources,
                     )
                 ],
-                advisory_warnings=[],
+                advisory_warnings=name_advice,
             )
         dynamic_plan = resolve_selection_dynamic_hdr(scan, selection)
         work_root = (
@@ -1619,6 +1637,7 @@ def create_app(
                 *plan.decisions.get("video_policy", {}).get("tracker", {}).get("findings", []),
             ],
             advisory_warnings=[
+                *name_advice,
                 *plan.warnings,
                 *hdr_warnings,
                 *(

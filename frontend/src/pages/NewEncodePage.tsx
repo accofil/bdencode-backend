@@ -101,7 +101,9 @@ function detailOptions() {
 
 /** What a source-browser entry is; older servers only say whether it is a Blu-ray folder. */
 export function sourceEntryKind(entry: SourceEntry): "bluray" | "mkv" | "folder" {
-  return entry.kind ?? (entry.is_bluray ? "bluray" : "folder");
+  const kind = entry.kind ?? (entry.is_bluray ? "bluray" : "folder");
+  // This page asks only for discs, folders and MKV files.
+  return kind === "bluray" || kind === "mkv" ? kind : "folder";
 }
 
 const DISCS_ONLY_KEY = "bdencode:source-discs-only";
