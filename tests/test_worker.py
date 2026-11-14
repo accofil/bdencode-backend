@@ -5656,3 +5656,35 @@ def test_an_uploaded_job_publishes_a_400px_bbcode_and_a_separate_aither_comparis
         if artifact.kind is ArtifactKind.BBCODE
     }
     assert names == {"comparison.bbcode", "comparison-aither.bbcode"}
+
+
+def test_a_file_moves_into_the_completed_folder_across_mounts(tmp_path, monkeypatch) -> None:
+    """canada2: jobs and completed are separate ReadWritePaths bind mounts, so
+    renaming the sample between them failed with EXDEV."""
+
+    import errno as errno_module
+    import os as os_module
+
+    import bdencode.worker as worker_module
+
+    source_dir = tmp_path / "jobs" / "work" / "sample"
+    target_dir = tmp_path / "completed" / "Sample"
+    source_dir.mkdir(parents=True)
+    target_dir.mkdir(parents=True)
+    source = source_dir / "sample.mkv"
+    source.write_bytes(b"sample" * 1000)
+    destination = target_dir / "Film.sample.mkv"
+    real_replace = os_module.replace
+
+    def replace(src, dst):
+        if os_module.path.dirname(os_module.fspath(src)) != os_module.path.dirname(os_module.fspath(dst)):
+            raise OSError(errno_module.EXDEV, "Invalid cross-device link")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(worker_module.os, "replace", replace)
+
+    worker_module._move_into(source, destination)
+
+    assert destination.read_bytes() == b"sample" * 1000
+    assert not source.exists()
+    assert sorted(item.name for item in target_dir.iterdir()) == ["Film.sample.mkv"]
