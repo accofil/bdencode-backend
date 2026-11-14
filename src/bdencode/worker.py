@@ -1659,8 +1659,11 @@ def _validate_completed_members(
                 )
             if item.name == SAMPLE_DIRECTORY:
                 members = sorted(child.name for child in item.iterdir())
-                if members != [f"{output_name}.sample.mkv"] or _unsafe_directory_link(
-                    item / members[0]
+                # Empty: an interrupted earlier attempt made the folder but no
+                # sample yet; the sample step fills it (canada2, 2026-11-14).
+                if members and (
+                    members != [f"{output_name}.sample.mkv"]
+                    or _unsafe_directory_link(item / members[0])
                 ):
                     raise ReviewRequired(
                         "the Sample directory may hold only the release's own sample",
