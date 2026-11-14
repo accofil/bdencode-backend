@@ -1562,6 +1562,32 @@ def _ensure_contained_directory(
     return path
 
 
+def _move_into(source: Path, destination: Path) -> None:
+    """Move a file into another directory atomically, also across mounts.
+
+    The worker's systemd unit gives ``jobs`` and ``completed`` to the service
+    as separate ReadWritePaths bind mounts, so a rename between them fails
+    with EXDEV (canada2, 2026-11-14).  The file is copied next to its target
+    under a temporary name, renamed there, and only then removed at the source.
+    """
+
+    try:
+        os.replace(source, destination)
+        return
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+    partial = destination.with_name(f".{destination.name}.partial")
+    try:
+        shutil.copyfile(source, partial)
+        if partial.stat().st_size != source.stat().st_size:
+            raise OSError(f"copying {source.name} left a different size")
+        os.replace(partial, destination)
+    finally:
+        partial.unlink(missing_ok=True)
+    source.unlink(missing_ok=True)
+
+
 SAMPLE_DIRECTORY = "Sample"
 # nCore: a sample is mandatory above 2 GB; at least a minute, UHD at least 200 MB.
 NCORE_SAMPLE_THRESHOLD_BYTES = 2 * 1024**3
@@ -14239,7 +14265,7 @@ class PipelineWorker:
         if len(produced) != 1:
             raise RuntimeError("mkvmerge did not produce exactly one sample file")
         directory.mkdir(exist_ok=True)
-        os.replace(produced[0], sample)
+        _move_into(produced[0], sample)
         shutil.rmtree(scratch, ignore_errors=True)
         _write_stage(marker, inputs, [sample])
         return sample
