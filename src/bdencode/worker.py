@@ -12845,6 +12845,90 @@ class PipelineWorker:
             title += out_time - in_time
         return None
 
+    def _remux_audio_silent_tail(
+        self,
+        paths: JobPaths,
+        label: str,
+        reference_stream: str,
+        final_stream: str,
+        qc_root: Path,
+        reference_md5: str,
+    ) -> tuple[bool, str, int]:
+        """Whether a track that hashes differently is the disc's sound followed
+        by a moment of digital silence (see ``remux.SILENT_TAIL_MAX_SECONDS``)."""
+
+        def stream_value(path: Path, stream: str, entry: str) -> int:
+            try:
+                completed = subprocess.run(
+                    [
+                        "ffprobe", "-v", "error", "-select_streams", stream,
+                        "-show_entries", f"stream={entry}", "-of", "csv=p=0", str(path),
+                    ],
+                    capture_output=True, text=True, timeout=120, check=False,
+                )
+                return int(completed.stdout.strip().splitlines()[0])
+            except (OSError, subprocess.SubprocessError, IndexError, ValueError):
+                return 0
+
+        def level(path: Path, stream: str, name: str, start: int | None = None) -> tuple[int, float | None]:
+            log = qc_root / f"{label}.{name}.level.log"
+            self._runner(paths).run(
+                remux.audio_level_command(path, stream, start_sample=start),
+                cwd=qc_root,
+                stderr_path=log,
+            )
+            return remux.parse_audio_level(log.read_text(encoding="utf-8", errors="replace"))
+
+        different = (False, "decodes differently from the disc", 0)
+        channels = stream_value(paths.reference, reference_stream, "channels")
+        sample_rate = stream_value(paths.reference, reference_stream, "sample_rate")
+        if channels <= 0 or sample_rate <= 0:
+            return different
+        try:
+            return self._remux_judge_silent_tail(
+                paths, label, reference_stream, final_stream, qc_root, reference_md5,
+                channels=channels, sample_rate=sample_rate, level=level,
+            )
+        except (OSError, ValueError, ProcessFailure, remux.RemuxError):
+            # The track still differs; only the explanation could not be had.
+            return different
+
+    def _remux_judge_silent_tail(
+        self,
+        paths: JobPaths,
+        label: str,
+        reference_stream: str,
+        final_stream: str,
+        qc_root: Path,
+        reference_md5: str,
+        *,
+        channels: int,
+        sample_rate: int,
+        level: Callable[..., tuple[int, float | None]],
+    ) -> tuple[bool, str, int]:
+        reference_total, _peak = level(paths.reference, reference_stream, "reference")
+        reference_samples = reference_total // channels
+        shared = qc_root / f"{label}.final.shared.md5"
+        self._runner(paths).run(
+            remux.decoded_md5_command(paths.muxed_output, final_stream, end_sample=reference_samples),
+            cwd=qc_root,
+            stdout_path=shared,
+            stderr_path=shared.with_suffix(".log"),
+        )
+        shared_md5 = remux.parse_md5(shared.read_text(encoding="utf-8"))
+        tail_total, tail_peak = level(
+            paths.muxed_output, final_stream, "final-tail", start=reference_samples
+        )
+        tail_samples = tail_total // channels
+        passed, message = remux.judge_silent_tail(
+            reference_md5=reference_md5,
+            shared_md5=shared_md5,
+            tail_samples=tail_samples,
+            tail_peak_db=tail_peak,
+            sample_rate=sample_rate,
+        )
+        return passed, message, tail_samples
+
     def _remux_packets_at_joins(
         self,
         paths: JobPaths,
@@ -13086,6 +13170,19 @@ class PipelineWorker:
                     reference_md5=reference_md5,
                     final_md5=final_md5,
                     removed_at_joins=list(comparison.removed),
+                )
+                continue
+            if reference_md5 != final_md5 and kind == "audio":
+                passed, message, tail_samples = self._remux_audio_silent_tail(
+                    paths, label, reference_stream, final_stream, qc_root, reference_md5
+                )
+                check(
+                    f"{kind}:{label}",
+                    passed,
+                    f"{label}: {message}" if passed else f"{label} {message}",
+                    reference_md5=reference_md5,
+                    final_md5=final_md5,
+                    silent_tail_samples=tail_samples,
                 )
                 continue
             check(

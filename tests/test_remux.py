@@ -15,6 +15,7 @@ from bdencode.media.bluray import (
     VideoCodec,
     VideoProperties,
 )
+from bdencode import remux
 from bdencode.remux import (
     decoded_md5_command,
     RemuxError,
@@ -498,3 +499,69 @@ def test_the_hash_of_a_track_does_not_depend_on_its_timestamps() -> None:
     assert "-xerror" in command
     assert command[command.index("-af") + 1] == "asetpts=N/SR/TB"
     assert "-af" not in decoded_md5_command("r.mkv", "v:0")
+
+
+def test_a_track_that_runs_on_in_digital_silence_after_the_disc_is_explained() -> None:
+    """The Last Whale Singer (2025, German disc): eac3to kept 0.81 s of
+    silence past the playlist's end; every sample before it was the disc's."""
+
+    ok, message = remux.judge_silent_tail(
+        reference_md5="a" * 32, shared_md5="a" * 32, tail_samples=38_912, tail_peak_db=-91.0, sample_rate=48_000,
+    )
+    assert ok and "811 ms of digital silence" in message
+
+    assert remux.judge_silent_tail(
+        reference_md5="a" * 32, shared_md5="b" * 32, tail_samples=38_912, tail_peak_db=-91.0, sample_rate=48_000,
+    ) == (False, "decodes differently from the disc")
+    loud, why = remux.judge_silent_tail(
+        reference_md5="a" * 32, shared_md5="a" * 32, tail_samples=38_912, tail_peak_db=-40.0, sample_rate=48_000,
+    )
+    assert not loud and "with sound" in why
+    long_tail, why = remux.judge_silent_tail(
+        reference_md5="a" * 32, shared_md5="a" * 32, tail_samples=3 * 48_000, tail_peak_db=-91.0, sample_rate=48_000,
+    )
+    assert not long_tail and "runs on 3.000 s" in why
+    nothing, _ = remux.judge_silent_tail(
+        reference_md5="a" * 32, shared_md5="a" * 32, tail_samples=0, tail_peak_db=None, sample_rate=48_000,
+    )
+    assert not nothing
+
+
+def test_volumedetect_output_gives_samples_and_peak() -> None:
+    text = "[Parsed_volumedetect_2 @ 0x1] n_samples: 233472\n[Parsed_volumedetect_2 @ 0x1] mean_volume: -91.0 dB\n[Parsed_volumedetect_2 @ 0x1] max_volume: -91.0 dB\n"
+    assert remux.parse_audio_level(text) == (233_472, -91.0)
+    assert remux.parse_audio_level("") == (0, None)
+    command = remux.decoded_md5_command("final.mkv", "a:0", end_sample=262_474_240)
+    assert command[command.index("-af") + 1] == "asetpts=N/SR/TB,atrim=end_sample=262474240"
+    level = remux.audio_level_command("final.mkv", "a:0", start_sample=5)
+    assert level[level.index("-af") + 1] == "asetpts=N/SR/TB,atrim=start_sample=5,volumedetect"
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs a real ffmpeg")
+def test_real_ffmpeg_tells_a_silent_tail_from_the_shared_part(tmp_path) -> None:
+    import subprocess
+
+    reference = tmp_path / "reference.mkv"
+    final = tmp_path / "final.mkv"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1:sample_rate=48000",
+         "-c:a", "flac", "-y", str(reference)],
+        check=True,
+    )
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(reference), "-af", "apad=pad_len=24000",
+         "-c:a", "flac", "-y", str(final)],
+        check=True,
+    )
+
+    def run(command: list[str]) -> str:
+        completed = subprocess.run(command, capture_output=True, text=True, check=True)
+        return completed.stdout + completed.stderr
+
+    total, _ = remux.parse_audio_level(run(remux.audio_level_command(reference, "a:0")))
+    assert total == 48_000
+    full = remux.parse_md5(run(remux.decoded_md5_command(reference, "a:0")))
+    shared = remux.parse_md5(run(remux.decoded_md5_command(final, "a:0", end_sample=total)))
+    assert shared == full != remux.parse_md5(run(remux.decoded_md5_command(final, "a:0")))
+    tail, peak = remux.parse_audio_level(run(remux.audio_level_command(final, "a:0", start_sample=total)))
+    assert tail == 24_000 and peak is not None and peak <= remux.SILENT_TAIL_MAX_DB
