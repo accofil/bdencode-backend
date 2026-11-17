@@ -444,6 +444,7 @@ class BluRayScanner:
         self.probe_workers = max(1, probe_workers)
         self.languages = LanguageResolver()
         self._hdr_static_cache: dict[Path, HdrStaticMetadata] = {}
+        self._pcm_bit_depth_cache: dict[tuple[Path, int], int | None] = {}
 
     def scan(
         self,
@@ -481,6 +482,7 @@ class BluRayScanner:
                         probe,
                         metadata,
                     )
+                    probe = self._with_pcm_bluray_bit_depth(root, probe, metadata)
                 return self._playlist_from_payload(playlist_id, probe or {}, metadata)
 
             # ``map`` keeps the playlist order, whatever order the probes finish in.
@@ -845,6 +847,97 @@ class BluRayScanner:
         self._hdr_static_cache[clip] = result
         return result
 
+    def _with_pcm_bluray_bit_depth(
+        self,
+        root: Path,
+        probe: Mapping[str, Any],
+        native: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Fill in a Blu-ray LPCM stream's bit depth from its own header.
+
+        FFmpeg 5.1's ffprobe (Debian 12) reports ``bits_per_sample=0`` and no
+        ``bits_per_raw_sample`` for ``pcm_bluray``.  The depth is in the 4-byte
+        header that starts every LPCM packet, so the first packet of the
+        stream's PID is read from the playlist's own clips.
+        """
+
+        raw_streams = probe.get("streams", ())
+        if not isinstance(raw_streams, (list, tuple)):
+            return probe
+        missing: dict[int, int] = {}
+        for index, item in enumerate(raw_streams):
+            if not isinstance(item, Mapping):
+                continue
+            if str(item.get("codec_name", "")).casefold() != "pcm_bluray":
+                continue
+            if _stream_bit_depth(item, {}) is not None:
+                continue
+            pid = _parse_pid(item.get("id", item.get("pid")))
+            if pid is not None:
+                missing[index] = pid
+        if not missing:
+            return probe
+        clips = _playlist_clip_paths(root, native)
+        enriched_streams = list(raw_streams)
+        changed = False
+        for index, pid in missing.items():
+            for clip in clips:
+                depth = self._probe_clip_pcm_bluray_bit_depth(clip, pid)
+                if depth is not None:
+                    enriched = dict(enriched_streams[index])
+                    enriched["bits_per_raw_sample"] = depth
+                    enriched_streams[index] = enriched
+                    changed = True
+                    break
+        if not changed:
+            return probe
+        enriched_probe = dict(probe)
+        enriched_probe["streams"] = enriched_streams
+        return enriched_probe
+
+    def _probe_clip_pcm_bluray_bit_depth(self, clip: Path, pid: int) -> int | None:
+        key = (clip, pid)
+        if key in self._pcm_bit_depth_cache:
+            return self._pcm_bit_depth_cache[key]
+        depth: int | None = None
+        ffprobe = self.capabilities.ffprobe
+        if ffprobe:
+            try:
+                completed = self.runner.capture(
+                    [
+                        ffprobe,
+                        "-v",
+                        "error",
+                        "-select_streams",
+                        f"i:{pid}",
+                        "-read_intervals",
+                        "%+#1",
+                        "-show_packets",
+                        "-show_data",
+                        "-show_entries",
+                        "packet=data",
+                        "-of",
+                        "json",
+                        os.fspath(clip),
+                    ],
+                    timeout=90,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                completed = None
+            if completed is not None and getattr(completed, "returncode", 1) == 0:
+                payload = _json_object(getattr(completed, "stdout", ""))
+                packets = payload.get("packets", ())
+                if isinstance(packets, (list, tuple)):
+                    for packet in packets:
+                        if isinstance(packet, Mapping):
+                            depth = pcm_bluray_header_bit_depth(
+                                _hexdump_bytes(str(packet.get("data", "")), 4)
+                            )
+                            break
+        self._pcm_bit_depth_cache[key] = depth
+        return depth
+
     def _fallback_largest_clip(self, root: Path) -> PlaylistCandidate | None:
         clips = sorted(
             (root / "BDMV" / "STREAM").glob("*.m2ts"),
@@ -911,6 +1004,7 @@ class BluRayScanner:
         }
         if payload:
             payload = self._with_hdr_static_metadata(root, payload, metadata)
+            payload = self._with_pcm_bluray_bit_depth(root, payload, metadata)
         return self._playlist_from_payload("00000", payload, metadata)
 
     def _playlist_from_payload(
@@ -1039,13 +1133,7 @@ class BluRayScanner:
                 item.get("channel_layout", native.get("channel_layout"))
             ),
             sample_rate=_int(item.get("sample_rate", native.get("sample_rate")), None),
-            bit_depth=_int(
-                item.get(
-                    "bits_per_raw_sample",
-                    item.get("bits_per_sample", native.get("bit_depth")),
-                ),
-                None,
-            ),
+            bit_depth=_stream_bit_depth(item, native),
             default=bool(disposition.get("default", native.get("default", False))),
             forced=forced,
             roles=roles,
@@ -1129,6 +1217,77 @@ class BluRayScanner:
             for item in playlists
         ]
 
+
+
+# Bits 7-6 of the LPCM header's fourth byte (FFmpeg's pcm-bluray.c).
+_PCM_BLURAY_BITS = {1: 16, 2: 20, 3: 24}
+
+
+def pcm_bluray_header_bit_depth(header: bytes) -> int | None:
+    """The sample depth a Blu-ray LPCM packet header declares, or None."""
+
+    if len(header) < 4:
+        return None
+    return _PCM_BLURAY_BITS.get((header[3] >> 6) & 3)
+
+
+def _hexdump_bytes(text: str, count: int) -> bytes:
+    """The first ``count`` bytes of an ffprobe ``-show_data`` hex dump."""
+
+    collected = bytearray()
+    for line in text.splitlines():
+        _offset, separator, rest = line.partition(": ")
+        if not separator:
+            continue
+        # "0000 0000 ...  ascii": the hex part ends at the double space.
+        for group in rest.split("  ", 1)[0].split():
+            try:
+                collected.extend(bytes.fromhex(group))
+            except ValueError:
+                return bytes(collected[:count])
+            if len(collected) >= count:
+                return bytes(collected[:count])
+    return bytes(collected[:count])
+
+
+def _stream_bit_depth(item: Mapping[str, Any], native: Mapping[str, Any]) -> int | None:
+    """The first positive depth the probe or the native scan reports; ffprobe
+    writes 0 when it does not know."""
+
+    for value in (
+        item.get("bits_per_raw_sample"),
+        item.get("bits_per_sample"),
+        native.get("bit_depth"),
+    ):
+        depth = _int(value, None)
+        if depth is not None and depth > 0:
+            return depth
+    return None
+
+
+def _playlist_clip_paths(root: Path, native: Mapping[str, Any]) -> list[Path]:
+    """The playlist's clip files, the one with the most running time first."""
+
+    ordered: list[Path] = []
+    representative = _representative_clip_path(root, native)
+    if representative is not None:
+        ordered.append(representative)
+    segments = native.get("segments", ())
+    if isinstance(segments, (list, tuple)):
+        stream_directory = root / "BDMV" / "STREAM"
+        for segment in segments:
+            if not isinstance(segment, Mapping):
+                continue
+            clip_id = Path(str(segment.get("clip_id", segment.get("clip")) or "")).stem
+            if not clip_id.isdigit() or len(clip_id) > 5:
+                continue
+            for name in (f"{clip_id.zfill(5)}.m2ts", f"{clip_id.zfill(5)}.M2TS"):
+                candidate = stream_directory / name
+                if candidate.is_file():
+                    if candidate not in ordered:
+                        ordered.append(candidate)
+                    break
+    return ordered
 
 
 def _representative_clip_path(
