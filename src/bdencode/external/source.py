@@ -304,14 +304,38 @@ def input_arguments(info_kind: str, path: Path, vobs: Sequence[Path] = ()) -> li
     return ["-f", "mpeg", "-probesize", "200M", "-analyzeduration", "200M", "-i", f"concat:{joined}"]
 
 
-def signature_command(input_args: Sequence[str], output: Path, *, ffmpeg: str = "ffmpeg") -> list[str]:
-    """Every decoded picture as a tiny grey frame; frame numbers are what the map counts."""
+def held_frames_source(info: SourceInfo) -> bool:
+    """An AVI marks a held picture with an empty frame, which FFmpeg decodes to nothing.
 
+    "Érzelmek hullámain.avi": frames 1-132 empty, so every decoded frame number
+    was 132 short of its time and the fitted audio ran 5.5 s late.
+    """
+
+    return info.kind == KIND_FILE and Path(info.path).suffix.casefold() == ".avi"
+
+
+def signature_command(
+    input_args: Sequence[str],
+    output: Path,
+    *,
+    constant_fps: Fraction | None = None,
+    ffmpeg: str = "ffmpeg",
+) -> list[str]:
+    """Every picture as a tiny grey frame; frame numbers are what the map counts.
+
+    With ``constant_fps`` a held picture is repeated, so frame n is at n / fps.
+    """
+
+    timing = (
+        ["-fps_mode", "cfr", "-r", str(constant_fps)]
+        if constant_fps is not None
+        else ["-fps_mode", "passthrough"]
+    )
     return [
         ffmpeg, "-hide_banner", "-nostdin", "-v", "error",
         *input_args,
         "-map", "0:v:0", "-an", "-sn", "-dn",
-        "-fps_mode", "passthrough",
+        *timing,
         "-vf", f"scale={SIGNATURE_WIDTH}:{SIGNATURE_HEIGHT}:flags=area,format=gray",
         "-f", "rawvideo", "-y", str(output),
     ]

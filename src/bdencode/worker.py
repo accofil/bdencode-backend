@@ -11162,11 +11162,18 @@ class PipelineWorker:
         donor_fps = Fraction(info.fps)
         signature = directory / "source.gray"
         marker = paths.stages / f"external-{source.id}-signature.json"
-        inputs = {"schema_version": 1, **identity}
+        constant_fps = donor_fps if external_source.held_frames_source(info) else None
+        inputs = {
+            "schema_version": 1,
+            **identity,
+            **({"constant_fps": str(constant_fps)} if constant_fps is not None else {}),
+        }
         if not _valid_stage(marker, inputs, [signature]):
             with self._step(paths, "external-source", ("A külső forrás képének lenyomata", "Fingerprinting the external picture")):
                 self._runner(paths).run(
-                    external_source.signature_command(input_args, signature),
+                    external_source.signature_command(
+                        input_args, signature, constant_fps=constant_fps
+                    ),
                     cwd=directory,
                     stderr_path=paths.logs / f"external-{source.id}-signature.log",
                 )
