@@ -373,6 +373,30 @@ def test_decimal_frame_rates_mean_the_usual_exact_ones() -> None:
     assert source.exact_fps("nonsense") is None
 
 
+def _info(kind: str, path: str) -> source.SourceInfo:
+    return source.SourceInfo(
+        kind=kind, path=path, fps="25", duration_seconds=1.0, width=720, height=576, tracks=()
+    )
+
+
+def test_an_avi_is_fingerprinted_on_its_own_clock() -> None:
+    """Érzelmek hullámain.avi: frames 1-132 were empty (a held picture); decoded
+    as they came, every frame number was 132 short and the audio ran 5.5 s late."""
+
+    assert source.held_frames_source(_info(source.KIND_FILE, "/v/Érzelmek hullámain.AVI"))
+    assert not source.held_frames_source(_info(source.KIND_FILE, "/v/film.mkv"))
+    assert not source.held_frames_source(_info(source.KIND_DVD_FOLDER, "/v/VIDEO_TS"))
+
+    held = source.signature_command(["-i", "a.avi"], Path("s.gray"), constant_fps=Fraction(25))
+    assert held[held.index("-fps_mode") + 1] == "cfr"
+    assert held[held.index("-r") + 1] == "25"
+    assert held.index("-r") > held.index("-i")
+
+    plain = source.signature_command(["-i", "a.mkv"], Path("s.gray"))
+    assert plain[plain.index("-fps_mode") + 1] == "passthrough"
+    assert "-r" not in plain
+
+
 GOOD = {
     "id": "e1",
     "path": "/x/y.iso",
